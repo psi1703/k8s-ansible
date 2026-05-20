@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.installer-venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env / secrets
+.env
+.env.*
+*.local
+admin_auth.json
+admin_config.json
+
+# Runtime data
+data/
+audit.log
+users.xlsx
+wizard_progress.json
+
+# Generated / temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+.DS_Store
+
+# Logs
+*.log
+
+# Ansible local retry files
+*.retry
+
+# Kubernetes generated output
+.generated/
+rendered/
+dist/
+
+# IDE
+.vscode/
+.idea/
