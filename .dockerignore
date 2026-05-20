@@ -1,0 +1,44 @@
+# Git metadata
+.git
+.gitignore
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.installer-venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node dependencies / logs
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env / secrets
+.env
+.env.*
+*.local
+admin_auth.json
+admin_config.json
+
+# Runtime data - must come from PVC, not image
+data/
+audit.log
+users.xlsx
+wizard_progress.json
+
+# Local/generated/temp files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+.DS_Store
+
+# Docs/dev-only automation if not needed in runtime image
+automation/
+*.retry
