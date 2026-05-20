@@ -1,0 +1,6 @@
+---
+- name: Prepare all Debian or Ubuntu headless VMs
+  hosts: all
+  become: true
+  roles:
+    - common

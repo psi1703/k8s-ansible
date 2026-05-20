@@ -1,0 +1,6 @@
+---
+- name: Join K3s workers
+  hosts: workers
+  become: true
+  roles:
+    - k3s_agent

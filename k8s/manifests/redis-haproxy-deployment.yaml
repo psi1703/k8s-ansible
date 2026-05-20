@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otp-redis-haproxy
+  namespace: otp-relay
+  labels:
+    app: otp-redis-haproxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otp-redis-haproxy
+  template:
+    metadata:
+      labels:
+        app: otp-redis-haproxy
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - otp-redis-haproxy
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: otp-redis-haproxy
+      containers:
+        - name: haproxy
+          image: haproxy:2.9-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+              name: redis
+          env:
+            - name: HAPROXY_CONFIG_VERSION
+              value: "2026-05-13-redis-node-spread"
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          volumeMounts:
+            - name: haproxy-config
+              mountPath: /usr/local/etc/haproxy
+      volumes:
+        - name: haproxy-config
+          configMap:
+            name: otp-redis-haproxy-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otp-redis-haproxy
+  namespace: otp-relay
+  labels:
+    app: otp-redis-haproxy
+spec:
+  type: ClusterIP
+  selector:
+    app: otp-redis-haproxy
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP

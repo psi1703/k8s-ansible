@@ -1,0 +1,14 @@
+---
+- name: Label control-plane for Redis eligibility
+  ansible.builtin.command: kubectl label node {{ item }} otp-relay/redis-node=true --overwrite
+  changed_when: false
+  loop: "{{ groups['control_plane'] }}"
+
+- name: Label workers for app scheduling
+  ansible.builtin.command: kubectl label node {{ item }} otp-relay/app-node=true otp-relay/redis-node=true --overwrite
+  changed_when: false
+  loop: "{{ groups['workers'] }}"
+
+- name: Label monitor node when selected
+  ansible.builtin.command: kubectl label node {{ monitor_node | default(groups['workers'][0]) }} otp-relay/monitor-node=true --overwrite
+  changed_when: false

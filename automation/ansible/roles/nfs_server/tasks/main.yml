@@ -1,0 +1,37 @@
+---
+- name: Install NFS server packages
+  ansible.builtin.apt:
+    name: nfs-kernel-server
+    state: present
+    update_cache: true
+
+- name: Create OTP Relay NFS export directory
+  ansible.builtin.file:
+    path: "{{ nfs_export_path }}"
+    state: directory
+    owner: '1000'
+    group: '1000'
+    mode: '0770'
+
+- name: Configure OTP Relay NFS export
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    regexp: '^{{ nfs_export_path | regex_escape }}\s+'
+    line: '{{ nfs_export_path }} {{ nfs_allowed_cidr }}(rw,sync,no_subtree_check,no_root_squash)'
+    create: true
+    mode: '0644'
+  notify: Reload NFS exports
+
+- name: Ensure NFS server is enabled and running
+  ansible.builtin.service:
+    name: nfs-server
+    state: started
+    enabled: true
+
+- name: Reload NFS exports immediately
+  ansible.builtin.command: exportfs -ra
+  changed_when: false
+
+- name: Show active NFS exports
+  ansible.builtin.command: exportfs -v
+  changed_when: false

@@ -1,0 +1,966 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otp-relay-live-dashboard
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+data:
+  otp-relay-live.json: |
+    {
+      "id": null,
+      "uid": "otp-relay-live",
+      "title": "📱 OTP Relay — Live",
+      "tags": [],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "15s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "annotations": {
+        "list": [
+          {
+            "name": "Annotations & Alerts",
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "type": "dashboard",
+            "builtIn": 1,
+            "datasource": "-- Grafana --"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "📱 iPhone",
+          "type": "stat",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max(otp_iphone_present)",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "LOST",
+                      "color": "#ef4444",
+                      "index": 1
+                    },
+                    "1": {
+                      "text": "OK",
+                      "color": "#10b981",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#ef4444"
+                  },
+                  {
+                    "value": 0.5,
+                    "color": "#10b981"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background_solid",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "valueSize": 90
+            },
+            "textMode": "value",
+            "wideLayout": true
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Live ARP presence of the shared SMS phone. 1 = present, 0 = absent.",
+          "links": []
+        },
+        {
+          "id": 2,
+          "title": "🚪 Portal",
+          "type": "stat",
+          "gridPos": {
+            "x": 4,
+            "y": 0,
+            "w": 5,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max(up{job=\"otp-relay\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "#ef4444",
+                      "index": 1
+                    },
+                    "1": {
+                      "text": "ONLINE",
+                      "color": "#10b981",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#ef4444"
+                  },
+                  {
+                    "value": 0.5,
+                    "color": "#10b981"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background_solid",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "value",
+            "wideLayout": true,
+            "text": {
+              "valueSize": 90
+            }
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Whether the OTP relay app is responding to Prometheus scrapes.",
+          "links": []
+        },
+        {
+          "id": 3,
+          "title": "📥 Queue",
+          "type": "stat",
+          "gridPos": {
+            "x": 9,
+            "y": 0,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max(otp_queue_depth)",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#10b981"
+                  },
+                  {
+                    "value": 1,
+                    "color": "blue"
+                  },
+                  {
+                    "value": 5,
+                    "color": "#ef4444"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Number of users currently waiting for their OTP.",
+          "links": []
+        },
+        {
+          "id": 4,
+          "title": "👤 Active user",
+          "type": "stat",
+          "gridPos": {
+            "x": 13,
+            "y": 0,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max(otp_active_user)",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "IDLE",
+                      "color": "#6b7280",
+                      "index": 1
+                    },
+                    "1": {
+                      "text": "IN USE",
+                      "color": "#3b82f6",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#6b7280"
+                  },
+                  {
+                    "value": 0.5,
+                    "color": "#3b82f6"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Whether the active OTP slot is currently held by a user.",
+          "links": []
+        },
+        {
+          "id": 5,
+          "title": "✉️ Delivered today",
+          "type": "stat",
+          "gridPos": {
+            "x": 17,
+            "y": 0,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(increase(otp_delivered_total[24h]))",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#10b981"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "OTPs successfully delivered in the last 24 hours.",
+          "links": []
+        },
+        {
+          "id": 6,
+          "title": "👁️ Monitor",
+          "type": "stat",
+          "gridPos": {
+            "x": 0,
+            "y": 6,
+            "w": 5,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max(up{job=\"otp-monitor\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "#ef4444",
+                      "index": 1
+                    },
+                    "1": {
+                      "text": "RUNNING",
+                      "color": "#10b981",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#ef4444"
+                  },
+                  {
+                    "value": 0.5,
+                    "color": "#10b981"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background_solid",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true,
+            "text": {
+              "valueSize": 90
+            }
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Whether the iPhone-watching monitor pod is responding to Prometheus scrapes.",
+          "links": []
+        },
+        {
+          "id": 7,
+          "title": "🎛️ Nodes",
+          "type": "stat",
+          "gridPos": {
+            "x": 5,
+            "y": 6,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "count(kube_node_status_condition{condition=\"Ready\",status=\"true\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#ef4444"
+                  },
+                  {
+                    "value": 2,
+                    "color": "orange"
+                  },
+                  {
+                    "value": 3,
+                    "color": "#10b981"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "none",
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background_solid",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true,
+            "text": {
+              "valueSize": 90
+            }
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Number of cluster nodes currently in Ready state.",
+          "links": []
+        },
+        {
+          "id": 8,
+          "title": "📊 Prometheus",
+          "type": "stat",
+          "gridPos": {
+            "x": 9,
+            "y": 6,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max(up{job=\"kube-prometheus-stack-prometheus\"})",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "#ef4444",
+                      "index": 1
+                    },
+                    "1": {
+                      "text": "UP",
+                      "color": "#10b981",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#ef4444"
+                  },
+                  {
+                    "value": 0.5,
+                    "color": "#10b981"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background_solid",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true,
+            "text": {
+              "valueSize": 90
+            }
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Whether Prometheus itself is responding. If this is DOWN, nothing else on this dashboard is trustworthy.",
+          "links": []
+        },
+        {
+          "id": 9,
+          "title": "⏰ Last ARP",
+          "type": "stat",
+          "gridPos": {
+            "x": 13,
+            "y": 6,
+            "w": 4,
+            "h": 6
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "clamp_min(time() - max(otp_monitor_arp_last_success_timestamp_seconds > 0), 0)",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": null,
+                    "color": "#10b981"
+                  },
+                  {
+                    "value": 90,
+                    "color": "orange"
+                  },
+                  {
+                    "value": 300,
+                    "color": "#ef4444"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "Seconds since the monitor's last successful ARP probe of the iPhone. Updated every PHONE_PING_INTERVAL seconds (currently 60).",
+          "links": []
+        },
+        {
+          "id": 10,
+          "title": "Activity over 24h",
+          "type": "timeseries",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 21,
+            "h": 8
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(increase(otp_delivered_total[5m]))",
+              "legendFormat": "OTPs delivered (per hour bucket)",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            },
+            {
+              "editorMode": "code",
+              "expr": "sum(increase(otp_claims_total[5m]))",
+              "instant": false,
+              "legendFormat": "Claims (per hour bucket)",
+              "range": true,
+              "refId": "B",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": 0,
+                    "color": "green"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 19,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "annotations": {
+              "clustering": -1,
+              "multiLane": false
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "",
+          "links": []
+        },
+        {
+          "id": 11,
+          "title": "iPhone absences over 24h",
+          "type": "timeseries",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 21,
+            "h": 8
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(increase(otp_iphone_absence_events_total[5m]))",
+              "legendFormat": "Absence event happened in this 5-minute bucket.",
+              "range": true,
+              "refId": "A",
+              "datasource": {
+                "name": "prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": 0,
+                    "color": "green"
+                  },
+                  {
+                    "value": 80,
+                    "color": "red"
+                  }
+                ]
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "annotations": {
+              "clustering": -1,
+              "multiLane": false
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "datasource": {
+            "name": "prometheus"
+          },
+          "description": "",
+          "links": []
+        }
+      ],
+      "editable": true,
+      "graphTooltip": 0,
+      "fiscalYearStartMonth": 0,
+      "description": "Live status of the OTP relay portal, the iPhone, and the cluster components that hold it all together.",
+      "links": []
+    }

@@ -1,0 +1,23 @@
+---
+- name: Validate NFS export visibility from K3s nodes
+  hosts: k3s_cluster
+  become: true
+  tasks:
+    - name: Check exported NFS path
+      ansible.builtin.command: showmount -e {{ nfs_server_ip }}
+      changed_when: false
+
+    - name: Create temporary NFS mount point
+      ansible.builtin.file:
+        path: /mnt/otp-relay-nfs-test
+        state: directory
+        mode: '0755'
+
+    - name: Test NFS mount
+      ansible.builtin.command: mount -t nfs {{ nfs_server_ip }}:{{ nfs_export_path }} /mnt/otp-relay-nfs-test
+      changed_when: false
+
+    - name: Unmount NFS test path
+      ansible.builtin.command: umount /mnt/otp-relay-nfs-test
+      changed_when: false
+      failed_when: false

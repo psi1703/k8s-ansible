@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otp-monitor
+  namespace: otp-relay
+  labels:
+    app: otp-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otp-monitor
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: otp-monitor
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+
+      containers:
+        - name: monitor
+          image: otp-monitor:latest
+          imagePullPolicy: IfNotPresent
+
+          envFrom:
+            - configMapRef:
+                name: otp-relay-config
+
+          env:
+            - name: OTP_RELAY_DATA_DIR
+              value: /app/data
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: otp-relay-secrets
+                  key: TELEGRAM_BOT_TOKEN
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: otp-relay-secrets
+                  key: TELEGRAM_CHAT_ID
+
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_RAW
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: otp-relay-data

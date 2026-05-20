@@ -1,0 +1,26 @@
+---
+- name: Check if K3s server is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_bin
+
+- name: Install K3s server
+  ansible.builtin.shell: |
+    set -eu
+    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --write-kubeconfig-mode 644{% if k3s_disable_servicelb | bool %} --disable servicelb{% endif %}{% if k3s_disable_traefik | bool %} --disable traefik{% endif %}" sh -
+  args:
+    executable: /bin/bash
+  when: not k3s_bin.stat.exists
+
+- name: Wait for K3s node readiness
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=120s
+  changed_when: false
+
+- name: Read K3s node token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token_raw
+
+- name: Publish K3s join token
+  ansible.builtin.set_fact:
+    k3s_join_token: "{{ k3s_token_raw.content | b64decode | trim }}"

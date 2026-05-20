@@ -1,0 +1,135 @@
+# Helm values for kube-prometheus-stack
+#
+# Installs:
+# - Prometheus
+# - Alertmanager
+# - Grafana
+# - kube-state-metrics
+# - node-exporter
+#
+# Namespace: observability
+# Chart: prometheus-community/kube-prometheus-stack
+# Version used with SCH setup: 85.0.1
+#
+# Target cluster:
+# - observability/role=ui   -> otp-worker-1
+# - observability/role=data -> otp-worker-2
+
+prometheus:
+  prometheusSpec:
+    retention: 15d
+    retentionSize: "9GiB"
+
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 200m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+
+    nodeSelector:
+      observability/role: data
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    # Allow ServiceMonitors outside the Helm release labels,
+    # including otp-relay and otp-monitor ServiceMonitors.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        memory: 64Mi
+        cpu: 20m
+      limits:
+        memory: 128Mi
+        cpu: 100m
+
+    nodeSelector:
+      observability/role: ui
+
+grafana:
+  ingress:
+    enabled: false
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+  readinessProbe:
+    initialDelaySeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  initChownData:
+    enabled: false
+
+  deploymentStrategy:
+    type: Recreate
+
+  nodeSelector:
+    observability/role: ui
+
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    accessModes: ["ReadWriteOnce"]
+    size: 1Gi
+
+kube-state-metrics:
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 20m
+    limits:
+      memory: 128Mi
+      cpu: 100m
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      memory: 32Mi
+      cpu: 10m
+    limits:
+      memory: 64Mi
+      cpu: 50m
+
+prometheusOperator:
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 20m
+    limits:
+      memory: 128Mi
+      cpu: 100m
+
+# K3s compatibility:
+# K3s does not expose these as normal separate scrape targets.
+# Keeping them enabled causes noisy false ScrapeFailure alerts.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false

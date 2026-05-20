@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otp-relay
+  namespace: otp-relay
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: srvotptest26.init-db.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: otp-relay
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - srvotptest26.init-db.lan
+      secretName: otp-relay-tls

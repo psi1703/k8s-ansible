@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otp-redis-sentinel-config
+  namespace: otp-relay
+data:
+  sentinel-entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+
+    cat > /tmp/sentinel.conf <<EOF
+    port 26379
+    bind 0.0.0.0
+    protected-mode no
+    sentinel monitor mymaster otp-redis-0.otp-redis-headless.otp-relay.svc.cluster.local 6379 2
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 10000
+    sentinel parallel-syncs mymaster 1
+    sentinel resolve-hostnames yes
+    sentinel announce-hostnames yes
+    EOF
+
+    exec redis-sentinel /tmp/sentinel.conf

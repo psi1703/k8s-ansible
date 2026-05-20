@@ -1,0 +1,6 @@
+---
+- name: Deploy OTP Relay from the control-plane
+  hosts: control_plane
+  become: true
+  roles:
+    - otp_relay_deploy

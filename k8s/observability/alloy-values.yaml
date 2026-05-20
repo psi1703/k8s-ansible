@@ -1,0 +1,113 @@
+# Helm values for Grafana Alloy log shipping
+#
+# Chart: grafana/alloy
+# Version used with SCH setup: 1.8.1
+#
+# Purpose:
+# - Run one Alloy pod per Kubernetes node.
+# - Read Kubernetes pod logs through the Kubernetes API.
+# - Ship logs to Loki inside the observability namespace.
+#
+# This keeps observability separate from the OTP Relay application manifests.
+#
+# Target cluster:
+# - debian
+# - otp-worker-1
+# - otp-worker-2
+
+controller:
+  type: daemonset
+
+  # Collect logs from every node, including the K3s control-plane node if tainted.
+  tolerations:
+    - operator: Exists
+      effect: NoSchedule
+
+alloy:
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 20m
+    limits:
+      memory: 128Mi
+      cpu: 100m
+
+  # Do not mount /var/log from the host.
+  # We use Kubernetes API log collection instead.
+  mounts:
+    varlog: false
+
+  clustering:
+    enabled: false
+
+  stabilityLevel: generally-available
+
+  configMap:
+    create: true
+    content: |-
+      // Discover pods through the Kubernetes API.
+      // Each Alloy pod only collects logs for pods on its own node.
+      discovery.kubernetes "pods" {
+        role = "pod"
+
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + sys.env("HOSTNAME")
+        }
+      }
+
+      // Keep useful Kubernetes labels in Loki.
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          target_label  = "node"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      // Read pod logs through the Kubernetes API.
+      loki.source.kubernetes "pod_logs" {
+        targets    = discovery.relabel.pod_logs.output
+        forward_to = [loki.write.default.receiver]
+      }
+
+      // Send logs to Loki.
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.observability.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }
+
+# Use the actual Kubernetes node name for node-local filtering.
+extraEnv:
+  - name: HOSTNAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+
+serviceAccount:
+  create: true
+
+rbac:
+  create: true

@@ -1,0 +1,18 @@
+---
+- name: Show cluster nodes
+  ansible.builtin.command: kubectl get nodes -o wide
+  changed_when: false
+
+- name: Show OTP Relay pods
+  ansible.builtin.command: kubectl get pods -n {{ otp_namespace }} -o wide
+  changed_when: false
+
+- name: Show OTP Relay services and ingress
+  ansible.builtin.command: kubectl get svc,ingress -n {{ otp_namespace }}
+  changed_when: false
+  failed_when: false
+
+- name: Check app readiness endpoint from control-plane
+  ansible.builtin.command: kubectl -n {{ otp_namespace }} exec deploy/otp-relay -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
+  changed_when: false
+  failed_when: false

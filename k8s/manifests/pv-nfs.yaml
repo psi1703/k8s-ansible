@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: otp-relay-data-nfs-pv
+  labels:
+    app: otp-relay
+    storage-role: otp-relay-data
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: otp-relay-nfs
+  mountOptions:
+    - nfsvers=4.1
+  nfs:
+    server: 127.0.0.1
+    path: /srv/otp-relay-data

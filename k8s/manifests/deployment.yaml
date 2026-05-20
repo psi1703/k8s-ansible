@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otp-relay
+  namespace: otp-relay
+  labels:
+    app: otp-relay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otp-relay
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: otp-relay
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+
+      containers:
+        - name: app
+          image: otp-relay:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+
+          envFrom:
+            - configMapRef:
+                name: otp-relay-config
+
+          env:
+            - name: OTP_RELAY_DATA_DIR
+              value: /app/data
+            - name: REDIS_URL
+              value: redis://otp-redis-haproxy:6379/0
+            - name: REDIS_REQUIRED
+              value: "1"
+            - name: SMS_SECRET_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: otp-relay-secrets
+                  key: SMS_SECRET_TOKEN
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: otp-relay-data

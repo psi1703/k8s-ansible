@@ -1,0 +1,171 @@
+<svg width="1180" height="980" viewBox="0 0 1180 980" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>OTP Relay — Phase 2 architecture</title>
+  <desc>Phase 2 architecture showing K3s with MetalLB LoadBalancer, two app replicas, Redis shared OTP queue and pending OTP state, app PVC, Redis PVC, and remaining admin session caveat.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1 L8 5 L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+
+    <style>
+      text { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .title { font-size: 18px; font-weight: 700; fill: #111827; }
+      .subtitle { font-size: 13px; font-weight: 600; fill: #6B7280; }
+      .label { font-size: 13px; font-weight: 700; fill: #111827; }
+      .body { font-size: 12px; fill: #374151; }
+      .small { font-size: 11px; fill: #6B7280; }
+      .tiny { font-size: 10px; fill: #6B7280; }
+      .cluster-title { font-size: 13px; font-weight: 700; fill: #111827; }
+
+      .k3s { fill: #E1F5EE; stroke: #0F6E56; stroke-width: 1; }
+      .ns { fill: #EEEDFE; stroke: #534AB7; stroke-width: 1; }
+      .pod { fill: #AFA9EC; stroke: #534AB7; stroke-width: 1; }
+      .container { fill: #CECBF6; stroke: #534AB7; stroke-width: 1; }
+      .redis { fill: #FAC775; stroke: #854F0B; stroke-width: 1; }
+      .service { fill: #9FE1CB; stroke: #0F6E56; stroke-width: 1; }
+      .storage { fill: #D3D1C7; stroke: #5F5E5A; stroke-width: 1; }
+      .external { fill: #F1F1F1; stroke: #6B7280; stroke-width: 1; }
+      .note { fill: #F9FAFB; stroke: #D1D5DB; stroke-width: 1; }
+      .warn { fill: #F5C4B3; stroke: #993C1D; stroke-width: 1; }
+      .ok { fill: #E1F5EE; stroke: #0F6E56; stroke-width: 1; }
+      .flow { stroke: #6B7280; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .flow2 { stroke: #854F0B; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 7 5; }
+    </style>
+  </defs>
+
+  <!-- Title -->
+  <text class="title" x="590" y="34" text-anchor="middle">OTP Relay — Phase 2 architecture</text>
+  <text class="subtitle" x="590" y="54" text-anchor="middle">Redis-backed OTP queue and pending OTP state; scale target is two app replicas</text>
+
+  <!-- External actors -->
+  <g id="browser">
+    <circle class="external" cx="945" cy="135" r="24"/>
+    <text class="label" x="945" y="183" text-anchor="middle">User</text>
+    <text class="body" x="945" y="200" text-anchor="middle">browser</text>
+  </g>
+
+  <g id="phone">
+    <circle class="external" cx="1060" cy="135" r="24"/>
+    <text class="label" x="1060" y="183" text-anchor="middle">iPhone</text>
+    <text class="body" x="1060" y="200" text-anchor="middle">SMS shortcut</text>
+  </g>
+
+  <!-- K3s cluster -->
+  <rect class="k3s" x="35" y="105" width="780" height="805" rx="14"/>
+  <text class="cluster-title" x="425" y="132" text-anchor="middle">Bare metal K3s node / cluster — DC1</text>
+
+  <!-- MetalLB / service -->
+  <rect class="service" x="310" y="165" width="230" height="92" rx="7"/>
+  <text class="label" x="425" y="194" text-anchor="middle">Service: otp-relay</text>
+  <text class="body" x="425" y="212" text-anchor="middle">type: LoadBalancer</text>
+  <text class="body" x="425" y="230" text-anchor="middle">MetalLB external IP</text>
+  <text class="small" x="425" y="247" text-anchor="middle">Ingress disabled in Phase 2</text>
+
+  <!-- Namespace -->
+  <rect class="ns" x="65" y="305" width="720" height="570" rx="12"/>
+  <text class="cluster-title" x="425" y="332" text-anchor="middle">Namespace: otp-relay</text>
+
+  <!-- App deployment group -->
+  <rect class="pod" x="90" y="375" width="430" height="260" rx="10"/>
+  <text class="label" x="305" y="402" text-anchor="middle">Deployment: otp-relay</text>
+  <text class="small" x="305" y="420" text-anchor="middle">Phase 2 target: REPLICA_COUNT=2 after validation</text>
+
+  <rect class="container" x="115" y="450" width="175" height="115" rx="6"/>
+  <text class="label" x="202.5" y="480" text-anchor="middle">Pod A: app</text>
+  <text class="body" x="202.5" y="500" text-anchor="middle">FastAPI / uvicorn</text>
+  <text class="body" x="202.5" y="518" text-anchor="middle">port 8000</text>
+  <text class="small" x="202.5" y="540" text-anchor="middle">/claim-otp</text>
+  <text class="small" x="202.5" y="556" text-anchor="middle">/sms-received</text>
+
+  <rect class="container" x="320" y="450" width="175" height="115" rx="6"/>
+  <text class="label" x="407.5" y="480" text-anchor="middle">Pod B: app</text>
+  <text class="body" x="407.5" y="500" text-anchor="middle">FastAPI / uvicorn</text>
+  <text class="body" x="407.5" y="518" text-anchor="middle">port 8000</text>
+  <text class="small" x="407.5" y="540" text-anchor="middle">/claim-status</text>
+  <text class="small" x="407.5" y="556" text-anchor="middle">/readyz</text>
+
+  <rect class="warn" x="150" y="585" width="310" height="34" rx="6"/>
+  <text class="small" x="305" y="606" text-anchor="middle">Current blocker: admin sessions still need Redis before 2 replicas</text>
+
+  <!-- Redis -->
+  <rect class="redis" x="565" y="392" width="190" height="168" rx="8"/>
+  <text class="label" x="660" y="423" text-anchor="middle">StatefulSet: otp-redis</text>
+  <text class="body" x="660" y="445" text-anchor="middle">Redis 7</text>
+  <text class="body" x="660" y="463" text-anchor="middle">service: otp-redis:6379</text>
+  <text class="body" x="660" y="486" text-anchor="middle">shared OTP queue</text>
+  <text class="body" x="660" y="504" text-anchor="middle">pending OTPs + TTLs</text>
+  <text class="small" x="660" y="529" text-anchor="middle">REDIS_REQUIRED=1 after OTP validation</text>
+
+  <!-- Redis PVC -->
+  <path class="storage" d="M570,690 C570,678 660,678 660,678 C660,678 750,678 750,690 L750,765 C750,777 660,777 660,777 C660,777 570,777 570,765 Z"/>
+  <path d="M570,690 C570,702 660,702 660,702 C660,702 750,702 750,690" fill="none" stroke="#5F5E5A" stroke-width="1"/>
+  <text class="label" x="660" y="726" text-anchor="middle">Redis PVC</text>
+  <text class="body" x="660" y="746" text-anchor="middle">redis-data-otp-redis-0</text>
+  <text class="small" x="660" y="763" text-anchor="middle">AOF/RDB persistence</text>
+
+  <!-- App PVC -->
+  <path class="storage" d="M105,690 C105,678 230,678 230,678 C230,678 355,678 355,690 L355,787 C355,799 230,799 230,799 C230,799 105,799 105,787 Z"/>
+  <path d="M105,690 C105,702 230,702 230,702 C230,702 355,702 355,690" fill="none" stroke="#5F5E5A" stroke-width="1"/>
+  <text class="label" x="230" y="723" text-anchor="middle">App PVC</text>
+  <text class="body" x="230" y="745" text-anchor="middle">/app/data</text>
+  <text class="small" x="230" y="764" text-anchor="middle">users.xlsx, admin_config.json</text>
+  <text class="small" x="230" y="780" text-anchor="middle">wizard_progress.json, audit.log</text>
+
+  <!-- Monitor -->
+  <rect class="ok" x="385" y="700" width="145" height="78" rx="7"/>
+  <text class="label" x="457.5" y="729" text-anchor="middle">otp-monitor</text>
+  <text class="body" x="457.5" y="748" text-anchor="middle">hostNetwork</text>
+  <text class="small" x="457.5" y="765" text-anchor="middle">phone presence alerts</text>
+
+  <!-- External SMTP -->
+  <rect class="external" x="870" y="590" width="185" height="78" rx="7"/>
+  <text class="label" x="962.5" y="621" text-anchor="middle">Exchange SMTP</text>
+  <text class="body" x="962.5" y="641" text-anchor="middle">diagnostics only</text>
+  <text class="small" x="962.5" y="658" text-anchor="middle">OTP displayed on-screen</text>
+
+  <!-- Notes -->
+  <path class="note" d="M850,735 L1115,735 L1115,848 L850,848 Z"/>
+  <text class="label" x="982.5" y="763" text-anchor="middle">Phase 2 completion gate</text>
+  <text class="small" x="870" y="788">1. Manager OTP trigger test passes</text>
+  <text class="small" x="870" y="806">2. Pending OTP survives app restart</text>
+  <text class="small" x="870" y="824">3. Admin sessions move to Redis</text>
+  <text class="small" x="870" y="842">4. REPLICA_COUNT=2 validated</text>
+
+  <!-- Flows -->
+  <path class="flow" d="M920,150 C790,150 680,195 546,211"/>
+  <text class="small" x="720" y="160">HTTP :80</text>
+
+  <path class="flow" d="M1038,150 C875,165 706,198 546,218"/>
+  <text class="small" x="790" y="198">HTTP + X-Secret-Token</text>
+
+  <path class="flow" d="M425,257 C375,305 310,355 230,443"/>
+  <text class="small" x="298" y="335">load-balanced</text>
+
+  <path class="flow" d="M428,257 C460,314 426,380 410,443"/>
+  <text class="small" x="438" y="357">any pod</text>
+
+  <path class="flow2" d="M290,505 C400,496 480,486 558,476"/>
+  <text class="small" x="392" y="475">queue / pending OTP</text>
+
+  <path class="flow2" d="M495,505 C520,500 540,493 558,486"/>
+  <text class="small" x="508" y="524">shared state</text>
+
+  <path class="flow" d="M230,565 C230,600 230,640 230,675"/>
+  <text class="small" x="243" y="635">file data</text>
+
+  <path class="flow" d="M660,560 C660,598 660,638 660,675"/>
+  <text class="small" x="675" y="627">persistent Redis</text>
+
+  <path class="flow dashed" d="M245,565 C310,620 380,665 430,694"/>
+  <text class="small" x="305" y="654">audit tail</text>
+
+  <path class="flow dashed" d="M408,565 C545,625 721,625 865,629"/>
+  <text class="small" x="635" y="614">test email only</text>
+
+  <!-- Legend -->
+  <rect class="note" x="65" y="925" width="1050" height="36" rx="6"/>
+  <text class="small" x="590" y="948" text-anchor="middle">
+    Phase 2 target: Redis removes OTP queue/pending-OTP pod affinity. Admin session migration is the last blocker before safe two-replica operation.
+  </text>
+</svg>

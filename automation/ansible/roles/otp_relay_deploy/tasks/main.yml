@@ -1,0 +1,33 @@
+---
+- name: Clone or update OTP Relay repository
+  ansible.builtin.git:
+    repo: "{{ otp_repo_url }}"
+    dest: "{{ otp_install_dir }}"
+    version: "{{ otp_repo_ref }}"
+    force: true
+
+- name: Deploy OTP Relay through the project installer
+  ansible.builtin.shell: |
+    set -eu
+    cd "{{ otp_install_dir }}"
+    REPO_URL="{{ otp_repo_url }}" \
+    REPO_REF="{{ otp_repo_ref }}" \
+    INSTALL_DIR="{{ otp_install_dir }}" \
+    NAMESPACE="{{ otp_namespace }}" \
+    SERVICE_TYPE="{{ service_type }}" \
+    INGRESS_ENABLED="{{ 1 if ingress_enabled | bool else 0 }}" \
+    TLS_ENABLED="{{ 1 if tls_enabled | bool else 0 }}" \
+    TLS_HOST="{{ tls_host }}" \
+    NFS_ENABLED=1 \
+    NFS_SERVER="{{ nfs_server_ip }}" \
+    NFS_PATH="{{ nfs_export_path }}" \
+    REDIS_ENABLED="{{ 1 if redis_enabled | bool else 0 }}" \
+    REDIS_REQUIRED="{{ 1 if redis_required | bool else 0 }}" \
+    INSTALL_METALLB="{{ 1 if metallb_enabled | bool else 0 }}" \
+    METALLB_IP_RANGE="{{ metallb_ip_range }}" \
+    PHONE_IP="{{ phone_ip }}" \
+    PHONE_INTERFACE="{{ phone_interface }}" \
+    NONINTERACTIVE=1 \
+    bash install-otp-relay-k8s.sh
+  args:
+    executable: /bin/bash

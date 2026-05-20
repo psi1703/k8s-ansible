@@ -1,0 +1,119 @@
+# Helm values for Loki
+#
+# Chart: grafana-community/loki
+# Version used with SCH setup: 13.7.2
+#
+# Purpose:
+# - Store logs shipped by Grafana Alloy.
+# - Run in single-binary mode for this small K3s cluster.
+# - Keep logs for 7 days.
+# - Use local-path PVC on the observability data worker.
+#
+# Target cluster:
+# - observability/role=data should be assigned to otp-worker-2.
+
+deploymentMode: Monolithic
+
+singleBinary:
+  replicas: 1
+
+  # Pin Loki to the data worker.
+  nodeSelector:
+    observability/role: data
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 300m
+
+  persistence:
+    enabled: true
+    storageClass: local-path
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+
+# Disable microservices-mode components.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+ingester:
+  replicas: 0
+querier:
+  replicas: 0
+queryFrontend:
+  replicas: 0
+queryScheduler:
+  replicas: 0
+distributor:
+  replicas: 0
+compactor:
+  replicas: 0
+indexGateway:
+  replicas: 0
+bloomCompactor:
+  replicas: 0
+bloomGateway:
+  replicas: 0
+
+# Disable cache subcharts.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+test:
+  enabled: false
+
+# Grafana will talk to Loki directly inside the cluster.
+gateway:
+  enabled: false
+
+# Disable synthetic Loki traffic generator.
+lokiCanary:
+  enabled: false
+
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+    path_prefix: /var/loki
+
+  storage:
+    type: filesystem
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  limits_config:
+    retention_period: 168h
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+
+  rulerConfig:
+    enable_api: false
+
+  analytics:
+    reporting_enabled: false

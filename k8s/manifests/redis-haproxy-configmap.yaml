@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otp-redis-haproxy-config
+  namespace: otp-relay
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0
+      maxconn 1024
+
+    defaults
+      log global
+      mode tcp
+      option tcplog
+      timeout connect 3s
+      timeout client  1m
+      timeout server  1m
+
+    resolvers kube-dns
+      nameserver dns1 kube-dns.kube-system.svc.cluster.local:53
+      accepted_payload_size 8192
+      hold valid 5s
+
+    frontend redis
+      bind *:6379
+      default_backend redis_master
+
+    backend redis_master
+      mode tcp
+      option tcp-check
+      tcp-check connect
+      tcp-check send info\ replication\r\n
+      tcp-check expect string role:master
+      tcp-check send QUIT\r\n
+      tcp-check expect string +OK
+      server redis-0 otp-redis-0.otp-redis-headless.otp-relay.svc.cluster.local:6379 check inter 2s resolvers kube-dns resolve-prefer ipv4
+      server redis-1 otp-redis-1.otp-redis-headless.otp-relay.svc.cluster.local:6379 check inter 2s resolvers kube-dns resolve-prefer ipv4
+      server redis-2 otp-redis-2.otp-redis-headless.otp-relay.svc.cluster.local:6379 check inter 2s resolvers kube-dns resolve-prefer ipv4

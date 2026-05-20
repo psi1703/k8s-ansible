@@ -1,0 +1,25 @@
+---
+- name: Read K3s node token from control-plane
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token_raw
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  run_once: true
+
+- name: Publish K3s join token for this play
+  ansible.builtin.set_fact:
+    k3s_join_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+  run_once: true
+
+- name: Check if K3s agent is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_bin
+
+- name: Install K3s agent
+  ansible.builtin.shell: |
+    set -eu
+    curl -sfL https://get.k3s.io | K3S_URL="https://{{ hostvars[groups['control_plane'][0]].ansible_host }}:6443" K3S_TOKEN="{{ k3s_join_token }}" sh -
+  args:
+    executable: /bin/bash
+  when: not k3s_bin.stat.exists

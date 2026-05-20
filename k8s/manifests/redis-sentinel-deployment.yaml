@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otp-redis-sentinel
+  namespace: otp-relay
+  labels:
+    app: otp-redis-sentinel
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: otp-redis-sentinel
+  template:
+    metadata:
+      labels:
+        app: otp-redis-sentinel
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - otp-redis-sentinel
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: otp-redis-sentinel
+      containers:
+        - name: sentinel
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - /etc/redis-sentinel/sentinel-entrypoint.sh
+          ports:
+            - containerPort: 26379
+              name: sentinel
+          env:
+            - name: SENTINEL_CONFIG_VERSION
+              value: "2026-05-13-redis-node-spread"
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -p 26379 ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -p 26379 ping | grep -q PONG
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          volumeMounts:
+            - name: sentinel-config
+              mountPath: /etc/redis-sentinel
+      volumes:
+        - name: sentinel-config
+          configMap:
+            name: otp-redis-sentinel-config
+            defaultMode: 0755

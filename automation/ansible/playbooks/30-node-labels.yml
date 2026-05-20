@@ -1,0 +1,6 @@
+---
+- name: Apply OTP Relay scheduling labels
+  hosts: control_plane
+  become: true
+  roles:
+    - node_labels

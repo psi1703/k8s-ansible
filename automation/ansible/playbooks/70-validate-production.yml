@@ -1,0 +1,6 @@
+---
+- name: Validate OTP Relay production deployment
+  hosts: control_plane
+  become: true
+  roles:
+    - validation
