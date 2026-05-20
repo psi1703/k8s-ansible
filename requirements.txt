@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+openpyxl
+python-dotenv
+bcrypt
+pydantic
+markdown
+pyyaml
+python-multipart
+redis>=5.0.0,<6.0.0
+prometheus_client

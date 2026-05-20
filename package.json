@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "build:frontend": "babel frontend/app.jsx --presets @babel/preset-react --out-file frontend/app.raw.js && terser frontend/app.raw.js -c -m -o frontend/app.js && rm frontend/app.raw.js"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.24.0",
+    "@babel/core": "^7.24.0",
+    "@babel/preset-react": "^7.24.0",
+    "terser": "^5.31.0"
+  }
+}
