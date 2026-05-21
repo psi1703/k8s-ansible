@@ -1,12 +1,5 @@
 ---
-- name: Clone or update OTP Relay repository
-  ansible.builtin.git:
-    repo: "{{ otp_repo_url }}"
-    dest: "{{ otp_install_dir }}"
-    version: "{{ otp_repo_ref }}"
-    force: true
-
-- name: Deploy OTP Relay through the project installer
+- name: Deploy OTP Relay through the project installer from synced local repo
   ansible.builtin.shell: |
     set -eu
     cd "{{ otp_install_dir }}"
@@ -18,7 +11,7 @@
     INGRESS_ENABLED="{{ 1 if ingress_enabled | bool else 0 }}" \
     TLS_ENABLED="{{ 1 if tls_enabled | bool else 0 }}" \
     TLS_HOST="{{ tls_host }}" \
-    NFS_ENABLED=1 \
+    NFS_ENABLED="{{ 1 if nfs_enabled | bool else 0 }}" \
     NFS_SERVER="{{ nfs_server_ip }}" \
     NFS_PATH="{{ nfs_export_path }}" \
     REDIS_ENABLED="{{ 1 if redis_enabled | bool else 0 }}" \
