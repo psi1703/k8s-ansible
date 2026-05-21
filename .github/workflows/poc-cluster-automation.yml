@@ -168,8 +168,16 @@ jobs:
                 run_check_only=1
                 ;;
               provision-vms)
+                # Provision VMs and continue through the full cluster setup automatically.
                 run_provision=1
                 run_ansible_ping=1
+                run_os_baseline=1
+                run_k3s_cp=1
+                run_k3s_workers=1
+                run_node_labels=1
+                run_storage_validate=1
+                run_deploy=1
+                run_validate=1
                 ;;
               ansible-ping)
                 run_ansible_ping=1
@@ -328,8 +336,16 @@ jobs:
             fi
 
             if [[ "$libvirt" == "1" ]]; then
-              selected_task="check-libvirt"
-              run_check_only=1
+              selected_task="provision-and-full-poc"
+              run_provision=1
+              run_ansible_ping=1
+              run_os_baseline=1
+              run_k3s_cp=1
+              run_k3s_workers=1
+              run_node_labels=1
+              run_storage_validate=1
+              run_deploy=1
+              run_validate=1
               return
             fi
 
@@ -558,6 +574,34 @@ jobs:
             exit 1
           fi
           cat automation/ansible/inventory.poc.generated.ini
+
+      - name: Wait for VM first boot package locks
+        if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
+        run: |
+          set -Eeuo pipefail
+
+          echo "Waiting for cloud-init and dpkg/apt locks on all VMs..."
+          ansible -i inventory.poc.generated.ini all -b -m shell -a '
+            set -e
+
+            if command -v cloud-init >/dev/null 2>&1; then
+              cloud-init status --wait || true
+            fi
+
+            for i in $(seq 1 180); do
+              if ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1                  && ! pgrep -x apt-get >/dev/null 2>&1                  && ! pgrep -x apt >/dev/null 2>&1                  && ! pgrep -x dpkg >/dev/null 2>&1; then
+                exit 0
+              fi
+
+              echo "Waiting for apt/dpkg lock to clear... attempt ${i}/180"
+              sleep 5
+            done
+
+            echo "Timed out waiting for apt/dpkg lock. Process state:"
+            ps -ef | grep -E "apt|apt-get|dpkg|unattended|cloud-init" | grep -v grep || true
+            exit 1
+          '
 
       - name: Ansible connectivity ping
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' }}
