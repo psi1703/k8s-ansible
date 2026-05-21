@@ -76,9 +76,9 @@ need_root
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-REPO_URL="${REPO_URL:-https://github.com/psi1703/k8s.git}"
+REPO_URL="${REPO_URL:-https://github.com/psi1703/k8s-ansible.git}"
 REPO_REF="${REPO_REF:-main}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/otp-relay-k8s}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/k8s-ansible}"
 NAMESPACE="${NAMESPACE:-otp-relay}"
 APP_IMAGE="${APP_IMAGE:-otp-relay:latest}"
 MONITOR_IMAGE="${MONITOR_IMAGE:-otp-monitor:latest}"
@@ -145,6 +145,7 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 RUNTIME_DATA_DIR="${RUNTIME_DATA_DIR:-}"
 SKIP_HELP_DOCS_BUILD="${SKIP_HELP_DOCS_BUILD:-0}"
 GIT_CLEAN="${GIT_CLEAN:-1}"
+SKIP_REPO_SYNC="${SKIP_REPO_SYNC:-auto}"
 NONINTERACTIVE="${NONINTERACTIVE:-0}"
 INSTALL_GITHUB_RUNNER="${INSTALL_GITHUB_RUNNER:-}"
 GITHUB_RUNNER_URL="${GITHUB_RUNNER_URL:-${REPO_URL%.git}}"
@@ -333,8 +334,18 @@ validate_selected_node "$REDIS_NODE_SELECTOR_KEY" "$REDIS_NODE_SELECTOR_VALUE" "
 install_metallb_if_requested
 check_loadbalancer_prereqs
 
-log "syncing repository into $INSTALL_DIR"
-if [ -d "$INSTALL_DIR/.git" ]; then
+SCRIPT_DIR_REAL="$(cd "$SCRIPT_DIR" && pwd)"
+INSTALL_DIR_REAL="$(mkdir -p "$INSTALL_DIR" 2>/dev/null || true; cd "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+
+if [ "$SKIP_REPO_SYNC" = "auto" ] && [ "$SCRIPT_DIR_REAL" = "$INSTALL_DIR_REAL" ]; then
+  SKIP_REPO_SYNC=1
+fi
+
+if [ "$SKIP_REPO_SYNC" = "1" ]; then
+  log "using existing synced repository at $SCRIPT_DIR_REAL; skipping installer git sync"
+  INSTALL_DIR="$SCRIPT_DIR_REAL"
+elif [ -d "$INSTALL_DIR/.git" ]; then
+  log "syncing repository into $INSTALL_DIR from $REPO_URL ref $REPO_REF"
   git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" || true
   git -C "$INSTALL_DIR" fetch --prune origin "$REPO_REF"
   git -C "$INSTALL_DIR" reset --hard "origin/$REPO_REF"
@@ -343,12 +354,13 @@ if [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" clean -ffd -e data/ -e .env -e k8s/manifests/secret.env -e '*.log'
   fi
 elif [ -e "$INSTALL_DIR" ]; then
-  fatal "$INSTALL_DIR exists but is not a git repo. Move it away or set INSTALL_DIR to another path."
+  fatal "$INSTALL_DIR exists but is not a git repo. Move it away, set INSTALL_DIR to another path, or run from the synced repo with SKIP_REPO_SYNC=1."
 else
+  log "cloning repository into $INSTALL_DIR from $REPO_URL ref $REPO_REF"
   git clone --branch "$REPO_REF" "$REPO_URL" "$INSTALL_DIR"
 fi
 cd "$INSTALL_DIR"
-log "repo synced to $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
+log "deployment source repo: $(git rev-parse --short HEAD 2>/dev/null || echo no-git): $(git log -1 --pretty=%s 2>/dev/null || echo local-files)"
 
 log "checking required source files"
 [ -f main.py ] || fatal "main.py is missing in repo root"
