@@ -103,7 +103,7 @@ jobs:
 
     steps:
       - name: Checkout repository for change detection
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -431,7 +431,7 @@ jobs:
 
     steps:
       - name: Checkout repository for workflow context
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
