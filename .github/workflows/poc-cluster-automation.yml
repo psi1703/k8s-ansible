@@ -2,6 +2,9 @@ name: Smart POC Cluster Automation
 
 run-name: "${{ github.event_name == 'workflow_dispatch' && inputs.task || 'auto' }} @ ${{ github.ref_name }}"
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -425,11 +428,14 @@ jobs:
           echo "Selected task: ${SELECTED_TASK}"
 
       - name: Sync checked-out workspace to /opt/k8s-ansible
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
 
           echo "Source workspace: ${GITHUB_WORKSPACE}"
           echo "Target repo path: ${DEPLOY_REPO_DIR}"
+          echo "Commit: ${GITHUB_SHA}"
 
           if ! command -v rsync >/dev/null 2>&1; then
             sudo apt-get update
@@ -439,15 +445,39 @@ jobs:
           sudo mkdir -p "${DEPLOY_REPO_DIR}"
           sudo chown -R "$(id -un):$(id -gn)" "${DEPLOY_REPO_DIR}"
 
+          # The runner workspace is the source of truth checked out by Actions.
+          # Preserve runtime-generated files that are not committed to Git.
           rsync -a --delete \
             --exclude '.git/' \
+            --exclude 'automation/ansible/inventory.poc.generated.ini' \
+            --exclude 'automation/libvirt/build/' \
             "${GITHUB_WORKSPACE}/" \
             "${DEPLOY_REPO_DIR}/"
 
           chmod +x "${DEPLOY_REPO_DIR}"/automation/libvirt/*.sh 2>/dev/null || true
 
+          # Keep /opt/k8s-ansible as a real clean git working tree too, not just copied files.
+          # This removes stale local edits such as old provisioner/workflow content.
+          if [[ -d "${DEPLOY_REPO_DIR}/.git" ]]; then
+            git config --global --add safe.directory "${DEPLOY_REPO_DIR}" || true
+            cd "${DEPLOY_REPO_DIR}"
+
+            if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+              auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)"
+              git -c http.https://github.com/.extraheader="${auth_header}" fetch --prune origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+            else
+              git fetch --prune origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+            fi
+
+            git reset --hard "${GITHUB_SHA}"
+          fi
+
           echo "Synced provisioner files:"
           find "${DEPLOY_REPO_DIR}/automation/libvirt" -maxdepth 1 -type f -name '*provision*' -print -exec grep -n 'VM_USER="${VM_USER' {} \; || true
+
+          echo "Active repo status after workflow sync:"
+          cd "${DEPLOY_REPO_DIR}"
+          git status --short || true
 
       - name: Show selected task
         working-directory: ${{ env.DEPLOY_REPO_DIR }}
