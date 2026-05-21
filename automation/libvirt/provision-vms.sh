@@ -18,6 +18,7 @@ set -Eeuo pipefail
 #       automation/ansible/inventory.poc.generated.ini
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROVISIONER_PATH="${REPO_ROOT}/automation/libvirt/$(basename "${BASH_SOURCE[0]}")"
 
 BRIDGE_NAME="${BRIDGE_NAME:-br0}"
 HOST_IFACE="${HOST_IFACE:-}"
@@ -47,6 +48,9 @@ IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-172.31.11}"
 IP_SCAN_START="${IP_SCAN_START:-150}"
 IP_SCAN_END="${IP_SCAN_END:-199}"
 RESERVED_IPS="${RESERVED_IPS:-}"
+AUTO_RECREATE_INCOMPATIBLE_VMS="${AUTO_RECREATE_INCOMPATIBLE_VMS:-1}"
+EXISTING_VM_SSH_CHECK_ATTEMPTS="${EXISTING_VM_SSH_CHECK_ATTEMPTS:-6}"
+EXISTING_VM_SSH_CHECK_SLEEP="${EXISTING_VM_SSH_CHECK_SLEEP:-5}"
 
 CP_IP="${CP_IP:-}"
 WORKER1_IP="${WORKER1_IP:-}"
@@ -357,18 +361,71 @@ download_base_image() {
   ok "Downloaded base image: $BASE_IMAGE"
 }
 
-destroy_existing_vm_if_requested() {
+ssh_ready_for_expected_identity() {
+  local ip="$1"
+
+  ssh \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=3 \
+    -i "$SSH_KEY" \
+    "${VM_USER}@${ip}" "hostname" >/dev/null 2>&1
+}
+
+existing_vm_matches_expected_identity() {
   local name="$1"
+  local ip="$2"
+  local attempt
+
+  log "Checking existing VM compatibility: $name ($ip) as ${VM_USER}"
+
+  for attempt in $(seq 1 "$EXISTING_VM_SSH_CHECK_ATTEMPTS"); do
+    if ssh_ready_for_expected_identity "$ip"; then
+      ok "Existing VM is compatible: $name ($ip)"
+      return 0
+    fi
+
+    sleep "$EXISTING_VM_SSH_CHECK_SLEEP"
+  done
+
+  warn "Existing VM is not reachable with expected identity: $name ($ip), user=${VM_USER}, key=${SSH_KEY}"
+  return 1
+}
+
+remove_existing_vm() {
+  local name="$1"
+
+  warn "Removing existing VM: $name"
+  sudo virsh destroy "$name" >/dev/null 2>&1 || true
+  sudo virsh undefine "$name" --remove-all-storage >/dev/null 2>&1 || sudo virsh undefine "$name" >/dev/null 2>&1 || true
+}
+
+prepare_vm_slot() {
+  local name="$1"
+  local ip="$2"
 
   if sudo virsh dominfo "$name" >/dev/null 2>&1; then
     if [[ "${RECREATE_VMS:-0}" == "1" ]]; then
-      warn "Recreating existing VM: $name"
-      sudo virsh destroy "$name" >/dev/null 2>&1 || true
-      sudo virsh undefine "$name" --remove-all-storage >/dev/null 2>&1 || sudo virsh undefine "$name" >/dev/null 2>&1 || true
-    else
+      warn "RECREATE_VMS=1 set; recreating VM: $name"
+      remove_existing_vm "$name"
+      echo "new"
+      return 0
+    fi
+
+    if existing_vm_matches_expected_identity "$name" "$ip"; then
       echo "exists"
       return 0
     fi
+
+    if [[ "$AUTO_RECREATE_INCOMPATIBLE_VMS" == "1" ]]; then
+      warn "AUTO_RECREATE_INCOMPATIBLE_VMS=1; old/incompatible VM will be replaced: $name"
+      remove_existing_vm "$name"
+      echo "new"
+      return 0
+    fi
+
+    fatal "Existing VM $name is incompatible. Set RECREATE_VMS=1 or AUTO_RECREATE_INCOMPATIBLE_VMS=1 to replace it."
   fi
 
   echo "new"
@@ -379,7 +436,7 @@ create_vm() {
   local ip="$2"
 
   local state
-  state="$(destroy_existing_vm_if_requested "$name")"
+  state="$(prepare_vm_slot "$name" "$ip")"
 
   if [[ "$state" == "exists" ]]; then
     ok "VM already exists: $name"
@@ -467,7 +524,7 @@ wait_for_ssh() {
   log "Waiting for SSH on $name ($ip)..."
 
   for _ in $(seq 1 90); do
-    if ssh       -o StrictHostKeyChecking=no       -o UserKnownHostsFile=/dev/null       -o ConnectTimeout=3       -i "$SSH_KEY"       "${VM_USER}@${ip}" "hostname" >/dev/null 2>&1; then
+    if ssh_ready_for_expected_identity "$ip"; then
       ok "SSH ready: $name ($ip)"
       return 0
     fi
@@ -531,20 +588,13 @@ VMs:
 Inventory:
   ${ANSIBLE_INVENTORY}
 
-Next commands:
+Automation note:
+  This provisioner creates or repairs the VM layer and writes the generated inventory.
+  The workflow should continue with Ansible ping, OS baseline, K3s setup, storage validation,
+  deployment, and final validation.
 
-  cd ${REPO_ROOT}/automation/ansible
-  ansible -i inventory.poc.generated.ini all -m ping
-  ansible-playbook -i inventory.poc.generated.ini playbooks/00-os-baseline.yml
-  ansible-playbook -i inventory.poc.generated.ini playbooks/10-k3s-control-plane.yml
-  ansible-playbook -i inventory.poc.generated.ini playbooks/20-k3s-workers.yml
-  ansible-playbook -i inventory.poc.generated.ini playbooks/30-node-labels.yml
-  ansible-playbook -i inventory.poc.generated.ini playbooks/40-storage-validate.yml
-  ansible-playbook -i inventory.poc.generated.ini playbooks/50-deploy-otp-relay.yml
-  ansible-playbook -i inventory.poc.generated.ini playbooks/70-validate-production.yml
-
-To recreate VMs later:
-  RECREATE_VMS=1 VM_USER=${VM_USER} ${REPO_ROOT}/automation/libvirt/provision-poc-vms.sh
+To force VM recreation later:
+  RECREATE_VMS=1 VM_USER=${VM_USER} ${PROVISIONER_PATH}
 
 SUMMARY
 }
@@ -573,9 +623,9 @@ main() {
   create_vm "$WORKER1_NAME" "$WORKER1_IP"
   create_vm "$WORKER2_NAME" "$WORKER2_IP"
 
-  wait_for_ssh "$CP_IP" "$CP_NAME" || true
-  wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME" || true
-  wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME" || true
+  wait_for_ssh "$CP_IP" "$CP_NAME"
+  wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME"
+  wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME"
 
   write_ansible_inventory
   sudo virsh list --all
