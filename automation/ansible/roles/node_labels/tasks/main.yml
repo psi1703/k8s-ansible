@@ -1,14 +1,50 @@
 ---
+- name: Get Kubernetes node names
+  ansible.builtin.command:
+    cmd: kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+  register: k8s_node_names
+  changed_when: false
+
+- name: Resolve control-plane Kubernetes node name
+  ansible.builtin.set_fact:
+    control_plane_k8s_node: >-
+      {{
+        (k8s_node_names.stdout_lines
+          | select('equalto', inventory_hostname)
+          | list
+          | first)
+        | default(
+            (k8s_node_names.stdout_lines
+              | select('search', inventory_hostname)
+              | list
+              | first),
+            true
+          )
+        | default(
+            (k8s_node_names.stdout_lines
+              | select('search', 'cp|control|master')
+              | list
+              | first),
+            true
+          )
+      }}
+
+- name: Fail if control-plane Kubernetes node name could not be resolved
+  ansible.builtin.fail:
+    msg: "Could not resolve Kubernetes node for inventory host {{ inventory_hostname }}. Found nodes: {{ k8s_node_names.stdout_lines }}"
+  when: control_plane_k8s_node | length == 0
+
 - name: Label control-plane for Redis eligibility
-  ansible.builtin.command: kubectl label node {{ item }} otp-relay/redis-node=true --overwrite
-  changed_when: false
-  loop: "{{ groups['control_plane'] }}"
+  ansible.builtin.command:
+    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node=true --overwrite
+  changed_when: true
 
-- name: Label workers for app scheduling
-  ansible.builtin.command: kubectl label node {{ item }} otp-relay/app-node=true otp-relay/redis-node=true --overwrite
-  changed_when: false
-  loop: "{{ groups['workers'] }}"
+- name: Label control-plane for app storage eligibility
+  ansible.builtin.command:
+    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/storage-node=true --overwrite
+  changed_when: true
 
-- name: Label monitor node when selected
-  ansible.builtin.command: kubectl label node {{ monitor_node | default(groups['workers'][0]) }} otp-relay/monitor-node=true --overwrite
-  changed_when: false
+- name: Label control-plane for monitor eligibility
+  ansible.builtin.command:
+    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/monitor-node=true --overwrite
+  changed_when: true
