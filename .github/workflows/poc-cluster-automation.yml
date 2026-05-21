@@ -1,5 +1,7 @@
 name: Smart POC Cluster Automation
 
+run-name: "${{ github.event_name == 'workflow_dispatch' && inputs.task || 'auto' }} @ ${{ github.ref_name }}"
+
 on:
   push:
     branches:
@@ -65,9 +67,10 @@ on:
         required: false
         default: "199"
 
+# Keep only the latest run active. This prevents push edits from piling up in Queued.
 concurrency:
-  group: smart-poc-cluster-automation
-  cancel-in-progress: false
+  group: smart-poc-cluster-automation-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   MIRROR_DIR: /opt/k8s-ansible
@@ -76,9 +79,7 @@ env:
 jobs:
   detect:
     name: Detect changed files and choose task
-    runs-on:
-      - self-hosted
-      - ansible
+    runs-on: [self-hosted, Linux, X64, ansible]
     timeout-minutes: 15
 
     outputs:
@@ -104,8 +105,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Print runner labels/debug
+        run: |
+          set -Eeuo pipefail
+          echo "Runner name: ${RUNNER_NAME:-unknown}"
+          echo "Runner OS: ${RUNNER_OS:-unknown}"
+          echo "Runner arch: ${RUNNER_ARCH:-unknown}"
+          echo "Workspace: ${GITHUB_WORKSPACE}"
+          echo "Event: ${GITHUB_EVENT_NAME}"
+          echo "Ref: ${GITHUB_REF}"
+          echo "SHA: ${GITHUB_SHA}"
+
       - name: Detect changed files
-        id: changed
         run: |
           set -Eeuo pipefail
 
@@ -374,9 +385,7 @@ jobs:
   run:
     name: Sync mirror and execute selected task
     needs: detect
-    runs-on:
-      - self-hosted
-      - ansible
+    runs-on: [self-hosted, Linux, X64, ansible]
     timeout-minutes: 180
 
     defaults:
@@ -404,6 +413,15 @@ jobs:
     steps:
       - name: Checkout repository for workflow context
         uses: actions/checkout@v4
+
+      - name: Print runner labels/debug
+        run: |
+          set -Eeuo pipefail
+          echo "Runner name: ${RUNNER_NAME:-unknown}"
+          echo "Runner OS: ${RUNNER_OS:-unknown}"
+          echo "Runner arch: ${RUNNER_ARCH:-unknown}"
+          echo "Workspace: ${GITHUB_WORKSPACE}"
+          echo "Selected task: ${SELECTED_TASK}"
 
       - name: Force-sync /opt/k8s-ansible mirror from GitHub
         run: |
