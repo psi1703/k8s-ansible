@@ -69,10 +69,16 @@ concurrency:
   group: smart-poc-cluster-automation
   cancel-in-progress: false
 
+env:
+  MIRROR_DIR: /opt/k8s-ansible
+  MIRROR_BRANCH: main
+
 jobs:
   detect:
     name: Detect changed files and choose task
-    runs-on: self-hosted
+    runs-on:
+      - self-hosted
+      - ansible
     timeout-minutes: 15
 
     outputs:
@@ -93,8 +99,8 @@ jobs:
         shell: bash
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      - name: Checkout repository for change detection
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -104,7 +110,6 @@ jobs:
           set -Eeuo pipefail
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # For manual auto runs, compare current HEAD to previous commit.
             BASE_SHA="$(git rev-parse HEAD^ 2>/dev/null || true)"
             HEAD_SHA="$(git rev-parse HEAD)"
           else
@@ -123,12 +128,6 @@ jobs:
 
           echo "Changed files:"
           cat /tmp/changed-files.txt || true
-
-          {
-            echo "changed_files<<EOF"
-            cat /tmp/changed-files.txt || true
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Choose smallest safe task
         id: choose
@@ -218,7 +217,6 @@ jobs:
             local app=0
             local manifests=0
             local observability=0
-            local workflow=0
             local installer=0
             local unknown=0
 
@@ -230,7 +228,6 @@ jobs:
                 README.md|docs/*|LICENSE|*.md)
                   ;;
                 .github/workflows/*)
-                  workflow=1
                   only_docs=0
                   ;;
                 automation/libvirt/*)
@@ -277,12 +274,12 @@ jobs:
                   app=1
                   only_docs=0
                   ;;
-                k8s/*)
+                k8s/observability/*|k8s/grafana/*|k8s/prometheus/*|k8s/loki/*)
+                  observability=1
                   manifests=1
                   only_docs=0
                   ;;
-                k8s/observability/*|k8s/grafana/*|k8s/prometheus/*|k8s/loki/*)
-                  observability=1
+                k8s/*)
                   manifests=1
                   only_docs=0
                   ;;
@@ -310,7 +307,6 @@ jobs:
             fi
 
             if [[ "$unknown" == "1" ]]; then
-              # Safe fallback for unknown changed paths.
               selected_task="deploy-validate"
               run_ansible_ping=1
               run_deploy=1
@@ -319,15 +315,12 @@ jobs:
             fi
 
             if [[ "$libvirt" == "1" ]]; then
-              # Do not recreate VMs automatically on push.
-              # Validate script only. Manual workflow_dispatch task=provision-vms does actual provisioning.
               selected_task="check-libvirt"
               run_check_only=1
               return
             fi
 
             if [[ "$k3s_bootstrap" == "1" ]]; then
-              # Bootstrap changes can affect cluster install, but do not reinstall automatically on push.
               selected_task="check-k3s-bootstrap"
               run_check_only=1
               return
@@ -376,24 +369,14 @@ jobs:
           echo "run_validate=${run_validate}" >> "$GITHUB_OUTPUT"
           echo "run_check_only=${run_check_only}" >> "$GITHUB_OUTPUT"
 
-          cat <<PLAN
-          Selected task: ${selected_task}
-          run_provision=${run_provision}
-          run_ansible_ping=${run_ansible_ping}
-          run_os_baseline=${run_os_baseline}
-          run_k3s_cp=${run_k3s_cp}
-          run_k3s_workers=${run_k3s_workers}
-          run_node_labels=${run_node_labels}
-          run_storage_validate=${run_storage_validate}
-          run_deploy=${run_deploy}
-          run_validate=${run_validate}
-          run_check_only=${run_check_only}
-          PLAN
+          echo "Selected task: ${selected_task}"
 
   run:
-    name: Execute selected task
+    name: Sync mirror and execute selected task
     needs: detect
-    runs-on: self-hosted
+    runs-on:
+      - self-hosted
+      - ansible
     timeout-minutes: 180
 
     defaults:
@@ -419,20 +402,47 @@ jobs:
       VM_DISK_GB: "30"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository for workflow context
         uses: actions/checkout@v4
 
+      - name: Force-sync /opt/k8s-ansible mirror from GitHub
+        run: |
+          set -Eeuo pipefail
+
+          echo "Syncing mirror: ${MIRROR_DIR}"
+          echo "Source: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          echo "Branch: ${MIRROR_BRANCH}"
+
+          if [[ ! -d "${MIRROR_DIR}/.git" ]]; then
+            sudo mkdir -p "$(dirname "${MIRROR_DIR}")"
+            sudo chown -R "$(id -un):$(id -gn)" "$(dirname "${MIRROR_DIR}")"
+            git clone "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "${MIRROR_DIR}"
+          fi
+
+          cd "${MIRROR_DIR}"
+
+          git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch origin "${MIRROR_BRANCH}"
+          git reset --hard "origin/${MIRROR_BRANCH}"
+          git clean -fd
+
+          echo "Mirror synced to:"
+          git log --oneline -1
+          git status --short
+
       - name: Show selected task
+        working-directory: ${{ env.MIRROR_DIR }}
         run: |
           set -Eeuo pipefail
           echo "Selected task: ${SELECTED_TASK}"
           echo "Runner user: $(id)"
-          echo "Workspace: ${GITHUB_WORKSPACE}"
+          echo "Mirror dir: ${PWD}"
           uname -a
           ip -br addr || true
           ip route || true
 
       - name: Validate repository scripts
+        working-directory: ${{ env.MIRROR_DIR }}
         run: |
           set -Eeuo pipefail
           bash -n install-otp-relay-k8s.sh
@@ -450,6 +460,7 @@ jobs:
 
       - name: Ensure Ansible is installed
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
+        working-directory: ${{ env.MIRROR_DIR }}
         run: |
           set -Eeuo pipefail
           if ! command -v ansible >/dev/null 2>&1; then
@@ -460,6 +471,7 @@ jobs:
 
       - name: Provision libvirt POC VMs
         if: ${{ needs.detect.outputs.run_provision == '1' }}
+        working-directory: ${{ env.MIRROR_DIR }}
         run: |
           set -Eeuo pipefail
 
@@ -478,6 +490,7 @@ jobs:
 
       - name: Require generated inventory
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
+        working-directory: ${{ env.MIRROR_DIR }}
         run: |
           set -Eeuo pipefail
           if [[ ! -f automation/ansible/inventory.poc.generated.ini ]]; then
@@ -489,65 +502,70 @@ jobs:
 
       - name: Ansible connectivity ping
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible -i inventory.poc.generated.ini all -m ping
 
       - name: OS baseline
         if: ${{ needs.detect.outputs.run_os_baseline == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/00-os-baseline.yml
 
       - name: Install K3s control-plane
         if: ${{ needs.detect.outputs.run_k3s_cp == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/10-k3s-control-plane.yml
 
       - name: Install K3s workers
         if: ${{ needs.detect.outputs.run_k3s_workers == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/20-k3s-workers.yml
 
       - name: Label nodes
         if: ${{ needs.detect.outputs.run_node_labels == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/30-node-labels.yml
 
       - name: Validate NFS storage
         if: ${{ needs.detect.outputs.run_storage_validate == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/40-storage-validate.yml
 
       - name: Deploy OTP Relay
         if: ${{ needs.detect.outputs.run_deploy == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/50-deploy-otp-relay.yml
 
       - name: Validate production/POC state
         if: ${{ needs.detect.outputs.run_validate == '1' }}
-        working-directory: automation/ansible
+        working-directory: ${{ env.MIRROR_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/70-validate-production.yml
 
       - name: Final status
         if: always()
+        working-directory: ${{ env.MIRROR_DIR }}
         run: |
           set +e
           echo "Selected task: ${SELECTED_TASK}"
+          echo
+          echo "Mirror status:"
+          git status --short
+          git log --oneline -1
           echo
           echo "Libvirt domains:"
           sudo virsh list --all 2>/dev/null || true
