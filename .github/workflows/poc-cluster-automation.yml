@@ -72,6 +72,9 @@ concurrency:
   group: smart-poc-cluster-automation-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DEPLOY_REPO_DIR: /opt/k8s-ansible
+
 jobs:
   detect:
     name: Detect changed files and choose task
@@ -421,24 +424,52 @@ jobs:
           echo "Workspace: ${GITHUB_WORKSPACE}"
           echo "Selected task: ${SELECTED_TASK}"
 
+      - name: Sync checked-out workspace to /opt/k8s-ansible
+        run: |
+          set -Eeuo pipefail
+
+          echo "Source workspace: ${GITHUB_WORKSPACE}"
+          echo "Target repo path: ${DEPLOY_REPO_DIR}"
+
+          if ! command -v rsync >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y rsync
+          fi
+
+          sudo mkdir -p "${DEPLOY_REPO_DIR}"
+          sudo chown -R "$(id -un):$(id -gn)" "${DEPLOY_REPO_DIR}"
+
+          rsync -a --delete \
+            --exclude '.git/' \
+            "${GITHUB_WORKSPACE}/" \
+            "${DEPLOY_REPO_DIR}/"
+
+          chmod +x "${DEPLOY_REPO_DIR}"/automation/libvirt/*.sh 2>/dev/null || true
+
+          echo "Synced provisioner files:"
+          find "${DEPLOY_REPO_DIR}/automation/libvirt" -maxdepth 1 -type f -name '*provision*' -print -exec grep -n 'VM_USER="${VM_USER' {} \; || true
+
       - name: Show selected task
-        working-directory: ${{ github.workspace }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}
         run: |
           set -Eeuo pipefail
           echo "Selected task: ${SELECTED_TASK}"
           echo "Runner user: $(id)"
-          echo "Workspace dir: ${PWD}"
+          echo "Repo dir: ${PWD}"
           uname -a
           ip -br addr || true
           ip route || true
 
       - name: Validate repository scripts
-        working-directory: ${{ github.workspace }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}
         run: |
           set -Eeuo pipefail
           bash -n install-otp-relay-k8s.sh
           if compgen -G "scripts/lib/*.sh" >/dev/null; then
             bash -n scripts/lib/*.sh
+          fi
+          if [[ -f automation/libvirt/provision-vms.sh ]]; then
+            bash -n automation/libvirt/provision-vms.sh
           fi
           if [[ -f automation/libvirt/provision-poc-vms.sh ]]; then
             bash -n automation/libvirt/provision-poc-vms.sh
@@ -451,7 +482,7 @@ jobs:
 
       - name: Ensure Ansible is installed
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
-        working-directory: ${{ github.workspace }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}
         run: |
           set -Eeuo pipefail
           if ! command -v ansible >/dev/null 2>&1; then
@@ -462,7 +493,7 @@ jobs:
 
       - name: Provision libvirt POC VMs
         if: ${{ needs.detect.outputs.run_provision == '1' }}
-        working-directory: ${{ github.workspace }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}
         run: |
           set -Eeuo pipefail
 
@@ -477,11 +508,18 @@ jobs:
           export IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END
           export VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB
 
-          ./automation/libvirt/provision-poc-vms.sh
+          if [[ -x ./automation/libvirt/provision-vms.sh ]]; then
+            ./automation/libvirt/provision-vms.sh
+          elif [[ -x ./automation/libvirt/provision-poc-vms.sh ]]; then
+            ./automation/libvirt/provision-poc-vms.sh
+          else
+            echo "No provisioner found under automation/libvirt" >&2
+            exit 1
+          fi
 
       - name: Require generated inventory
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
-        working-directory: ${{ github.workspace }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}
         run: |
           set -Eeuo pipefail
           if [[ ! -f automation/ansible/inventory.poc.generated.ini ]]; then
@@ -493,68 +531,68 @@ jobs:
 
       - name: Ansible connectivity ping
         if: ${{ needs.detect.outputs.run_ansible_ping == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible -i inventory.poc.generated.ini all -m ping
 
       - name: OS baseline
         if: ${{ needs.detect.outputs.run_os_baseline == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/00-os-baseline.yml
 
       - name: Install K3s control-plane
         if: ${{ needs.detect.outputs.run_k3s_cp == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/10-k3s-control-plane.yml
 
       - name: Install K3s workers
         if: ${{ needs.detect.outputs.run_k3s_workers == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/20-k3s-workers.yml
 
       - name: Label nodes
         if: ${{ needs.detect.outputs.run_node_labels == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/30-node-labels.yml
 
       - name: Validate NFS storage
         if: ${{ needs.detect.outputs.run_storage_validate == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/40-storage-validate.yml
 
       - name: Deploy OTP Relay
         if: ${{ needs.detect.outputs.run_deploy == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/50-deploy-otp-relay.yml
 
       - name: Validate production/POC state
         if: ${{ needs.detect.outputs.run_validate == '1' }}
-        working-directory: ${{ github.workspace }}/automation/ansible
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}/automation/ansible
         run: |
           set -Eeuo pipefail
           ansible-playbook -i inventory.poc.generated.ini playbooks/70-validate-production.yml
 
       - name: Final status
         if: always()
-        working-directory: ${{ github.workspace }}
+        working-directory: ${{ env.DEPLOY_REPO_DIR }}
         run: |
           set +e
           echo "Selected task: ${SELECTED_TASK}"
           echo
-          echo "Workspace status:"
+          echo "Repo status:"
           git status --short
           git log --oneline -1
           echo
