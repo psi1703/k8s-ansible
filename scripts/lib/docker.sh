@@ -18,22 +18,15 @@ resolve_docker_bin() {
   return 1
 }
 
-install_package_if_available() {
-  local pkg="$1"
-  if apt-cache show "$pkg" >/dev/null 2>&1; then
-    apt-get install -y --no-install-recommends "$pkg"
-  fi
-}
-
 ensure_docker() {
   if ! resolve_docker_bin; then
     log "installing Docker because it is required to build and import local images"
+    apt-get update
     apt-get install -y --no-install-recommends docker.io
-    install_package_if_available docker-cli
   fi
 
   if ! resolve_docker_bin; then
-    fatal "Docker CLI is still not available after installing docker.io/docker-cli. On Debian 13, confirm the package provides /usr/bin/docker or install Docker CE CLI."
+    fatal "Docker CLI is still not available after installing docker.io. Confirm the package provides /usr/bin/docker or install Docker CE CLI."
   fi
 
   if ! systemctl is-active --quiet docker; then
@@ -45,4 +38,3 @@ ensure_docker() {
 
   log "using Docker CLI: $DOCKER_BIN"
 }
-
