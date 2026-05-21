@@ -2,24 +2,26 @@
 - name: Deploy OTP Relay through the project installer from synced local repo
   ansible.builtin.shell: |
     set -eu
-    cd "{{ otp_install_dir }}"
-    REPO_URL="{{ otp_repo_url }}" \
-    REPO_REF="{{ otp_repo_ref }}" \
-    INSTALL_DIR="{{ otp_install_dir }}" \
-    NAMESPACE="{{ otp_namespace }}" \
-    SERVICE_TYPE="{{ service_type }}" \
-    INGRESS_ENABLED="{{ 1 if ingress_enabled | bool else 0 }}" \
-    TLS_ENABLED="{{ 1 if tls_enabled | bool else 0 }}" \
-    TLS_HOST="{{ tls_host }}" \
-    NFS_ENABLED="{{ 1 if nfs_enabled | bool else 0 }}" \
-    NFS_SERVER="{{ nfs_server_ip }}" \
-    NFS_PATH="{{ nfs_export_path }}" \
-    REDIS_ENABLED="{{ 1 if redis_enabled | bool else 0 }}" \
-    REDIS_REQUIRED="{{ 1 if redis_required | bool else 0 }}" \
-    INSTALL_METALLB="{{ 1 if metallb_enabled | bool else 0 }}" \
-    METALLB_IP_RANGE="{{ metallb_ip_range }}" \
-    PHONE_IP="{{ phone_ip }}" \
-    PHONE_INTERFACE="{{ phone_interface }}" \
+    cd "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
+    REPO_URL="{{ otp_repo_url | default('https://github.com/psi1703/k8s-ansible.git') }}" \
+    REPO_REF="{{ otp_repo_ref | default('main') }}" \
+    INSTALL_DIR="{{ otp_install_dir | default('/opt/k8s-ansible') }}" \
+    SKIP_REPO_SYNC=auto \
+    GIT_CLEAN=0 \
+    NAMESPACE="{{ otp_namespace | default('otp-relay') }}" \
+    SERVICE_TYPE="{{ service_type | default('LoadBalancer') }}" \
+    INGRESS_ENABLED="{{ 1 if (ingress_enabled | default(true) | bool) else 0 }}" \
+    TLS_ENABLED="{{ 1 if (tls_enabled | default(true) | bool) else 0 }}" \
+    TLS_HOST="{{ tls_host | default('srvotptest26.init-db.lan') }}" \
+    NFS_ENABLED="{{ 1 if (nfs_enabled | default(true) | bool) else 0 }}" \
+    NFS_SERVER="{{ nfs_server_ip | default('172.31.11.100') }}" \
+    NFS_PATH="{{ nfs_export_path | default('/export/otp-relay-data') }}" \
+    REDIS_ENABLED="{{ 1 if (redis_enabled | default(true) | bool) else 0 }}" \
+    REDIS_REQUIRED="{{ 1 if (redis_required | default(true) | bool) else 0 }}" \
+    INSTALL_METALLB="{{ 1 if (metallb_enabled | default(true) | bool) else 0 }}" \
+    METALLB_IP_RANGE="{{ metallb_ip_range | default('172.31.11.120-172.31.11.130') }}" \
+    PHONE_IP="{{ phone_ip | default('172.31.11.122') }}" \
+    PHONE_INTERFACE="{{ phone_interface | default('eth0') }}" \
     NONINTERACTIVE=1 \
     bash install-otp-relay-k8s.sh
   args:
