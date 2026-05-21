@@ -75,7 +75,7 @@ concurrency:
 jobs:
   detect:
     name: Detect changed files and choose task
-    runs-on: [self-hosted, Linux, X64, ansible]
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
 
     outputs:
@@ -381,7 +381,7 @@ jobs:
   run:
     name: Execute selected task
     needs: detect
-    runs-on: [self-hosted, Linux, X64, ansible]
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 180
 
     defaults:
