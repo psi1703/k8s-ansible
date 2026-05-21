@@ -1,0 +1,556 @@
+name: Smart POC Cluster Automation
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Override task. auto chooses based on changed files."
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - check
+          - provision-vms
+          - ansible-ping
+          - os-baseline
+          - k3s-control-plane
+          - k3s-workers
+          - node-labels
+          - storage-validate
+          - deploy-otp-relay
+          - validate
+          - full-poc
+      recreate_vms:
+        description: "Recreate libvirt VMs when provisioning"
+        required: true
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
+      auto_assign_ips:
+        description: "Auto-assign free VM IPs. Set 0 to use fixed IP inputs."
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "0"
+      cp_ip:
+        description: "Fixed control-plane IP when auto_assign_ips=0"
+        required: false
+        default: "172.31.11.151"
+      worker1_ip:
+        description: "Fixed worker1 IP when auto_assign_ips=0"
+        required: false
+        default: "172.31.11.152"
+      worker2_ip:
+        description: "Fixed worker2 IP when auto_assign_ips=0"
+        required: false
+        default: "172.31.11.153"
+      ip_scan_prefix:
+        description: "LAN prefix for automatic IP scan"
+        required: false
+        default: "172.31.11"
+      ip_scan_start:
+        description: "Start of automatic IP scan range"
+        required: false
+        default: "150"
+      ip_scan_end:
+        description: "End of automatic IP scan range"
+        required: false
+        default: "199"
+
+concurrency:
+  group: smart-poc-cluster-automation
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect changed files and choose task
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    outputs:
+      selected_task: ${{ steps.choose.outputs.selected_task }}
+      run_provision: ${{ steps.choose.outputs.run_provision }}
+      run_ansible_ping: ${{ steps.choose.outputs.run_ansible_ping }}
+      run_os_baseline: ${{ steps.choose.outputs.run_os_baseline }}
+      run_k3s_cp: ${{ steps.choose.outputs.run_k3s_cp }}
+      run_k3s_workers: ${{ steps.choose.outputs.run_k3s_workers }}
+      run_node_labels: ${{ steps.choose.outputs.run_node_labels }}
+      run_storage_validate: ${{ steps.choose.outputs.run_storage_validate }}
+      run_deploy: ${{ steps.choose.outputs.run_deploy }}
+      run_validate: ${{ steps.choose.outputs.run_validate }}
+      run_check_only: ${{ steps.choose.outputs.run_check_only }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: changed
+        run: |
+          set -Eeuo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # For manual auto runs, compare current HEAD to previous commit.
+            BASE_SHA="$(git rev-parse HEAD^ 2>/dev/null || true)"
+            HEAD_SHA="$(git rev-parse HEAD)"
+          else
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          fi
+
+          if [[ -z "${BASE_SHA}" || "${BASE_SHA}" == "0000000000000000000000000000000000000000" ]]; then
+            BASE_SHA="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          echo "BASE_SHA=${BASE_SHA}" >> "$GITHUB_ENV"
+          echo "HEAD_SHA=${HEAD_SHA}" >> "$GITHUB_ENV"
+
+          git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" | sort > /tmp/changed-files.txt || true
+
+          echo "Changed files:"
+          cat /tmp/changed-files.txt || true
+
+          {
+            echo "changed_files<<EOF"
+            cat /tmp/changed-files.txt || true
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Choose smallest safe task
+        id: choose
+        run: |
+          set -Eeuo pipefail
+
+          REQUESTED_TASK="${{ github.event.inputs.task || 'auto' }}"
+
+          run_provision=0
+          run_ansible_ping=0
+          run_os_baseline=0
+          run_k3s_cp=0
+          run_k3s_workers=0
+          run_node_labels=0
+          run_storage_validate=0
+          run_deploy=0
+          run_validate=0
+          run_check_only=0
+
+          selected_task="${REQUESTED_TASK}"
+
+          choose_manual() {
+            case "$REQUESTED_TASK" in
+              check)
+                run_check_only=1
+                ;;
+              provision-vms)
+                run_provision=1
+                run_ansible_ping=1
+                ;;
+              ansible-ping)
+                run_ansible_ping=1
+                ;;
+              os-baseline)
+                run_ansible_ping=1
+                run_os_baseline=1
+                ;;
+              k3s-control-plane)
+                run_ansible_ping=1
+                run_k3s_cp=1
+                ;;
+              k3s-workers)
+                run_ansible_ping=1
+                run_k3s_workers=1
+                ;;
+              node-labels)
+                run_ansible_ping=1
+                run_node_labels=1
+                ;;
+              storage-validate)
+                run_ansible_ping=1
+                run_storage_validate=1
+                ;;
+              deploy-otp-relay)
+                run_ansible_ping=1
+                run_deploy=1
+                ;;
+              validate)
+                run_ansible_ping=1
+                run_validate=1
+                ;;
+              full-poc)
+                run_provision=1
+                run_ansible_ping=1
+                run_os_baseline=1
+                run_k3s_cp=1
+                run_k3s_workers=1
+                run_node_labels=1
+                run_storage_validate=1
+                run_deploy=1
+                run_validate=1
+                ;;
+              *)
+                echo "Unsupported manual task: $REQUESTED_TASK" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          choose_auto() {
+            local has_changes=0
+            local only_docs=1
+            local libvirt=0
+            local ansible=0
+            local k3s_bootstrap=0
+            local storage=0
+            local app=0
+            local manifests=0
+            local observability=0
+            local workflow=0
+            local installer=0
+            local unknown=0
+
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              has_changes=1
+
+              case "$f" in
+                README.md|docs/*|LICENSE|*.md)
+                  ;;
+                .github/workflows/*)
+                  workflow=1
+                  only_docs=0
+                  ;;
+                automation/libvirt/*)
+                  libvirt=1
+                  only_docs=0
+                  ;;
+                automation/ansible/playbooks/00-os-baseline.yml|automation/ansible/roles/common/*)
+                  ansible=1
+                  only_docs=0
+                  ;;
+                automation/ansible/playbooks/10-k3s-control-plane.yml|automation/ansible/playbooks/20-k3s-workers.yml|automation/ansible/roles/k3s_server/*|automation/ansible/roles/k3s_agent/*)
+                  ansible=1
+                  k3s_bootstrap=1
+                  only_docs=0
+                  ;;
+                automation/ansible/playbooks/30-node-labels.yml|automation/ansible/roles/node_labels/*)
+                  ansible=1
+                  only_docs=0
+                  ;;
+                automation/ansible/playbooks/40-storage-validate.yml|automation/ansible/roles/nfs_client/*|automation/ansible/roles/nfs_server/*|automation/ansible/group_vars/*)
+                  ansible=1
+                  storage=1
+                  only_docs=0
+                  ;;
+                automation/ansible/playbooks/50-deploy-otp-relay.yml|automation/ansible/roles/otp_relay_deploy/*)
+                  ansible=1
+                  app=1
+                  only_docs=0
+                  ;;
+                automation/ansible/playbooks/70-validate-production.yml|automation/ansible/roles/validation/*)
+                  ansible=1
+                  only_docs=0
+                  ;;
+                automation/ansible/*)
+                  ansible=1
+                  only_docs=0
+                  ;;
+                install-otp-relay-k8s.sh|scripts/lib/*|scripts/build_help_docs.py)
+                  installer=1
+                  app=1
+                  only_docs=0
+                  ;;
+                main.py|monitor.py|requirements.txt|Dockerfile*|package.json|package-lock.json|frontend/*|scripts/build_grafana_dashboard_configmap.py)
+                  app=1
+                  only_docs=0
+                  ;;
+                k8s/*)
+                  manifests=1
+                  only_docs=0
+                  ;;
+                k8s/observability/*|k8s/grafana/*|k8s/prometheus/*|k8s/loki/*)
+                  observability=1
+                  manifests=1
+                  only_docs=0
+                  ;;
+                .gitignore|.dockerignore)
+                  run_check_only=1
+                  only_docs=0
+                  ;;
+                *)
+                  unknown=1
+                  only_docs=0
+                  ;;
+              esac
+            done < /tmp/changed-files.txt
+
+            if [[ "$has_changes" == "0" ]]; then
+              selected_task="check"
+              run_check_only=1
+              return
+            fi
+
+            if [[ "$only_docs" == "1" ]]; then
+              selected_task="check-docs-only"
+              run_check_only=1
+              return
+            fi
+
+            if [[ "$unknown" == "1" ]]; then
+              # Safe fallback for unknown changed paths.
+              selected_task="deploy-validate"
+              run_ansible_ping=1
+              run_deploy=1
+              run_validate=1
+              return
+            fi
+
+            if [[ "$libvirt" == "1" ]]; then
+              # Do not recreate VMs automatically on push.
+              # Validate script only. Manual workflow_dispatch task=provision-vms does actual provisioning.
+              selected_task="check-libvirt"
+              run_check_only=1
+              return
+            fi
+
+            if [[ "$k3s_bootstrap" == "1" ]]; then
+              # Bootstrap changes can affect cluster install, but do not reinstall automatically on push.
+              selected_task="check-k3s-bootstrap"
+              run_check_only=1
+              return
+            fi
+
+            if [[ "$storage" == "1" ]]; then
+              selected_task="storage-validate"
+              run_ansible_ping=1
+              run_storage_validate=1
+              return
+            fi
+
+            if [[ "$ansible" == "1" && "$app" == "0" && "$manifests" == "0" ]]; then
+              selected_task="ansible-ping"
+              run_ansible_ping=1
+              return
+            fi
+
+            if [[ "$manifests" == "1" || "$observability" == "1" || "$installer" == "1" || "$app" == "1" ]]; then
+              selected_task="deploy-validate"
+              run_ansible_ping=1
+              run_deploy=1
+              run_validate=1
+              return
+            fi
+
+            selected_task="check"
+            run_check_only=1
+          }
+
+          if [[ "$REQUESTED_TASK" == "auto" ]]; then
+            choose_auto
+          else
+            choose_manual
+          fi
+
+          echo "selected_task=${selected_task}" >> "$GITHUB_OUTPUT"
+          echo "run_provision=${run_provision}" >> "$GITHUB_OUTPUT"
+          echo "run_ansible_ping=${run_ansible_ping}" >> "$GITHUB_OUTPUT"
+          echo "run_os_baseline=${run_os_baseline}" >> "$GITHUB_OUTPUT"
+          echo "run_k3s_cp=${run_k3s_cp}" >> "$GITHUB_OUTPUT"
+          echo "run_k3s_workers=${run_k3s_workers}" >> "$GITHUB_OUTPUT"
+          echo "run_node_labels=${run_node_labels}" >> "$GITHUB_OUTPUT"
+          echo "run_storage_validate=${run_storage_validate}" >> "$GITHUB_OUTPUT"
+          echo "run_deploy=${run_deploy}" >> "$GITHUB_OUTPUT"
+          echo "run_validate=${run_validate}" >> "$GITHUB_OUTPUT"
+          echo "run_check_only=${run_check_only}" >> "$GITHUB_OUTPUT"
+
+          cat <<PLAN
+          Selected task: ${selected_task}
+          run_provision=${run_provision}
+          run_ansible_ping=${run_ansible_ping}
+          run_os_baseline=${run_os_baseline}
+          run_k3s_cp=${run_k3s_cp}
+          run_k3s_workers=${run_k3s_workers}
+          run_node_labels=${run_node_labels}
+          run_storage_validate=${run_storage_validate}
+          run_deploy=${run_deploy}
+          run_validate=${run_validate}
+          run_check_only=${run_check_only}
+          PLAN
+
+  run:
+    name: Execute selected task
+    needs: detect
+    runs-on: self-hosted
+    timeout-minutes: 180
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      SELECTED_TASK: ${{ needs.detect.outputs.selected_task }}
+
+      RECREATE_VMS: ${{ github.event.inputs.recreate_vms || '0' }}
+      AUTO_ASSIGN_IPS: ${{ github.event.inputs.auto_assign_ips || '1' }}
+      CP_IP: ${{ github.event.inputs.cp_ip || '172.31.11.151' }}
+      WORKER1_IP: ${{ github.event.inputs.worker1_ip || '172.31.11.152' }}
+      WORKER2_IP: ${{ github.event.inputs.worker2_ip || '172.31.11.153' }}
+      IP_SCAN_PREFIX: ${{ github.event.inputs.ip_scan_prefix || '172.31.11' }}
+      IP_SCAN_START: ${{ github.event.inputs.ip_scan_start || '150' }}
+      IP_SCAN_END: ${{ github.event.inputs.ip_scan_end || '199' }}
+
+      VM_USER: otp-relay
+      VM_PASSWORD: otp-relay
+      VM_RAM_MB: "3072"
+      VM_VCPUS: "2"
+      VM_DISK_GB: "30"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show selected task
+        run: |
+          set -Eeuo pipefail
+          echo "Selected task: ${SELECTED_TASK}"
+          echo "Runner user: $(id)"
+          echo "Workspace: ${GITHUB_WORKSPACE}"
+          uname -a
+          ip -br addr || true
+          ip route || true
+
+      - name: Validate repository scripts
+        run: |
+          set -Eeuo pipefail
+          bash -n install-otp-relay-k8s.sh
+          if compgen -G "scripts/lib/*.sh" >/dev/null; then
+            bash -n scripts/lib/*.sh
+          fi
+          if [[ -f automation/libvirt/provision-poc-vms.sh ]]; then
+            bash -n automation/libvirt/provision-poc-vms.sh
+          fi
+          python3 -m py_compile \
+            main.py \
+            monitor.py \
+            scripts/build_help_docs.py \
+            scripts/build_grafana_dashboard_configmap.py
+
+      - name: Ensure Ansible is installed
+        if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
+        run: |
+          set -Eeuo pipefail
+          if ! command -v ansible >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ansible
+          fi
+          ansible --version
+
+      - name: Provision libvirt POC VMs
+        if: ${{ needs.detect.outputs.run_provision == '1' }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ "${AUTO_ASSIGN_IPS}" == "0" ]]; then
+            export CP_IP WORKER1_IP WORKER2_IP
+          else
+            unset CP_IP WORKER1_IP WORKER2_IP
+          fi
+
+          export RECREATE_VMS
+          export AUTO_ASSIGN_IPS
+          export IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END
+          export VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB
+
+          ./automation/libvirt/provision-poc-vms.sh
+
+      - name: Require generated inventory
+        if: ${{ needs.detect.outputs.run_ansible_ping == '1' || needs.detect.outputs.run_os_baseline == '1' || needs.detect.outputs.run_k3s_cp == '1' || needs.detect.outputs.run_k3s_workers == '1' || needs.detect.outputs.run_node_labels == '1' || needs.detect.outputs.run_storage_validate == '1' || needs.detect.outputs.run_deploy == '1' || needs.detect.outputs.run_validate == '1' }}
+        run: |
+          set -Eeuo pipefail
+          if [[ ! -f automation/ansible/inventory.poc.generated.ini ]]; then
+            echo "Missing generated inventory: automation/ansible/inventory.poc.generated.ini"
+            echo "Run workflow_dispatch task=provision-vms first."
+            exit 1
+          fi
+          cat automation/ansible/inventory.poc.generated.ini
+
+      - name: Ansible connectivity ping
+        if: ${{ needs.detect.outputs.run_ansible_ping == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible -i inventory.poc.generated.ini all -m ping
+
+      - name: OS baseline
+        if: ${{ needs.detect.outputs.run_os_baseline == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/00-os-baseline.yml
+
+      - name: Install K3s control-plane
+        if: ${{ needs.detect.outputs.run_k3s_cp == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/10-k3s-control-plane.yml
+
+      - name: Install K3s workers
+        if: ${{ needs.detect.outputs.run_k3s_workers == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/20-k3s-workers.yml
+
+      - name: Label nodes
+        if: ${{ needs.detect.outputs.run_node_labels == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/30-node-labels.yml
+
+      - name: Validate NFS storage
+        if: ${{ needs.detect.outputs.run_storage_validate == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/40-storage-validate.yml
+
+      - name: Deploy OTP Relay
+        if: ${{ needs.detect.outputs.run_deploy == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/50-deploy-otp-relay.yml
+
+      - name: Validate production/POC state
+        if: ${{ needs.detect.outputs.run_validate == '1' }}
+        working-directory: automation/ansible
+        run: |
+          set -Eeuo pipefail
+          ansible-playbook -i inventory.poc.generated.ini playbooks/70-validate-production.yml
+
+      - name: Final status
+        if: always()
+        run: |
+          set +e
+          echo "Selected task: ${SELECTED_TASK}"
+          echo
+          echo "Libvirt domains:"
+          sudo virsh list --all 2>/dev/null || true
+          echo
+          echo "Generated inventory:"
+          cat automation/ansible/inventory.poc.generated.ini 2>/dev/null || true
