@@ -1,4 +1,43 @@
 ---
+- name: Ensure rsync is installed on control-plane
+  ansible.builtin.apt:
+    name: rsync
+    state: present
+    update_cache: true
+  become: true
+
+- name: Ensure OTP Relay install directory exists on control-plane
+  ansible.builtin.file:
+    path: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+  become: true
+
+- name: Sync local k8s-ansible repo to control-plane
+  ansible.posix.synchronize:
+    src: /opt/k8s-ansible/
+    dest: "{{ otp_install_dir | default('/opt/k8s-ansible') }}/"
+    archive: true
+    delete: true
+    rsync_opts:
+      - "--exclude=.git/"
+      - "--exclude=.installer-venv/"
+      - "--exclude=node_modules/"
+      - "--exclude=automation/libvirt/build/"
+      - "--exclude=automation/ansible/inventory.poc.generated.ini"
+  delegate_to: localhost
+
+- name: Ensure synced installer scripts are executable
+  ansible.builtin.shell: |
+    set -eu
+    chmod +x "{{ otp_install_dir | default('/opt/k8s-ansible') }}/install-otp-relay-k8s.sh"
+    find "{{ otp_install_dir | default('/opt/k8s-ansible') }}/scripts/lib" -type f -name '*.sh' -exec chmod +x {} \;
+  args:
+    executable: /bin/bash
+  become: true
+
 - name: Deploy OTP Relay through the project installer from synced local repo
   ansible.builtin.shell: |
     set -eu
@@ -6,7 +45,7 @@
     REPO_URL="{{ otp_repo_url | default('https://github.com/psi1703/k8s-ansible.git') }}" \
     REPO_REF="{{ otp_repo_ref | default('main') }}" \
     INSTALL_DIR="{{ otp_install_dir | default('/opt/k8s-ansible') }}" \
-    SKIP_REPO_SYNC=auto \
+    SKIP_REPO_SYNC=1 \
     GIT_CLEAN=0 \
     NAMESPACE="{{ otp_namespace | default('otp-relay') }}" \
     SERVICE_TYPE="{{ service_type | default('LoadBalancer') }}" \
@@ -26,3 +65,4 @@
     bash install-otp-relay-k8s.sh
   args:
     executable: /bin/bash
+  become: true
