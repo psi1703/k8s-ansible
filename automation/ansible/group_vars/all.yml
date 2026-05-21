@@ -9,7 +9,7 @@ otp_install_dir: /opt/otp-relay-k8s
 otp_repo_url: https://github.com/psi1703/k8s.git
 otp_repo_ref: main
 
-nfs_server_ip: 172.31.11.114
+nfs_server_ip: 172.31.11.100
 nfs_export_path: /export/otp-relay-data
 nfs_allowed_cidr: 172.31.11.0/24
 
