@@ -2,17 +2,20 @@
 set -Eeuo pipefail
 
 # OTP Relay POC VM provisioner
-# Creates:
-#   otp-cp      172.31.11.151
-#   otp-worker1 172.31.11.152
-#   otp-worker2 172.31.11.153
 #
-# Usage:
-#   ./automation/libvirt/provision-poc-vms.sh
+# Creates three Debian 12 cloud-image VMs for the OTP Relay K3s POC:
+#   otp-cp
+#   otp-worker1
+#   otp-worker2
 #
-# Optional:
-#   HOST_IFACE=enp0s31f6 ./automation/libvirt/provision-poc-vms.sh
-#   VM_PASSWORD='your-password' ./automation/libvirt/provision-poc-vms.sh
+# Default behavior:
+#   - Must be run as a normal user, not with "sudo bash".
+#   - Uses sudo internally only where required.
+#   - Creates/uses SSH key: ~/.ssh/otp-relay-poc
+#   - Creates VM login user: otp-relay
+#   - Auto-assigns free LAN IPs by scanning 172.31.11.150-199
+#   - Writes Ansible inventory:
+#       automation/ansible/inventory.poc.generated.ini
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -24,8 +27,8 @@ GATEWAY="${GATEWAY:-172.31.11.1}"
 DNS="${DNS:-172.31.11.1}"
 PREFIX="${PREFIX:-24}"
 
-VM_USER="${VM_USER:-psi}"
-VM_PASSWORD="${VM_PASSWORD:-psi}"
+VM_USER="${VM_USER:-otp-relay}"
+VM_PASSWORD="${VM_PASSWORD:-otp-relay}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
@@ -39,9 +42,15 @@ CP_NAME="${CP_NAME:-otp-cp}"
 WORKER1_NAME="${WORKER1_NAME:-otp-worker1}"
 WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 
-CP_IP="${CP_IP:-172.31.11.151}"
-WORKER1_IP="${WORKER1_IP:-172.31.11.152}"
-WORKER2_IP="${WORKER2_IP:-172.31.11.153}"
+AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
+IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-172.31.11}"
+IP_SCAN_START="${IP_SCAN_START:-150}"
+IP_SCAN_END="${IP_SCAN_END:-199}"
+RESERVED_IPS="${RESERVED_IPS:-}"
+
+CP_IP="${CP_IP:-}"
+WORKER1_IP="${WORKER1_IP:-}"
+WORKER2_IP="${WORKER2_IP:-}"
 
 VM_RAM_MB="${VM_RAM_MB:-3072}"
 VM_VCPUS="${VM_VCPUS:-2}"
@@ -58,6 +67,19 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fatal "Missing command: $1"
 }
 
+require_non_root() {
+  if [[ "${EUID}" -eq 0 && "${ALLOW_ROOT_RUN:-0}" != "1" ]]; then
+    fatal "Do not run this script with sudo. Run it as your normal user: ./automation/libvirt/provision-poc-vms.sh"
+  fi
+}
+
+require_sudo() {
+  if ! sudo -n true >/dev/null 2>&1; then
+    log "sudo access is required. You may be prompted for your password."
+    sudo true
+  fi
+}
+
 detect_iface() {
   if [[ -n "$HOST_IFACE" ]]; then
     echo "$HOST_IFACE"
@@ -70,20 +92,7 @@ detect_iface() {
 install_packages() {
   log "Installing host virtualization packages..."
   sudo apt-get update
-  sudo apt-get install -y \
-    qemu-kvm \
-    libvirt-daemon-system \
-    libvirt-clients \
-    virtinst \
-    bridge-utils \
-    cloud-image-utils \
-    genisoimage \
-    curl \
-    jq \
-    openssh-client \
-    iproute2 \
-    net-tools \
-    dnsutils
+  sudo apt-get install -y     qemu-kvm     libvirt-daemon-system     libvirt-clients     virtinst     bridge-utils     cloud-image-utils     genisoimage     curl     jq     openssh-client     iproute2     net-tools     dnsutils
 }
 
 enable_libvirt() {
@@ -95,17 +104,23 @@ enable_libvirt() {
   else
     log "Adding $USER to libvirt,kvm groups..."
     sudo usermod -aG libvirt,kvm "$USER"
-    warn "Group membership may require logout/login later. This script will use sudo virsh/virt-install where needed."
+    warn "Group membership may require logout/login later. This script uses sudo virsh/virt-install where needed."
   fi
 }
 
 ensure_ssh_key() {
+  mkdir -p "$(dirname "$SSH_KEY")"
+  chmod 700 "$(dirname "$SSH_KEY")"
+
   if [[ ! -f "$SSH_KEY" ]]; then
     log "Creating SSH key: $SSH_KEY"
     ssh-keygen -t ed25519 -f "$SSH_KEY" -C "otp-relay-poc" -N ""
   fi
 
   [[ -f "$SSH_PUB_KEY" ]] || fatal "Missing SSH public key: $SSH_PUB_KEY"
+
+  chmod 600 "$SSH_KEY"
+  chmod 644 "$SSH_PUB_KEY"
 }
 
 check_host() {
@@ -113,9 +128,29 @@ check_host() {
   vmx_count="$(egrep -c '(vmx|svm)' /proc/cpuinfo || true)"
   [[ "$vmx_count" -gt 0 ]] || fatal "CPU virtualization is not available"
 
-  grep -qE '(^| )kvm(_intel|_amd)?( |$)' /proc/modules || fatal "KVM module is not loaded"
+  if ! grep -qE '^kvm ' /proc/modules; then
+    sudo modprobe kvm || true
+    sudo modprobe kvm_intel || sudo modprobe kvm_amd || true
+  fi
+
+  grep -qE '^kvm ' /proc/modules || fatal "KVM module is not loaded"
 
   ok "KVM available: $vmx_count CPU virtualization flags found"
+}
+
+wait_for_bridge_activation() {
+  for _ in $(seq 1 30); do
+    sudo ip link set "$BRIDGE_NAME" up >/dev/null 2>&1 || true
+
+    if ip -br addr show "$BRIDGE_NAME" | grep -q "$HOST_IP"; then
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  warn "$BRIDGE_NAME did not show expected IP $HOST_IP quickly. Continuing with diagnostics."
+  ip -br addr show "$BRIDGE_NAME" || true
 }
 
 ensure_bridge_networkmanager() {
@@ -136,19 +171,16 @@ ensure_bridge_networkmanager() {
   warn "Network may briefly disconnect. Current active connection: $active_con"
 
   sudo nmcli con add type bridge ifname "$BRIDGE_NAME" con-name "$BRIDGE_NAME"
-  sudo nmcli con modify "$BRIDGE_NAME" \
-    ipv4.method manual \
-    ipv4.addresses "$HOST_IP_CIDR" \
-    ipv4.gateway "$GATEWAY" \
-    ipv4.dns "$DNS 8.8.8.8" \
-    ipv6.method ignore
+  sudo nmcli con modify "$BRIDGE_NAME"     ipv4.method manual     ipv4.addresses "$HOST_IP_CIDR"     ipv4.gateway "$GATEWAY"     ipv4.dns "$DNS 8.8.8.8"     ipv6.method ignore
 
   sudo nmcli con add type ethernet ifname "$iface" master "$BRIDGE_NAME" con-name "${BRIDGE_NAME}-slave-${iface}"
 
   sudo nmcli con down "$active_con" || true
-  sudo nmcli con up "$BRIDGE_NAME"
+  sudo nmcli con up "$BRIDGE_NAME" || true
+  sudo nmcli con up "${BRIDGE_NAME}-slave-${iface}" || true
+  sudo nmcli con up "$BRIDGE_NAME" || true
 
-  sleep 5
+  wait_for_bridge_activation
 }
 
 ensure_bridge_interfaces_file() {
@@ -184,7 +216,7 @@ iface ${BRIDGE_NAME} inet static
 NETEOF
 
   sudo systemctl restart networking
-  sleep 5
+  wait_for_bridge_activation
 }
 
 ensure_bridge() {
@@ -197,6 +229,7 @@ ensure_bridge() {
 
   if ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
     ok "$BRIDGE_NAME already exists"
+    sudo ip link set "$BRIDGE_NAME" up >/dev/null 2>&1 || true
   else
     if systemctl is-active --quiet NetworkManager; then
       ensure_bridge_networkmanager "$iface"
@@ -208,8 +241,107 @@ ensure_bridge() {
   fi
 
   ip -br addr show "$BRIDGE_NAME" || fatal "$BRIDGE_NAME does not exist after setup"
-  ping -c 2 "$GATEWAY" >/dev/null || fatal "Cannot ping gateway $GATEWAY after bridge setup"
-  ok "Bridge network is ready"
+
+  if ping -c 2 "$GATEWAY" >/dev/null 2>&1; then
+    ok "Bridge network can reach gateway $GATEWAY"
+  else
+    warn "Bridge/gateway ping failed immediately after setup."
+    warn "Continuing because NetworkManager bridges can take time to activate."
+    warn "If VMs are unreachable later, inspect br0 and the bridge slave connection."
+  fi
+
+  ok "Bridge network check completed"
+}
+
+ip_is_reserved() {
+  local ip="$1"
+  local reserved
+
+  for reserved in $HOST_IP "$GATEWAY" $RESERVED_IPS; do
+    [[ -n "$reserved" && "$ip" == "$reserved" ]] && return 0
+  done
+
+  return 1
+}
+
+ip_is_in_use() {
+  local ip="$1"
+
+  ip_is_reserved "$ip" && return 0
+
+  if ip -4 addr show | grep -qw "$ip"; then
+    return 0
+  fi
+
+  if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ip neigh show "$ip" 2>/dev/null | grep -qE 'lladdr|REACHABLE|STALE|DELAY|PROBE'; then
+    return 0
+  fi
+
+  return 1
+}
+
+next_free_ip() {
+  local start="$1"
+  local end="$2"
+  local i
+  local ip
+
+  for i in $(seq "$start" "$end"); do
+    ip="${IP_SCAN_PREFIX}.${i}"
+
+    if ! ip_is_in_use "$ip"; then
+      echo "$ip"
+      return 0
+    fi
+  done
+
+  fatal "No free IP found in ${IP_SCAN_PREFIX}.${start}-${IP_SCAN_PREFIX}.${end}"
+}
+
+validate_fixed_ips() {
+  [[ -n "$CP_IP" ]] || fatal "CP_IP is empty"
+  [[ -n "$WORKER1_IP" ]] || fatal "WORKER1_IP is empty"
+  [[ -n "$WORKER2_IP" ]] || fatal "WORKER2_IP is empty"
+
+  [[ "$CP_IP" != "$WORKER1_IP" ]] || fatal "CP_IP and WORKER1_IP are identical"
+  [[ "$CP_IP" != "$WORKER2_IP" ]] || fatal "CP_IP and WORKER2_IP are identical"
+  [[ "$WORKER1_IP" != "$WORKER2_IP" ]] || fatal "WORKER1_IP and WORKER2_IP are identical"
+}
+
+assign_vm_ips() {
+  if [[ "$AUTO_ASSIGN_IPS" == "0" ]]; then
+    log "Using pre-assigned VM IPs"
+    [[ -n "$CP_IP" ]] || fatal "AUTO_ASSIGN_IPS=0 requires CP_IP"
+    [[ -n "$WORKER1_IP" ]] || fatal "AUTO_ASSIGN_IPS=0 requires WORKER1_IP"
+    [[ -n "$WORKER2_IP" ]] || fatal "AUTO_ASSIGN_IPS=0 requires WORKER2_IP"
+    validate_fixed_ips
+  else
+    log "Auto-assigning VM IPs from ${IP_SCAN_PREFIX}.${IP_SCAN_START}-${IP_SCAN_PREFIX}.${IP_SCAN_END}"
+
+    CP_IP="${CP_IP:-$(next_free_ip "$IP_SCAN_START" "$IP_SCAN_END")}"
+    RESERVED_IPS="${RESERVED_IPS} ${CP_IP}"
+
+    WORKER1_IP="${WORKER1_IP:-$(next_free_ip "$IP_SCAN_START" "$IP_SCAN_END")}"
+    RESERVED_IPS="${RESERVED_IPS} ${WORKER1_IP}"
+
+    WORKER2_IP="${WORKER2_IP:-$(next_free_ip "$IP_SCAN_START" "$IP_SCAN_END")}"
+    RESERVED_IPS="${RESERVED_IPS} ${WORKER2_IP}"
+
+    validate_fixed_ips
+  fi
+
+  cat <<IPINFO
+
+[INFO] VM IP assignment:
+  ${CP_NAME}:       ${CP_IP}
+  ${WORKER1_NAME}:  ${WORKER1_IP}
+  ${WORKER2_NAME}:  ${WORKER2_IP}
+
+IPINFO
 }
 
 download_base_image() {
@@ -321,24 +453,9 @@ ethernets:
         - 8.8.8.8
 CLOUDNET
 
-  cloud-localds \
-    --network-config="$network_config" \
-    "$seed" \
-    "$user_data" \
-    "$meta_data"
+  cloud-localds     --network-config="$network_config"     "$seed"     "$user_data"     "$meta_data"
 
-  sudo virt-install \
-    --name "$name" \
-    --memory "$VM_RAM_MB" \
-    --vcpus "$VM_VCPUS" \
-    --disk path="$disk",format=qcow2,bus=virtio \
-    --disk path="$seed",device=cdrom \
-    --os-variant debian12 \
-    --virt-type kvm \
-    --graphics none \
-    --noautoconsole \
-    --import \
-    --network bridge="$BRIDGE_NAME",model=virtio
+  sudo virt-install     --name "$name"     --memory "$VM_RAM_MB"     --vcpus "$VM_VCPUS"     --disk path="$disk",format=qcow2,bus=virtio     --disk path="$seed",device=cdrom     --os-variant debian12     --virt-type kvm     --graphics none     --noautoconsole     --import     --network bridge="$BRIDGE_NAME",model=virtio
 
   ok "Created VM: $name"
 }
@@ -350,19 +467,17 @@ wait_for_ssh() {
   log "Waiting for SSH on $name ($ip)..."
 
   for _ in $(seq 1 90); do
-    if ssh \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=3 \
-      -i "$SSH_KEY" \
-      "${VM_USER}@${ip}" "hostname" >/dev/null 2>&1; then
+    if ssh       -o StrictHostKeyChecking=no       -o UserKnownHostsFile=/dev/null       -o ConnectTimeout=3       -i "$SSH_KEY"       "${VM_USER}@${ip}" "hostname" >/dev/null 2>&1; then
       ok "SSH ready: $name ($ip)"
       return 0
     fi
     sleep 5
   done
 
-  fatal "SSH did not become ready for $name ($ip)"
+  warn "SSH did not become ready for $name ($ip) within timeout."
+  warn "VM may still be booting/cloud-init may still be running."
+  warn "Try manually: ssh -i ${SSH_KEY} ${VM_USER}@${ip}"
+  return 1
 }
 
 write_ansible_inventory() {
@@ -393,12 +508,25 @@ INVEOF
 print_summary() {
   cat <<SUMMARY
 
-[DONE] POC VMs are provisioned.
+[DONE] POC VM provisioning step finished.
+
+VM access:
+  User:      ${VM_USER}
+  Password:  ${VM_PASSWORD}
+  SSH key:   ${SSH_KEY}
 
 VMs:
-  ${CP_NAME}       ${CP_IP}
-  ${WORKER1_NAME}  ${WORKER1_IP}
-  ${WORKER2_NAME}  ${WORKER2_IP}
+  Hostname: ${CP_NAME}
+  IP:       ${CP_IP}
+  SSH:      ssh -i ${SSH_KEY} ${VM_USER}@${CP_IP}
+
+  Hostname: ${WORKER1_NAME}
+  IP:       ${WORKER1_IP}
+  SSH:      ssh -i ${SSH_KEY} ${VM_USER}@${WORKER1_IP}
+
+  Hostname: ${WORKER2_NAME}
+  IP:       ${WORKER2_IP}
+  SSH:      ssh -i ${SSH_KEY} ${VM_USER}@${WORKER2_IP}
 
 Inventory:
   ${ANSIBLE_INVENTORY}
@@ -416,7 +544,7 @@ Next commands:
   ansible-playbook -i inventory.poc.generated.ini playbooks/70-validate-production.yml
 
 To recreate VMs later:
-  RECREATE_VMS=1 ${REPO_ROOT}/automation/libvirt/provision-poc-vms.sh
+  RECREATE_VMS=1 VM_USER=${VM_USER} ${REPO_ROOT}/automation/libvirt/provision-poc-vms.sh
 
 SUMMARY
 }
@@ -424,6 +552,8 @@ SUMMARY
 main() {
   cd "$REPO_ROOT"
 
+  require_non_root
+  require_sudo
   check_host
   install_packages
   enable_libvirt
@@ -434,6 +564,7 @@ main() {
   [[ -n "$iface" ]] || fatal "Could not detect default network interface"
 
   ensure_bridge "$iface"
+  assign_vm_ips
 
   mkdir -p "$BUILD_DIR"
   download_base_image
@@ -442,9 +573,9 @@ main() {
   create_vm "$WORKER1_NAME" "$WORKER1_IP"
   create_vm "$WORKER2_NAME" "$WORKER2_IP"
 
-  wait_for_ssh "$CP_IP" "$CP_NAME"
-  wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME"
-  wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME"
+  wait_for_ssh "$CP_IP" "$CP_NAME" || true
+  wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME" || true
+  wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME" || true
 
   write_ansible_inventory
   sudo virsh list --all
