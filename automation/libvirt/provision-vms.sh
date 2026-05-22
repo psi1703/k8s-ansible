@@ -43,7 +43,7 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
 VM_IMAGE_DIR="${VM_IMAGE_DIR:-/var/lib/libvirt/images}"
-BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-13-generic-amd64.qcow2}"
+BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2}"
 BASE_IMAGE="${VM_IMAGE_DIR}/debian-13-generic-amd64.qcow2"
 
 ANSIBLE_INVENTORY="${REPO_ROOT}/automation/ansible/inventory.generated.ini"
@@ -362,16 +362,52 @@ assign_vm_ips() {
 IPINFO
 }
 
+is_qcow2_image() {
+  local image="$1"
+
+  [[ -f "$image" ]] || return 1
+  sudo qemu-img info --output=json "$image" 2>/dev/null | grep -q '"format"[[:space:]]*:[[:space:]]*"qcow2"'
+}
+
+validate_qcow2_or_remove() {
+  local image="$1"
+  local label="$2"
+
+  if [[ ! -f "$image" ]]; then
+    return 1
+  fi
+
+  if is_qcow2_image "$image"; then
+    return 0
+  fi
+
+  warn "$label exists but is not a valid qcow2 image; removing: $image"
+  sudo rm -f "$image"
+  return 1
+}
+
 download_base_image() {
+  local tmp_image="${BASE_IMAGE}.tmp.$$"
+
   sudo mkdir -p "$VM_IMAGE_DIR"
 
-  if [[ -f "$BASE_IMAGE" ]]; then
-    ok "Base image already exists: $BASE_IMAGE"
+  if validate_qcow2_or_remove "$BASE_IMAGE" "Base image"; then
+    ok "Base image already exists and is valid qcow2: $BASE_IMAGE"
     return 0
   fi
 
   log "Downloading Debian 13 cloud image..."
-  sudo curl -L "$BASE_IMAGE_URL" -o "$BASE_IMAGE"
+  log "Base image URL: $BASE_IMAGE_URL"
+
+  sudo rm -f "$tmp_image"
+  sudo curl -fL --retry 3 --retry-delay 3 "$BASE_IMAGE_URL" -o "$tmp_image"
+
+  if ! is_qcow2_image "$tmp_image"; then
+    sudo rm -f "$tmp_image"
+    fatal "Downloaded base image is not qcow2. Check BASE_IMAGE_URL: $BASE_IMAGE_URL"
+  fi
+
+  sudo mv "$tmp_image" "$BASE_IMAGE"
   ok "Downloaded base image: $BASE_IMAGE"
 }
 
@@ -465,8 +501,12 @@ create_vm() {
 
   log "Creating VM: $name at $ip"
 
+  validate_qcow2_or_remove "$disk" "Existing VM disk" || true
   sudo rm -f "$disk"
+
+  validate_qcow2_or_remove "$BASE_IMAGE" "Base image" || fatal "Base image is missing or invalid after download step: $BASE_IMAGE"
   sudo qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$disk" "${VM_DISK_GB}G"
+  validate_qcow2_or_remove "$disk" "New VM disk" || fatal "Failed to create valid qcow2 disk: $disk"
 
   cat > "$user_data" <<CLOUDUSER
 #cloud-config
