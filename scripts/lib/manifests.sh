@@ -298,23 +298,41 @@ for name in redis_manifests:
 # Ingress
 if (manifest_dir / "ingress.yaml").exists():
     text = replace_namespace(read("ingress.yaml"))
+    ingress_enabled = os.environ.get("INGRESS_ENABLED", "1") == "1"
     tls_enabled = os.environ.get("TLS_ENABLED") == "1"
-    tls_host = os.environ.get("TLS_HOST", "")
-    tls_secret_name = os.environ.get("TLS_SECRET_NAME", "otp-relay-tls")
+    tls_host = os.environ.get("TLS_HOST", "").strip()
+    tls_secret_name = os.environ.get("TLS_SECRET_NAME", "otp-relay-tls").strip()
 
-    text = re.sub(r"host: .*", f"host: {tls_host}", text)
+    if ingress_enabled and not tls_host:
+        raise SystemExit("TLS_HOST is required when INGRESS_ENABLED=1")
+    if tls_enabled and not tls_host:
+        raise SystemExit("TLS_HOST is required when TLS_ENABLED=1")
+
+    if tls_host:
+        # Replace both empty and populated rule host lines, for example:
+        #   - host:
+        #   - host: old.example
+        text = re.sub(
+            r"^(\s*-\s*host:)\s*.*$",
+            rf"\1 {tls_host}",
+            text,
+            flags=re.MULTILINE,
+        )
+
     if tls_enabled:
-        if "tls:" not in text:
-            text += (
-                "  tls:\n"
-                "    - hosts:\n"
-                f"        - {tls_host}\n"
-                f"      secretName: {tls_secret_name}\n"
-            )
-        else:
-            text = re.sub(r"secretName: .*", f"secretName: {tls_secret_name}", text)
+        # Rebuild the TLS section instead of trying to patch possibly empty
+        # template values such as '- ""' or '-'. This avoids invalid ingress
+        # output when the template host is blank.
+        text = re.sub(r"\n  tls:\n(?:    .+\n)+", "\n", text)
+        text = text.rstrip() + (
+            "\n  tls:\n"
+            "    - hosts:\n"
+            f"        - {tls_host}\n"
+            f"      secretName: {tls_secret_name}\n"
+        )
     else:
         text = re.sub(r"\n  tls:\n(?:    .+\n)+", "\n", text)
+
     write("ingress.yaml", text)
 PY_RENDER_MANIFESTS
 }
@@ -325,4 +343,3 @@ apply_if_exists() {
     k3s kubectl apply -f "$file"
   fi
 }
-
