@@ -1,33 +1,11 @@
 ---
+# Keep deployment-specific values in the repository root .env file.
+# The Ansible workflow copies the repo to the control-plane and runs the same
+# installer, which loads .env and renders Kubernetes manifests from it.
 cluster_name: otp-relay-prod
 
 k3s_disable_servicelb: true
 k3s_disable_traefik: false
 
-otp_namespace: otp-relay
 otp_install_dir: /opt/k8s-ansible
-otp_repo_url: https://github.com/psi1703/k8s-ansible.git
-otp_repo_ref: main
-
-nfs_server_ip: 172.31.11.100
-nfs_export_path: /export/otp-relay-data
-nfs_allowed_cidr: 172.31.11.0/24
-
-metallb_enabled: true
-metallb_ip_range: 172.31.11.120-172.31.11.130
-
-service_type: LoadBalancer
-ingress_enabled: true
-tls_enabled: true
-tls_host: srvotptest26.init-db.lan
-
-redis_enabled: true
-redis_required: true
-
-monitor_enabled: true
-phone_ip: 172.31.11.122
-phone_interface: ens33
-
-# POC lab sizing note:
-# cp/worker1/worker2 are expected to run with max 3 GB RAM each.
-# The NFS server can be external, for example a laptop on the same LAN.
+otp_env_file: /opt/k8s-ansible/.env
