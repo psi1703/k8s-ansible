@@ -27,6 +27,7 @@ RUN python -m venv /build/venv && \
     /build/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
+COPY otp_relay/ ./otp_relay/
 
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
@@ -39,11 +40,13 @@ WORKDIR /app
 # Copy venv, backend code, and built frontend only.
 COPY --from=python-builder /build/venv ./venv
 COPY --from=python-builder /build/main.py .
+COPY --from=python-builder /build/otp_relay ./otp_relay
 COPY --from=frontend-builder /build/frontend ./frontend
 
 # Defense-in-depth: the runtime image should serve app.js, not app.jsx.
 RUN test -s /app/frontend/app.js && \
     test ! -e /app/frontend/app.jsx && \
+    test -d /app/otp_relay && \
     mkdir -p /app/data && \
     chown otprelay:otprelay /app/data
 
