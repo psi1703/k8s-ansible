@@ -70,6 +70,10 @@ VM_VCPUS="${VM_VCPUS:-2}"
 VM_DISK_GB="${VM_DISK_GB:-20}"
 
 BUILD_DIR="${REPO_ROOT}/automation/libvirt/build"
+# Cloud-init seed ISOs must live where the libvirt/qemu service user can read them.
+# Files under /opt/k8s-ansible may be inaccessible to qemu because /opt or the repo
+# can be mode 0750/root-owned after git/sudo operations.
+SEED_IMAGE_DIR="${SEED_IMAGE_DIR:-${VM_IMAGE_DIR}}"
 
 : "${HOST_IP_CIDR:?HOST_IP_CIDR must be set in .env or the shell environment}"
 : "${GATEWAY:?GATEWAY must be set in .env or the shell environment}"
@@ -481,6 +485,30 @@ prepare_vm_slot() {
   echo "new"
 }
 
+
+prepare_seed_iso_for_libvirt() {
+  local seed="$1"
+
+  sudo mkdir -p "$SEED_IMAGE_DIR"
+  sudo chown root:libvirt-qemu "$SEED_IMAGE_DIR" 2>/dev/null || sudo chown root:qemu "$SEED_IMAGE_DIR" 2>/dev/null || true
+  sudo chmod 0755 "$SEED_IMAGE_DIR" || true
+
+  # qemu must be able to traverse the directory and read the seed ISO.
+  sudo chown root:libvirt-qemu "$seed" 2>/dev/null || sudo chown root:qemu "$seed" 2>/dev/null || sudo chown root:root "$seed" || true
+  sudo chmod 0644 "$seed" || true
+
+  if sudo -u libvirt-qemu test -r "$seed" 2>/dev/null; then
+    return 0
+  fi
+
+  if sudo -u qemu test -r "$seed" 2>/dev/null; then
+    return 0
+  fi
+
+  # Last-resort validation for distros where the qemu service user name differs.
+  test -r "$seed" || fatal "seed ISO is not readable: $seed"
+}
+
 create_vm() {
   local name="$1"
   local ip="$2"
@@ -494,12 +522,17 @@ create_vm() {
   fi
 
   local disk="${VM_IMAGE_DIR}/${name}.qcow2"
-  local seed="${BUILD_DIR}/${name}-seed.iso"
+  local seed="${SEED_IMAGE_DIR}/${name}-seed.iso"
   local user_data="${BUILD_DIR}/${name}-user-data"
   local meta_data="${BUILD_DIR}/${name}-meta-data"
   local network_config="${BUILD_DIR}/${name}-network-config"
 
   log "Creating VM: $name at $ip"
+
+  mkdir -p "$BUILD_DIR"
+  sudo mkdir -p "$SEED_IMAGE_DIR"
+  rm -f "$user_data" "$meta_data" "$network_config"
+  sudo rm -f "$seed"
 
   validate_qcow2_or_remove "$disk" "Existing VM disk" || true
   sudo rm -f "$disk"
@@ -564,9 +597,13 @@ ethernets:
         - 8.8.8.8
 CLOUDNET
 
-  cloud-localds --network-config="$network_config" "$seed" "$user_data" "$meta_data"
+  local seed_tmp="${BUILD_DIR}/${name}-seed.iso"
+  rm -f "$seed_tmp"
+  cloud-localds --network-config="$network_config" "$seed_tmp" "$user_data" "$meta_data"
+  sudo install -m 0644 "$seed_tmp" "$seed"
+  prepare_seed_iso_for_libvirt "$seed"
 
-  sudo virt-install --name "$name" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --disk path="$disk",format=qcow2,bus=virtio --disk path="$seed",device=cdrom --os-variant debian13 --virt-type kvm --graphics none --noautoconsole --import --network bridge="$BRIDGE_NAME",model=virtio
+  sudo virt-install --name "$name" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --disk path="$disk",format=qcow2,bus=virtio --disk path="$seed",device=cdrom,readonly=on --os-variant debian13 --virt-type kvm --graphics none --noautoconsole --import --network bridge="$BRIDGE_NAME",model=virtio
 
   ok "Created VM: $name"
 }
