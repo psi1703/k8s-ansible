@@ -60,7 +60,7 @@
     INSTALL_METALLB="{{ 1 if (metallb_enabled | default(true) | bool) else 0 }}" \
     METALLB_IP_RANGE="{{ metallb_ip_range | default('172.31.11.120-172.31.11.130') }}" \
     PHONE_IP="{{ phone_ip | default('172.31.11.122') }}" \
-    PHONE_INTERFACE="{{ phone_interface | default('eth0') }}" \
+    PHONE_INTERFACE="{{ phone_interface | default('ens33') }}" \
     NONINTERACTIVE=1 \
     bash install-otp-relay-k8s.sh
   args:
