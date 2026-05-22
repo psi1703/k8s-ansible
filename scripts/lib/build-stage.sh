@@ -35,6 +35,21 @@ fi
 
 }
 
+validate_dockerfile_packaging() {
+  [ -f "$APP_DOCKERFILE" ] || fatal "app Dockerfile is missing: $APP_DOCKERFILE"
+  [ -f "$MONITOR_DOCKERFILE" ] || fatal "monitor Dockerfile is missing: $MONITOR_DOCKERFILE"
+
+  if requires_app_image; then
+    [ -d otp_relay ] || fatal "otp_relay package directory is missing from repo root"
+    grep -Eq 'COPY[[:space:]].*otp_relay' "$APP_DOCKERFILE" ||       fatal "$APP_DOCKERFILE must copy otp_relay/ into the image because main.py imports otp_relay.routes"
+  fi
+
+  if requires_monitor_image; then
+    [ -d otp_monitor ] || fatal "otp_monitor package directory is missing from repo root"
+    grep -Eq 'COPY[[:space:]].*otp_monitor' "$MONITOR_DOCKERFILE" ||       fatal "$MONITOR_DOCKERFILE must copy otp_monitor/ into the image because monitor.py imports otp_monitor.runner"
+  fi
+}
+
 stage_and_validate_manifests() {
 log "staging repository Dockerfiles and Kubernetes manifests for deployment"
 GENERATED_DIR="$(mktemp -d /tmp/otp-relay-k8s.XXXXXX)"
@@ -47,6 +62,9 @@ MONITOR_DOCKERFILE="k8s/Dockerfile.monitor"
 cleanup_generated_assets() { rm -rf "$GENERATED_DIR"; }
 trap cleanup_generated_assets EXIT
 mkdir -p "$MANIFEST_DIR"
+
+validate_dockerfile_packaging
+
 cp "$SOURCE_MANIFEST_DIR"/*.yaml "$MANIFEST_DIR"/
 rm -f "$MANIFEST_DIR/secret-example.env"
 
