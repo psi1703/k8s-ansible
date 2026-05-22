@@ -28,10 +28,13 @@ RUN python -m venv /app/venv && \
     /app/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY monitor.py .
+COPY otp_monitor/ ./otp_monitor/
 
 # Create the data directory — shares the same PVC as the app pod.
 # Both containers mount the PVC at /app/data so they share the audit log.
-RUN mkdir -p /app/data && chown otprelay:otprelay /app/data
+RUN test -d /app/otp_monitor && \
+    mkdir -p /app/data && \
+    chown otprelay:otprelay /app/data
 
 USER otprelay
 
