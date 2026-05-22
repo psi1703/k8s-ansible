@@ -486,6 +486,16 @@ prepare_vm_slot() {
 }
 
 
+
+deterministic_vm_mac() {
+  local name="$1"
+  local ip="$2"
+  local hex
+
+  hex="$(printf '%s' "${name}-${ip}" | sha256sum | awk '{print $1}')"
+  printf '52:54:%s:%s:%s:%s' "${hex:0:2}" "${hex:2:2}" "${hex:4:2}" "${hex:6:2}"
+}
+
 prepare_seed_iso_for_libvirt() {
   local seed="$1"
 
@@ -526,6 +536,9 @@ create_vm() {
   local user_data="${BUILD_DIR}/${name}-user-data"
   local meta_data="${BUILD_DIR}/${name}-meta-data"
   local network_config="${BUILD_DIR}/${name}-network-config"
+  local mac
+
+  mac="$(deterministic_vm_mac "$name" "$ip")"
 
   log "Creating VM: $name at $ip"
 
@@ -584,7 +597,10 @@ CLOUDMETA
   cat > "$network_config" <<CLOUDNET
 version: 2
 ethernets:
-  enp1s0:
+  eth0:
+    match:
+      macaddress: "${mac}"
+    set-name: eth0
     dhcp4: false
     addresses:
       - ${ip}/${PREFIX}
@@ -603,7 +619,7 @@ CLOUDNET
   sudo install -m 0644 "$seed_tmp" "$seed"
   prepare_seed_iso_for_libvirt "$seed"
 
-  sudo virt-install --name "$name" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --disk path="$disk",format=qcow2,bus=virtio --disk path="$seed",device=cdrom,readonly=on --os-variant debian13 --virt-type kvm --graphics none --noautoconsole --import --network bridge="$BRIDGE_NAME",model=virtio
+  sudo virt-install --name "$name" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --disk path="$disk",format=qcow2,bus=virtio --disk path="$seed",device=cdrom,readonly=on --os-variant debian13 --virt-type kvm --graphics none --noautoconsole --import --network bridge="$BRIDGE_NAME",model=virtio,mac="$mac"
 
   ok "Created VM: $name"
 }
