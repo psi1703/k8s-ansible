@@ -76,4 +76,4 @@ if [[ "${VALIDATE_OTP_RELAY:-0}" == "1" ]]; then
   ansible-playbook -i "$INVENTORY" playbooks/70-validate-production.yml
 fi
 
-ok "POC cluster automation completed."
+ok "Cluster automation completed."
