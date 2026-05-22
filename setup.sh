@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
+# Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
 #
-# Default mode runs the existing local K3s installer.
-# VM mode runs the existing libvirt VM provisioner and then the existing
-# Ansible POC cluster runner.
+# Normal use:
+#   ./setup.sh
+#
+# Behavior:
+#   - Creates or reuses .env as the single source of configuration values.
+#   - Does not require workflow flags for fresh setup.
+#   - Detects local K3s, generated Ansible inventory, libvirt VMs, and repo scripts.
+#   - Chooses the missing setup path automatically.
+#   - Does not use .env to decide whether VM provisioning is enabled.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-SETUP_ACTION="local"
-RUN_ANSIBLE="auto"
-DEPLOY_OTP_RELAY="${DEPLOY_OTP_RELAY:-0}"
-VALIDATE_OTP_RELAY="${VALIDATE_OTP_RELAY:-0}"
 FORCE_ENV_MENU="0"
 NONINTERACTIVE="${NONINTERACTIVE:-0}"
+DRY_RUN="0"
+FORCE_LOCAL="0"
+FORCE_REPROVISION_VMS="0"
+SKIP_ANSIBLE="0"
+
+# OTP Relay should deploy during smart Ansible setup unless explicitly overridden.
+DEPLOY_OTP_RELAY="${DEPLOY_OTP_RELAY:-1}"
+VALIDATE_OTP_RELAY="${VALIDATE_OTP_RELAY:-0}"
 
 log() { printf '[setup] %s\n' "$*"; }
 warn() { printf '[setup] WARNING: %s\n' "$*" >&2; }
@@ -24,55 +34,40 @@ fatal() { printf '[setup] ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'USAGE'
 Usage:
-  ./setup.sh [options]
+  ./setup.sh
 
-Common:
-  ./setup.sh                         Run local K3s/app setup using install-otp-relay-k8s.sh
-  ./setup.sh --provision-vms          Create/update POC VMs, then run Ansible cluster setup
-  ./setup.sh --provision-vms --deploy Run POC VMs, Ansible cluster setup, and OTP Relay deploy
+Optional overrides:
+  --edit-env          Open the saved .env change menu before continuing.
+  --dry-run           Detect state and print planned action without changing the system.
+  --local             Force local K3s/app installer path for this run.
+  --reprovision-vms   Force VM provisioner even if inventory/VMs already exist.
+  --no-ansible        Provision/update VMs only; skip Ansible cluster setup.
+  --noninteractive    Do not prompt where supported; requires complete .env/exported env.
+  -h, --help          Show this help.
 
-Options:
-  --local                 Run the local installer flow. This is the default.
-  --provision-vms         Run automation/libvirt/provision-vms.sh before Ansible.
-  --ansible               Run automation/ansible/run-cluster.sh.
-  --no-ansible            Only run VM provisioning; skip Ansible cluster setup.
-  --deploy                Set DEPLOY_OTP_RELAY=1 for the Ansible POC runner.
-  --validate              Set VALIDATE_OTP_RELAY=1 for the Ansible POC runner.
-  --edit-env              Open the saved .env change menu before continuing.
-  --noninteractive        Do not prompt where supported; requires a complete .env/exported env.
-  -h, --help              Show this help.
-
-Notes:
-  - .env is the single source of operator input.
-  - Existing valid .env values are reused and not overwritten silently.
-  - VM provisioning uses automation/libvirt/provision-vms.sh.
-  - The provisioner writes automation/ansible/inventory.generated.ini; setup.sh passes
-    that exact inventory to automation/ansible/run-cluster.sh.
+Default behavior:
+  ./setup.sh creates or reuses .env, detects missing components, and chooses
+  the correct setup path automatically. The .env file stores configuration
+  values only; it does not decide the workflow mode.
 USAGE
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --local)
-      SETUP_ACTION="local"
-      ;;
-    --provision-vms|--vms|--vm)
-      SETUP_ACTION="provision-vms"
-      ;;
-    --ansible)
-      RUN_ANSIBLE="1"
-      ;;
-    --no-ansible)
-      RUN_ANSIBLE="0"
-      ;;
-    --deploy)
-      DEPLOY_OTP_RELAY="1"
-      ;;
-    --validate)
-      VALIDATE_OTP_RELAY="1"
-      ;;
     --edit-env)
       FORCE_ENV_MENU="1"
+      ;;
+    --dry-run)
+      DRY_RUN="1"
+      ;;
+    --local)
+      FORCE_LOCAL="1"
+      ;;
+    --reprovision-vms)
+      FORCE_REPROVISION_VMS="1"
+      ;;
+    --no-ansible)
+      SKIP_ANSIBLE="1"
       ;;
     --noninteractive)
       NONINTERACTIVE="1"
@@ -89,11 +84,21 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+restore_setup_logging() {
+  eval 'log() { printf '\''[setup] %s\n'\'' "$*"; }'
+  eval 'warn() { printf '\''[setup] WARNING: %s\n'\'' "$*" >&2; }'
+  eval 'fatal() { printf '\''[setup] ERROR: %s\n'\'' "$*" >&2; exit 1; }'
+}
+
 source_installer_env_libs() {
+  [ -f "$SCRIPT_DIR/scripts/lib/common.sh" ] || fatal "missing scripts/lib/common.sh"
+  [ -f "$SCRIPT_DIR/scripts/lib/env.sh" ] || fatal "missing scripts/lib/env.sh"
+
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/scripts/lib/common.sh"
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/scripts/lib/env.sh"
+  restore_setup_logging
 }
 
 chown_env_to_original_user() {
@@ -149,6 +154,9 @@ ensure_base_env() {
     normalize_loaded_env
     validate_env_required
   fi
+
+  chown_env_to_original_user
+  source_env_if_present
 }
 
 _env_escape_sed() {
@@ -195,7 +203,7 @@ prompt_value() {
 
   if [ "$NONINTERACTIVE" = "1" ]; then
     if [ "$required" = "1" ] && [ -z "$default" ]; then
-      fatal "$key is required for VM provisioning; set it in .env or export it"
+      fatal "$key is required; set it in .env or export it"
     fi
     set_env_key "$key" "$default"
     return 0
@@ -249,7 +257,10 @@ default_scan_prefix() {
   local cidr="${HOST_IP_CIDR:-}"
   local ip="${cidr%%/*}"
   if printf '%s' "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-    printf '%s.%s.%s' "$(printf '%s' "$ip" | cut -d. -f1)" "$(printf '%s' "$ip" | cut -d. -f2)" "$(printf '%s' "$ip" | cut -d. -f3)"
+    printf '%s.%s.%s' \
+      "$(printf '%s' "$ip" | cut -d. -f1)" \
+      "$(printf '%s' "$ip" | cut -d. -f2)" \
+      "$(printf '%s' "$ip" | cut -d. -f3)"
   fi
 }
 
@@ -299,6 +310,166 @@ EOF_VM_INFO
   source_env_if_present
 }
 
+provisioner_path() {
+  local p="$SCRIPT_DIR/automation/libvirt/provision-vms.sh"
+  [ -f "$p" ] && printf '%s\n' "$p"
+}
+
+ansible_runner_path() {
+  local candidate
+  for candidate in \
+    "$SCRIPT_DIR/automation/ansible/run-cluster" \
+    "$SCRIPT_DIR/automation/ansible/run-cluster.sh" \
+    "$SCRIPT_DIR/automation/ansible/run-poc-cluster.sh"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ansible_inventory_path() {
+  local candidate
+  for candidate in \
+    "$SCRIPT_DIR/automation/ansible/inventory.generated.ini" \
+    "$SCRIPT_DIR/automation/ansible/inventory.poc.generated.ini"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+local_kubectl() {
+  if command -v k3s >/dev/null 2>&1; then
+    k3s kubectl "$@"
+  elif command -v kubectl >/dev/null 2>&1; then
+    kubectl "$@"
+  else
+    return 127
+  fi
+}
+
+local_k3s_reachable() {
+  local_kubectl get nodes >/dev/null 2>&1
+}
+
+local_k3s_installed() {
+  command -v k3s >/dev/null 2>&1 && return 0
+  systemctl list-unit-files k3s.service >/dev/null 2>&1 && return 0
+  [ -d /var/lib/rancher/k3s ] && return 0
+  return 1
+}
+
+namespace_exists() {
+  local ns="${NAMESPACE:-otp-relay}"
+  local_kubectl get namespace "$ns" >/dev/null 2>&1
+}
+
+app_deployed() {
+  local ns="${NAMESPACE:-otp-relay}"
+  local_kubectl get deploy otp-relay -n "$ns" >/dev/null 2>&1
+}
+
+redis_deployed() {
+  local ns="${NAMESPACE:-otp-relay}"
+  local_kubectl get statefulset otp-redis -n "$ns" >/dev/null 2>&1
+}
+
+libvirt_vm_exists() {
+  command -v virsh >/dev/null 2>&1 || return 1
+  local cp_name="${CP_NAME:-otp-master}"
+  local w1_name="${WORKER1_NAME:-otp-worker1}"
+  local w2_name="${WORKER2_NAME:-otp-worker2}"
+
+  virsh list --all --name 2>/dev/null | grep -Eq "^(${cp_name}|${w1_name}|${w2_name})$"
+}
+
+detect_setup_path() {
+  local provisioner=""
+  local runner=""
+  local inventory=""
+
+  provisioner="$(provisioner_path || true)"
+  runner="$(ansible_runner_path || true)"
+  inventory="$(ansible_inventory_path || true)"
+
+  if [ "$FORCE_LOCAL" = "1" ]; then
+    printf '%s\n' "local-forced"
+    return 0
+  fi
+
+  if [ "$FORCE_REPROVISION_VMS" = "1" ]; then
+    [ -n "$provisioner" ] || fatal "--reprovision-vms requested but automation/libvirt/provision-vms.sh is missing"
+    [ -n "$runner" ] || fatal "--reprovision-vms requested but no Ansible runner was found"
+    printf '%s\n' "vm-provision"
+    return 0
+  fi
+
+  if [ -n "$inventory" ] && [ -n "$runner" ]; then
+    printf '%s\n' "ansible-existing"
+    return 0
+  fi
+
+  if local_k3s_reachable; then
+    printf '%s\n' "local-existing"
+    return 0
+  fi
+
+  if libvirt_vm_exists && [ -n "$provisioner" ] && [ -n "$runner" ]; then
+    printf '%s\n' "vm-provision"
+    return 0
+  fi
+
+  if [ -n "$provisioner" ] && [ -n "$runner" ] && ! local_k3s_installed; then
+    printf '%s\n' "vm-provision"
+    return 0
+  fi
+
+  printf '%s\n' "local-fresh"
+}
+
+print_detected_state() {
+  local provisioner="$(provisioner_path || true)"
+  local runner="$(ansible_runner_path || true)"
+  local inventory="$(ansible_inventory_path || true)"
+
+  log "detected state:"
+  log "  .env: $([ -f "$SCRIPT_DIR/.env" ] && echo present || echo missing)"
+  log "  provisioner: ${provisioner:-missing}"
+  log "  ansible runner: ${runner:-missing}"
+  log "  ansible inventory: ${inventory:-missing}"
+  if local_k3s_reachable; then
+    log "  local cluster: reachable"
+  elif local_k3s_installed; then
+    log "  local cluster: installed but not reachable"
+  else
+    log "  local cluster: missing"
+  fi
+  if libvirt_vm_exists; then
+    log "  libvirt OTP Relay VMs: present"
+  else
+    log "  libvirt OTP Relay VMs: missing or virsh unavailable"
+  fi
+  if local_k3s_reachable && namespace_exists; then
+    log "  namespace ${NAMESPACE:-otp-relay}: present"
+  else
+    log "  namespace ${NAMESPACE:-otp-relay}: not detected locally"
+  fi
+  if local_k3s_reachable && app_deployed; then
+    log "  app deployment: present locally"
+  else
+    log "  app deployment: not detected locally"
+  fi
+  if local_k3s_reachable && redis_deployed; then
+    log "  redis: present locally"
+  else
+    log "  redis: not detected locally"
+  fi
+}
+
 run_local_install() {
   [ -f "$SCRIPT_DIR/install-otp-relay-k8s.sh" ] || fatal "install-otp-relay-k8s.sh is missing"
   log "running local installer: install-otp-relay-k8s.sh"
@@ -306,11 +477,10 @@ run_local_install() {
 }
 
 run_vm_provisioner() {
-  local provisioner="$SCRIPT_DIR/automation/libvirt/provision-vms.sh"
-  [ -f "$provisioner" ] || fatal "missing VM provisioner: $provisioner"
+  local provisioner
+  provisioner="$(provisioner_path || true)"
+  [ -n "$provisioner" ] || fatal "missing VM provisioner: automation/libvirt/provision-vms.sh"
 
-  ensure_base_env
-  chown_env_to_original_user
   ensure_vm_env
   chown_env_to_original_user
 
@@ -319,13 +489,19 @@ run_vm_provisioner() {
 }
 
 run_ansible_cluster() {
-  local runner="$SCRIPT_DIR/automation/ansible/run-cluster.sh"
-  local inventory="$SCRIPT_DIR/automation/ansible/inventory.generated.ini"
+  local runner inventory
+  runner="$(ansible_runner_path || true)"
+  inventory="$(ansible_inventory_path || true)"
 
-  [ -f "$runner" ] || fatal "missing Ansible runner: $runner"
-  [ -f "$inventory" ] || fatal "missing generated inventory: $inventory"
+  [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-poc-cluster.sh"
+  [ -n "$inventory" ] || fatal "missing generated inventory; run VM provisioning first"
 
-  log "running Ansible cluster setup with generated inventory"
+  if [ "$SKIP_ANSIBLE" = "1" ]; then
+    log "Ansible cluster setup skipped by --no-ansible"
+    return 0
+  fi
+
+  log "running Ansible cluster setup with inventory: $inventory"
   run_as_original_user env \
     INVENTORY="$inventory" \
     DEPLOY_OTP_RELAY="$DEPLOY_OTP_RELAY" \
@@ -333,26 +509,48 @@ run_ansible_cluster() {
     bash "$runner"
 }
 
+print_final_status() {
+  log "final local status, if available"
+  if local_k3s_reachable; then
+    local_kubectl get nodes -o wide || true
+    local_kubectl get pods -n "${NAMESPACE:-otp-relay}" -o wide || true
+    local_kubectl get svc -n "${NAMESPACE:-otp-relay}" || true
+    local_kubectl get ingress -n "${NAMESPACE:-otp-relay}" || true
+  else
+    log "no local kubectl/k3s cluster reachable from this host"
+  fi
+}
+
 main() {
-  case "$SETUP_ACTION" in
-    local)
+  local path
+
+  ensure_base_env
+  print_detected_state
+  path="$(detect_setup_path)"
+  log "selected setup path: $path"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    log "dry-run requested; no changes will be made"
+    return 0
+  fi
+
+  case "$path" in
+    vm-provision)
+      run_vm_provisioner
+      run_ansible_cluster
+      ;;
+    ansible-existing)
+      run_ansible_cluster
+      ;;
+    local-existing|local-fresh|local-forced)
       run_local_install
       ;;
-    provision-vms)
-      run_vm_provisioner
-      if [ "$RUN_ANSIBLE" = "auto" ]; then
-        RUN_ANSIBLE="1"
-      fi
-      if [ "$RUN_ANSIBLE" = "1" ]; then
-        run_ansible_cluster
-      else
-        log "VM provisioning complete; Ansible cluster setup skipped by --no-ansible"
-      fi
-      ;;
     *)
-      fatal "unsupported setup action: $SETUP_ACTION"
+      fatal "unsupported detected setup path: $path"
       ;;
   esac
+
+  print_final_status
 }
 
 main "$@"
