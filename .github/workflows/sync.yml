@@ -1,0 +1,89 @@
+name: Sync k8s-ansible repo to server
+
+run-name: "sync @ ${{ github.ref_name }}"
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: sync-k8s-ansible-to-server-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEPLOY_REPO_DIR: /opt/k8s-ansible
+
+jobs:
+  sync:
+    name: Sync repository to /opt/k8s-ansible
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+
+      - name: Sync checkout to active server repo
+        run: |
+          set -Eeuo pipefail
+
+          echo "Runner name: ${RUNNER_NAME:-unknown}"
+          echo "Runner OS: ${RUNNER_OS:-unknown}"
+          echo "Runner arch: ${RUNNER_ARCH:-unknown}"
+          echo "Workspace: ${GITHUB_WORKSPACE}"
+          echo "Target: ${DEPLOY_REPO_DIR}"
+          echo "Commit: ${GITHUB_SHA}"
+
+          if ! command -v rsync >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y rsync
+          fi
+
+          sudo mkdir -p "${DEPLOY_REPO_DIR}"
+          sudo chown -R "$(id -un):$(id -gn)" "${DEPLOY_REPO_DIR}"
+
+          # Sync GitHub's checked-out workspace into the active server repo.
+          #
+          # Runtime/generated files are preserved:
+          # - inventory.poc.generated.ini is produced by the VM provisioner.
+          # - automation/libvirt/build contains generated cloud-init seed files.
+          #
+          # No provisioning, Ansible playbooks, or deployment is run here.
+          rsync -a --delete \
+            --exclude 'automation/ansible/inventory.poc.generated.ini' \
+            --exclude 'automation/libvirt/build/' \
+            "${GITHUB_WORKSPACE}/" \
+            "${DEPLOY_REPO_DIR}/"
+
+          chmod +x "${DEPLOY_REPO_DIR}"/automation/libvirt/*.sh 2>/dev/null || true
+          chmod +x "${DEPLOY_REPO_DIR}"/automation/ansible/*.sh 2>/dev/null || true
+
+          echo
+          echo "Synced repo status:"
+          cd "${DEPLOY_REPO_DIR}"
+          git status --short || true
+          git log --oneline -1 || true
+
+          echo
+          echo "Provisioner files:"
+          find "${DEPLOY_REPO_DIR}/automation/libvirt" -maxdepth 1 -type f -print 2>/dev/null | sort || true
+
+          echo
+          echo "Ansible helper scripts:"
+          find "${DEPLOY_REPO_DIR}/automation/ansible" -maxdepth 1 -type f -name '*.sh' -print 2>/dev/null | sort || true
+
+          echo
+          echo "Sync complete."
