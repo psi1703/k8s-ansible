@@ -4,7 +4,7 @@ This automation supports the SCH phase map without changing application behavior
 
 For the current proof-of-concept/module test, use three K3s VMs on the lab host and run NFS externally on the laptop:
 
-- VM1: `cp` - K3s control plane - max 3 GB RAM
+- VM1: `master` - K3s control plane - max 3 GB RAM
 - VM2: `worker1` - K3s worker - max 3 GB RAM
 - VM3: `worker2` - K3s worker - max 3 GB RAM
 - Laptop: external NFS storage on the same LAN
