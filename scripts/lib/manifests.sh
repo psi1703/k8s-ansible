@@ -36,6 +36,7 @@ render_manifests() {
   SERVICE_TYPE="$SERVICE_TYPE" \
   SERVICE_NODE_PORT="$SERVICE_NODE_PORT" \
   LOADBALANCER_IP="$LOADBALANCER_IP" \
+  INGRESS_ENABLED="$INGRESS_ENABLED" \
   TLS_ENABLED="$TLS_ENABLED" \
   TLS_HOST="$TLS_HOST" \
   TLS_SECRET_NAME="$TLS_SECRET_NAME" \
@@ -297,43 +298,54 @@ for name in redis_manifests:
 
 # Ingress
 if (manifest_dir / "ingress.yaml").exists():
-    text = replace_namespace(read("ingress.yaml"))
     ingress_enabled = os.environ.get("INGRESS_ENABLED", "1") == "1"
     tls_enabled = os.environ.get("TLS_ENABLED") == "1"
     tls_host = os.environ.get("TLS_HOST", "").strip()
-    tls_secret_name = os.environ.get("TLS_SECRET_NAME", "otp-relay-tls").strip()
+    tls_secret_name = os.environ.get("TLS_SECRET_NAME", "otp-relay-tls").strip() or "otp-relay-tls"
 
-    if ingress_enabled and not tls_host:
-        raise SystemExit("TLS_HOST is required when INGRESS_ENABLED=1")
-    if tls_enabled and not tls_host:
-        raise SystemExit("TLS_HOST is required when TLS_ENABLED=1")
-
-    if tls_host:
-        # Replace both empty and populated rule host lines, for example:
-        #   - host:
-        #   - host: old.example
-        text = re.sub(
-            r"^(\s*-\s*host:)\s*.*$",
-            rf"\1 {tls_host}",
-            text,
-            flags=re.MULTILINE,
-        )
-
-    if tls_enabled:
-        # Rebuild the TLS section instead of trying to patch possibly empty
-        # template values such as '- ""' or '-'. This avoids invalid ingress
-        # output when the template host is blank.
-        text = re.sub(r"\n  tls:\n(?:    .+\n)+", "\n", text)
-        text = text.rstrip() + (
-            "\n  tls:\n"
-            "    - hosts:\n"
-            f"        - {tls_host}\n"
-            f"      secretName: {tls_secret_name}\n"
-        )
+    if not ingress_enabled:
+        # The apply step deletes the live ingress when INGRESS_ENABLED=0.
+        # Remove the staged file too so it can never be accidentally applied.
+        (manifest_dir / "ingress.yaml").unlink()
     else:
-        text = re.sub(r"\n  tls:\n(?:    .+\n)+", "\n", text)
+        if not tls_host:
+            raise SystemExit("TLS_HOST is required when INGRESS_ENABLED=1")
 
-    write("ingress.yaml", text)
+        # Render ingress from scratch instead of patching a template.
+        # This avoids invalid YAML from partially-filled template fields such as:
+        #   - host:
+        #   - hosts:
+        #       -
+        text = (
+            "apiVersion: networking.k8s.io/v1\n"
+            "kind: Ingress\n"
+            "metadata:\n"
+            "  name: otp-relay\n"
+            f"  namespace: {namespace}\n"
+            "spec:\n"
+            "  ingressClassName: traefik\n"
+            "  rules:\n"
+            f"    - host: {tls_host}\n"
+            "      http:\n"
+            "        paths:\n"
+            "          - path: /\n"
+            "            pathType: Prefix\n"
+            "            backend:\n"
+            "              service:\n"
+            "                name: otp-relay\n"
+            "                port:\n"
+            "                  number: 8000\n"
+        )
+
+        if tls_enabled:
+            text += (
+                "  tls:\n"
+                "    - hosts:\n"
+                f"        - {tls_host}\n"
+                f"      secretName: {tls_secret_name}\n"
+            )
+
+        write("ingress.yaml", text)
 PY_RENDER_MANIFESTS
 }
 
