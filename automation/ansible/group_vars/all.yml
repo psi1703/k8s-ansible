@@ -26,7 +26,7 @@ redis_required: true
 
 monitor_enabled: true
 phone_ip: 172.31.11.122
-phone_interface: eth0
+phone_interface: ens33
 
 # POC lab sizing note:
 # cp/worker1/worker2 are expected to run with max 3 GB RAM each.
