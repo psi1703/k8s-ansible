@@ -29,6 +29,18 @@
       - "--exclude=automation/ansible/inventory.poc.generated.ini"
   delegate_to: localhost
 
+- name: Ensure required .env exists on control-plane
+  ansible.builtin.stat:
+    path: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
+  register: otp_env_file_stat
+
+- name: Stop when .env is missing
+  ansible.builtin.fail:
+    msg: >-
+      Missing {{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}.
+      Create the installer .env first. It is the single source for runtime values.
+  when: not otp_env_file_stat.stat.exists
+
 - name: Ensure synced installer scripts are executable
   ansible.builtin.shell: |
     set -eu
@@ -38,30 +50,14 @@
     executable: /bin/bash
   become: true
 
-- name: Deploy OTP Relay through the project installer from synced local repo
+- name: Deploy OTP Relay through the project installer using .env source of truth
   ansible.builtin.shell: |
     set -eu
     cd "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
-    REPO_URL="{{ otp_repo_url | default('https://github.com/psi1703/k8s-ansible.git') }}" \
-    REPO_REF="{{ otp_repo_ref | default('main') }}" \
-    INSTALL_DIR="{{ otp_install_dir | default('/opt/k8s-ansible') }}" \
+    ENV_FILE="{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}" \
+    NONINTERACTIVE=1 \
     SKIP_REPO_SYNC=1 \
     GIT_CLEAN=0 \
-    NAMESPACE="{{ otp_namespace | default('otp-relay') }}" \
-    SERVICE_TYPE="{{ service_type | default('LoadBalancer') }}" \
-    INGRESS_ENABLED="{{ 1 if (ingress_enabled | default(true) | bool) else 0 }}" \
-    TLS_ENABLED="{{ 1 if (tls_enabled | default(true) | bool) else 0 }}" \
-    TLS_HOST="{{ tls_host | default('srvotptest26.init-db.lan') }}" \
-    NFS_ENABLED="{{ 1 if (nfs_enabled | default(true) | bool) else 0 }}" \
-    NFS_SERVER="{{ nfs_server_ip | default('172.31.11.100') }}" \
-    NFS_PATH="{{ nfs_export_path | default('/export/otp-relay-data') }}" \
-    REDIS_ENABLED="{{ 1 if (redis_enabled | default(true) | bool) else 0 }}" \
-    REDIS_REQUIRED="{{ 1 if (redis_required | default(true) | bool) else 0 }}" \
-    INSTALL_METALLB="{{ 1 if (metallb_enabled | default(true) | bool) else 0 }}" \
-    METALLB_IP_RANGE="{{ metallb_ip_range | default('172.31.11.120-172.31.11.130') }}" \
-    PHONE_IP="{{ phone_ip | default('172.31.11.122') }}" \
-    PHONE_INTERFACE="{{ phone_interface | default('ens33') }}" \
-    NONINTERACTIVE=1 \
     bash install-otp-relay-k8s.sh
   args:
     executable: /bin/bash
