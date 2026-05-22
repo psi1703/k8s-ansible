@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# OTP Relay POC VM provisioner
+# OTP Relay VM provisioner
 #
-# Creates three Debian 12 cloud-image VMs for the OTP Relay K3s POC:
-#   otp-cp
+# Creates three Debian 13 cloud-image VMs for the OTP Relay K3s-Ansible:
+#   otp-master
 #   otp-worker1
 #   otp-worker2
 #
@@ -13,19 +13,28 @@ set -Eeuo pipefail
 #   - Uses sudo internally only where required.
 #   - Creates/uses SSH key: ~/.ssh/otp-relay-poc
 #   - Creates VM login user: otp-relay
-#   - Auto-assigns free LAN IPs by scanning 172.31.11.150-199
+#   - Auto-assigns free LAN IPs by scanning the configured IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END range
 #   - Writes Ansible inventory:
-#       automation/ansible/inventory.poc.generated.ini
+#       automation/ansible/inventory.generated.ini
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROVISIONER_PATH="${REPO_ROOT}/automation/libvirt/$(basename "${BASH_SOURCE[0]}")"
 
+# Reuse the repository .env when present so VM provisioning can share the same
+# operator-provided source file instead of carrying lab-specific values here.
+if [ -f "${REPO_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${REPO_ROOT}/.env"
+  set +a
+fi
+
 BRIDGE_NAME="${BRIDGE_NAME:-br0}"
 HOST_IFACE="${HOST_IFACE:-}"
-HOST_IP_CIDR="${HOST_IP_CIDR:-172.31.11.111/24}"
+HOST_IP_CIDR="${HOST_IP_CIDR:-}"
 HOST_IP="${HOST_IP_CIDR%%/*}"
-GATEWAY="${GATEWAY:-172.31.11.1}"
-DNS="${DNS:-172.31.11.1}"
+GATEWAY="${GATEWAY:-}"
+DNS="${DNS:-}"
 PREFIX="${PREFIX:-24}"
 
 VM_USER="${VM_USER:-otp-relay}"
@@ -34,17 +43,17 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
 VM_IMAGE_DIR="${VM_IMAGE_DIR:-/var/lib/libvirt/images}"
-BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2}"
-BASE_IMAGE="${VM_IMAGE_DIR}/debian-12-generic-amd64.qcow2"
+BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-13-generic-amd64.qcow2}"
+BASE_IMAGE="${VM_IMAGE_DIR}/debian-13-generic-amd64.qcow2"
 
-ANSIBLE_INVENTORY="${REPO_ROOT}/automation/ansible/inventory.poc.generated.ini"
+ANSIBLE_INVENTORY="${REPO_ROOT}/automation/ansible/inventory.generated.ini"
 
-CP_NAME="${CP_NAME:-otp-cp}"
+CP_NAME="${CP_NAME:-otp-master}"
 WORKER1_NAME="${WORKER1_NAME:-otp-worker1}"
 WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 
 AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
-IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-172.31.11}"
+IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-}"
 IP_SCAN_START="${IP_SCAN_START:-150}"
 IP_SCAN_END="${IP_SCAN_END:-199}"
 RESERVED_IPS="${RESERVED_IPS:-}"
@@ -58,9 +67,14 @@ WORKER2_IP="${WORKER2_IP:-}"
 
 VM_RAM_MB="${VM_RAM_MB:-3072}"
 VM_VCPUS="${VM_VCPUS:-2}"
-VM_DISK_GB="${VM_DISK_GB:-30}"
+VM_DISK_GB="${VM_DISK_GB:-20}"
 
 BUILD_DIR="${REPO_ROOT}/automation/libvirt/build"
+
+: "${HOST_IP_CIDR:?HOST_IP_CIDR must be set in .env or the shell environment}"
+: "${GATEWAY:?GATEWAY must be set in .env or the shell environment}"
+: "${DNS:?DNS must be set in .env or the shell environment}"
+: "${IP_SCAN_PREFIX:?IP_SCAN_PREFIX must be set in .env or the shell environment}"
 
 log() { echo "[INFO] $*"; }
 ok() { echo "[OK] $*"; }
@@ -96,7 +110,7 @@ detect_iface() {
 install_packages() {
   log "Installing host virtualization packages..."
   sudo apt-get update
-  sudo apt-get install -y     qemu-kvm     libvirt-daemon-system     libvirt-clients     virtinst     bridge-utils     cloud-image-utils     genisoimage     curl     jq     openssh-client     iproute2     net-tools     dnsutils
+  sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils cloud-image-utils genisoimage curl jq openssh-client iproute2 net-tools dnsutils
 }
 
 enable_libvirt() {
@@ -356,7 +370,7 @@ download_base_image() {
     return 0
   fi
 
-  log "Downloading Debian 12 cloud image..."
+  log "Downloading Debian 13 cloud image..."
   sudo curl -L "$BASE_IMAGE_URL" -o "$BASE_IMAGE"
   ok "Downloaded base image: $BASE_IMAGE"
 }
@@ -510,9 +524,9 @@ ethernets:
         - 8.8.8.8
 CLOUDNET
 
-  cloud-localds     --network-config="$network_config"     "$seed"     "$user_data"     "$meta_data"
+  cloud-localds --network-config="$network_config" "$seed" "$user_data" "$meta_data"
 
-  sudo virt-install     --name "$name"     --memory "$VM_RAM_MB"     --vcpus "$VM_VCPUS"     --disk path="$disk",format=qcow2,bus=virtio     --disk path="$seed",device=cdrom     --os-variant debian12     --virt-type kvm     --graphics none     --noautoconsole     --import     --network bridge="$BRIDGE_NAME",model=virtio
+  sudo virt-install --name "$name" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --disk path="$disk",format=qcow2,bus=virtio --disk path="$seed",device=cdrom --os-variant debian13 --virt-type kvm --graphics none --noautoconsole --import --network bridge="$BRIDGE_NAME",model=virtio
 
   ok "Created VM: $name"
 }
