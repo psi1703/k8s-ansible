@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # OTP Relay VM provisioner
 #
-# Creates three Debian 13 cloud-image VMs for the OTP Relay K3s-Ansible:
+# Creates three Debian cloud-image VMs for the OTP Relay K3s-Ansible:
 #   otp-master
 #   otp-worker1
 #   otp-worker2
@@ -43,8 +43,10 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
 VM_IMAGE_DIR="${VM_IMAGE_DIR:-/var/lib/libvirt/images}"
-BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2}"
-BASE_IMAGE="${VM_IMAGE_DIR}/debian-13-generic-amd64.qcow2"
+BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2}"
+BASE_IMAGE_NAME="${BASE_IMAGE_NAME:-$(basename "$BASE_IMAGE_URL")}"
+BASE_IMAGE="${VM_IMAGE_DIR}/${BASE_IMAGE_NAME}"
+OS_VARIANT="${OS_VARIANT:-debian12}"
 
 ANSIBLE_INVENTORY="${REPO_ROOT}/automation/ansible/inventory.generated.ini"
 
@@ -400,7 +402,7 @@ download_base_image() {
     return 0
   fi
 
-  log "Downloading Debian 13 cloud image..."
+  log "Downloading Debian cloud image..."
   log "Base image URL: $BASE_IMAGE_URL"
 
   sudo rm -f "$tmp_image"
@@ -585,6 +587,9 @@ packages:
   - python3
   - nfs-common
 
+bootcmd:
+  - [ sh, -c, "systemctl enable serial-getty@ttyS0.service || true" ]
+
 runcmd:
   - systemctl enable --now ssh
 CLOUDUSER
@@ -619,7 +624,22 @@ CLOUDNET
   sudo install -m 0644 "$seed_tmp" "$seed"
   prepare_seed_iso_for_libvirt "$seed"
 
-  sudo virt-install --name "$name" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --disk path="$disk",format=qcow2,bus=virtio --disk path="$seed",device=cdrom,readonly=on --os-variant debian13 --virt-type kvm --graphics none --noautoconsole --import --network bridge="$BRIDGE_NAME",model=virtio,mac="$mac"
+  sudo virt-install \
+    --name "$name" \
+    --memory "$VM_RAM_MB" \
+    --vcpus "$VM_VCPUS" \
+    --disk path="$disk",format=qcow2,bus=virtio \
+    --disk path="$seed",device=cdrom,readonly=on \
+    --os-variant "$OS_VARIANT" \
+    --virt-type kvm \
+    --machine q35 \
+    --boot uefi \
+    --graphics none \
+    --serial pty \
+    --console pty,target_type=serial \
+    --noautoconsole \
+    --import \
+    --network bridge="$BRIDGE_NAME",model=virtio,mac="$mac"
 
   ok "Created VM: $name"
 }
