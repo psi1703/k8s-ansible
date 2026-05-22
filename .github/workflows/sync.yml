@@ -63,7 +63,7 @@ jobs:
           #
           # No provisioning, Ansible playbooks, or deployment is run here.
           rsync -a --delete \
-            --exclude 'automation/ansible/inventory.poc.generated.ini' \
+            --exclude 'automation/ansible/inventory.generated.ini' \
             --exclude 'automation/libvirt/build/' \
             "${GITHUB_WORKSPACE}/" \
             "${DEPLOY_REPO_DIR}/"
