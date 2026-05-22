@@ -2,11 +2,12 @@
 # Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
 
 install_metallb_if_requested() {
-  [ "$INSTALL_METALLB" = "1" ] || return 0
-  [ "$SERVICE_TYPE" = "LoadBalancer" ] || fatal "INSTALL_METALLB=1 requires SERVICE_TYPE=LoadBalancer"
-  [ -n "$METALLB_IP_RANGE" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example <first-ip>-<last-ip>"
+  [ "${INSTALL_METALLB:-0}" = "1" ] || return 0
+  [ -n "${METALLB_IP_RANGE:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example <first-ip>-<last-ip>"
 
-  log "installing MetalLB $METALLB_VERSION from $METALLB_MANIFEST_URL"
+  # Installing MetalLB is allowed even when the OTP Relay Service remains
+  # ClusterIP behind Ingress. Do not force SERVICE_TYPE=LoadBalancer here.
+  log "installing/configuring MetalLB $METALLB_VERSION from $METALLB_MANIFEST_URL"
   k3s kubectl apply -f "$METALLB_MANIFEST_URL"
 
   log "waiting for MetalLB namespace and CRDs"
@@ -50,22 +51,26 @@ EOF_METALLB
 }
 
 check_loadbalancer_prereqs() {
-  [ "$SERVICE_TYPE" = "LoadBalancer" ] || return 0
+  [ "${SERVICE_TYPE:-}" = "LoadBalancer" ] || return 0
 
   log "SERVICE_TYPE=LoadBalancer selected"
-  if [ -n "$LOADBALANCER_IP" ]; then
+  if [ -n "${LOADBALANCER_IP:-}" ]; then
     log "requested LoadBalancer IP: $LOADBALANCER_IP"
   else
     warn "LOADBALANCER_IP is not set. The cluster load balancer must allocate an address automatically."
   fi
 
+  if [ "${INSTALL_METALLB:-0}" = "1" ]; then
+    log "INSTALL_METALLB=1 set; MetalLB will be installed/configured by the installer"
+    return 0
+  fi
+
   if k3s kubectl get namespace metallb-system >/dev/null 2>&1; then
     log "MetalLB namespace found"
     k3s kubectl get pods -n metallb-system --no-headers 2>/dev/null || true
-  elif [ "$REQUIRE_METALLB" = "1" ]; then
-    fatal "SERVICE_TYPE=LoadBalancer requires MetalLB, but namespace metallb-system was not found"
+  elif [ "${REQUIRE_METALLB:-0}" = "1" ]; then
+    fatal "SERVICE_TYPE=LoadBalancer requires MetalLB, but namespace metallb-system was not found and INSTALL_METALLB is not enabled"
   else
     warn "MetalLB namespace was not found. LoadBalancer service may stay pending unless another load balancer is installed."
   fi
 }
-
