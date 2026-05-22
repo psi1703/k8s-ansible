@@ -43,15 +43,82 @@ fi
 
 }
 
+
+_storage_jsonpath() {
+  local kind="$1"
+  local name="$2"
+  local jsonpath="$3"
+  if [ "$kind" = "pv" ]; then
+    k3s kubectl get pv "$name" -o "jsonpath=${jsonpath}" 2>/dev/null || true
+  else
+    k3s kubectl get "$kind" "$name" -n "$NAMESPACE" -o "jsonpath=${jsonpath}" 2>/dev/null || true
+  fi
+}
+
+apply_app_storage_resources() {
+  local pvc_name="otp-relay-data"
+  local pv_name="${NFS_PV_NAME:-otp-relay-data-nfs-pv}"
+  local existing_server=""
+  local existing_path=""
+  local existing_sc=""
+  local existing_pvc_sc=""
+  local existing_pvc_volume=""
+
+  if [ "${NFS_ENABLED:-0}" = "1" ]; then
+    if k3s kubectl get pv "$pv_name" >/dev/null 2>&1; then
+      existing_server="$(_storage_jsonpath pv "$pv_name" '{.spec.nfs.server}')"
+      existing_path="$(_storage_jsonpath pv "$pv_name" '{.spec.nfs.path}')"
+      existing_sc="$(_storage_jsonpath pv "$pv_name" '{.spec.storageClassName}')"
+
+      log "existing app data NFS PersistentVolume found: $pv_name"
+      log "using existing PV source: ${existing_server:-unknown}:${existing_path:-unknown}"
+
+      if [ "${existing_server:-}" != "${NFS_SERVER:-}" ] || [ "${existing_path:-}" != "${NFS_PATH:-}" ]; then
+        warn "existing PV source differs from .env; keeping existing PV because Kubernetes PV source is immutable"
+        warn "existing PV: ${existing_server:-unknown}:${existing_path:-unknown}"
+        warn ".env value:  ${NFS_SERVER:-unset}:${NFS_PATH:-unset}"
+        warn "to intentionally move storage, scale workloads down, delete the PVC/PV manually, then rerun the installer"
+      fi
+
+      if [ -n "${NFS_STORAGE_CLASS:-}" ] && [ -n "${existing_sc:-}" ] && [ "$existing_sc" != "$NFS_STORAGE_CLASS" ]; then
+        warn "existing PV storageClassName differs from .env; keeping existing value: $existing_sc"
+      fi
+    else
+      [ -f "$MANIFEST_DIR/pv-nfs.yaml" ] || fatal "NFS_ENABLED=1 but rendered NFS PV manifest is missing: $MANIFEST_DIR/pv-nfs.yaml"
+      log "creating static NFS PersistentVolume for app data"
+      k3s kubectl apply -f "$MANIFEST_DIR/pv-nfs.yaml"
+    fi
+  fi
+
+  if k3s kubectl get pvc "$pvc_name" -n "$NAMESPACE" >/dev/null 2>&1; then
+    existing_pvc_sc="$(_storage_jsonpath pvc "$pvc_name" '{.spec.storageClassName}')"
+    existing_pvc_volume="$(_storage_jsonpath pvc "$pvc_name" '{.spec.volumeName}')"
+
+    log "existing app data PersistentVolumeClaim found: $NAMESPACE/$pvc_name"
+    log "using existing PVC volume: ${existing_pvc_volume:-dynamic-or-pending}"
+
+    if [ "${NFS_ENABLED:-0}" = "1" ] && [ -n "${existing_pvc_volume:-}" ] && [ "$existing_pvc_volume" != "$pv_name" ]; then
+      warn "existing PVC is bound to a different PV; keeping existing binding because PVC volume binding is immutable"
+      warn "existing PVC volume: $existing_pvc_volume"
+      warn ".env PV name:       $pv_name"
+    fi
+
+    if [ -n "${PVC_STORAGE_CLASS:-}" ] && [ -n "${existing_pvc_sc:-}" ] && [ "$existing_pvc_sc" != "$PVC_STORAGE_CLASS" ]; then
+      warn "existing PVC storageClassName differs from .env; keeping existing value: $existing_pvc_sc"
+    fi
+  else
+    [ -f "$MANIFEST_DIR/pvc.yaml" ] || fatal "rendered PVC manifest is missing: $MANIFEST_DIR/pvc.yaml"
+    log "creating app data PersistentVolumeClaim"
+    k3s kubectl apply -f "$MANIFEST_DIR/pvc.yaml"
+  fi
+}
+
+
 apply_kubernetes_resources_if_required() {
 if requires_manifests_apply; then
   log "applying Kubernetes resources"
   apply_runtime_configmap
-  if [ "$NFS_ENABLED" = "1" ] && [ -f "$MANIFEST_DIR/pv-nfs.yaml" ]; then
-    log "applying static NFS PersistentVolume for app data"
-    k3s kubectl apply -f "$MANIFEST_DIR/pv-nfs.yaml"
-  fi
-  k3s kubectl apply -f "$MANIFEST_DIR/pvc.yaml"
+  apply_app_storage_resources
 
   if [ "$REDIS_ENABLED" = "1" ]; then
     log "applying Redis HA shared-state resources"
