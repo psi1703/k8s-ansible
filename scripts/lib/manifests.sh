@@ -11,12 +11,12 @@ apply_runtime_configmap() {
   warn "rendered configmap.yaml is not available; falling back to generated live ConfigMap"
   k3s kubectl create configmap otp-relay-config \
     --namespace "$NAMESPACE" \
-    --from-literal=CLAIM_EXPIRY_SEC="90" \
-    --from-literal=OTP_DISPLAY_SEC="285" \
-    --from-literal=CONCURRENT_RISK_SEC="30" \
-    --from-literal=OTP_RELAY_DATA_DIR="/app/data" \
-    --from-literal=USERS_EXCEL_PATH="/app/data/users.xlsx" \
-    --from-literal=AUDIT_LOG_PATH="/app/data/audit.log" \
+    --from-literal=CLAIM_EXPIRY_SEC="$CLAIM_EXPIRY_SEC" \
+    --from-literal=OTP_DISPLAY_SEC="$OTP_DISPLAY_SEC" \
+    --from-literal=CONCURRENT_RISK_SEC="$CONCURRENT_RISK_SEC" \
+    --from-literal=OTP_RELAY_DATA_DIR="$OTP_RELAY_DATA_DIR" \
+    --from-literal=USERS_EXCEL_PATH="$USERS_EXCEL_PATH" \
+    --from-literal=AUDIT_LOG_PATH="$AUDIT_LOG_PATH" \
     --from-literal=PHONE_IP="$PHONE_IP" \
     --from-literal=PHONE_INTERFACE="$PHONE_INTERFACE" \
     --from-literal=PHONE_PING_INTERVAL="$PHONE_PING_INTERVAL" \
@@ -52,6 +52,15 @@ render_manifests() {
   PHONE_INTERFACE="$PHONE_INTERFACE" \
   PHONE_PING_INTERVAL="$PHONE_PING_INTERVAL" \
   PHONE_OFFLINE_THRESHOLD="$PHONE_OFFLINE_THRESHOLD" \
+  PHONE_ARP_COUNT="$PHONE_ARP_COUNT" \
+  PHONE_ARP_TIMEOUT="$PHONE_ARP_TIMEOUT" \
+  MONITOR_METRICS_PORT="$MONITOR_METRICS_PORT" \
+  OTP_RELAY_DATA_DIR="$OTP_RELAY_DATA_DIR" \
+  USERS_EXCEL_PATH="$USERS_EXCEL_PATH" \
+  AUDIT_LOG_PATH="$AUDIT_LOG_PATH" \
+  CLAIM_EXPIRY_SEC="$CLAIM_EXPIRY_SEC" \
+  OTP_DISPLAY_SEC="$OTP_DISPLAY_SEC" \
+  CONCURRENT_RISK_SEC="$CONCURRENT_RISK_SEC" \
   SERVER_HOSTNAME="$SERVER_HOSTNAME" \
   SERVER_IP="$SERVER_IP" \
   PORTAL_URL="$PORTAL_URL" \
@@ -128,6 +137,9 @@ def set_recreate_strategy(text: str) -> str:
 def set_first_image(text: str, image: str) -> str:
     return re.sub(r"(\n\s*image: ).*", rf"\g<1>{image}", text, count=1)
 
+def set_volume_mount_path(text: str, mount_path: str) -> str:
+    return re.sub(r"(\n\s*mountPath: ).*", rf"\g<1>{mount_path}", text)
+
 
 def remove_nodesel(text: str) -> str:
     return re.sub(r"\n      nodeSelector:\n(?:        .+\n)+", "\n", text)
@@ -148,16 +160,19 @@ if (manifest_dir / "namespace.yaml").exists():
 if (manifest_dir / "configmap.yaml").exists():
     text = replace_namespace(read("configmap.yaml"))
     values = {
-        "CLAIM_EXPIRY_SEC": "90",
-        "OTP_DISPLAY_SEC": "285",
-        "CONCURRENT_RISK_SEC": "30",
-        "OTP_RELAY_DATA_DIR": "/app/data",
-        "USERS_EXCEL_PATH": "/app/data/users.xlsx",
-        "AUDIT_LOG_PATH": "/app/data/audit.log",
+        "CLAIM_EXPIRY_SEC": os.environ["CLAIM_EXPIRY_SEC"],
+        "OTP_DISPLAY_SEC": os.environ["OTP_DISPLAY_SEC"],
+        "CONCURRENT_RISK_SEC": os.environ["CONCURRENT_RISK_SEC"],
+        "OTP_RELAY_DATA_DIR": os.environ["OTP_RELAY_DATA_DIR"],
+        "USERS_EXCEL_PATH": os.environ["USERS_EXCEL_PATH"],
+        "AUDIT_LOG_PATH": os.environ["AUDIT_LOG_PATH"],
         "PHONE_IP": os.environ["PHONE_IP"],
         "PHONE_INTERFACE": os.environ["PHONE_INTERFACE"],
         "PHONE_PING_INTERVAL": os.environ["PHONE_PING_INTERVAL"],
         "PHONE_OFFLINE_THRESHOLD": os.environ["PHONE_OFFLINE_THRESHOLD"],
+        "PHONE_ARP_COUNT": os.environ["PHONE_ARP_COUNT"],
+        "PHONE_ARP_TIMEOUT": os.environ["PHONE_ARP_TIMEOUT"],
+        "MONITOR_METRICS_PORT": os.environ["MONITOR_METRICS_PORT"],
         "SERVER_HOSTNAME": os.environ["SERVER_HOSTNAME"],
         "SERVER_IP": os.environ["SERVER_IP"],
         "PORTAL_URL": os.environ["PORTAL_URL"],
@@ -208,6 +223,7 @@ if (manifest_dir / "deployment.yaml").exists():
     text = set_replicas(text, os.environ["REPLICA_COUNT"])
     text = set_app_strategy(text)
     text = set_first_image(text, os.environ["APP_IMAGE"])
+    text = set_volume_mount_path(text, os.environ["OTP_RELAY_DATA_DIR"])
     text = add_nodesel(text, os.environ.get("APP_NODE_SELECTOR_KEY", ""), os.environ.get("APP_NODE_SELECTOR_VALUE", ""))
 
     text = re.sub(r"\n            - name: REDIS_URL\n              value: .*", "", text)
@@ -228,6 +244,7 @@ if (manifest_dir / "deployment-monitor.yaml").exists():
     text = set_replicas(text, "1")
     text = set_recreate_strategy(text)
     text = set_first_image(text, os.environ["MONITOR_IMAGE"])
+    text = set_volume_mount_path(text, os.environ["OTP_RELAY_DATA_DIR"])
     text = add_nodesel(text, os.environ.get("MONITOR_NODE_SELECTOR_KEY", ""), os.environ.get("MONITOR_NODE_SELECTOR_VALUE", ""))
     write("deployment-monitor.yaml", text)
 

@@ -4,7 +4,7 @@
 install_metallb_if_requested() {
   [ "$INSTALL_METALLB" = "1" ] || return 0
   [ "$SERVICE_TYPE" = "LoadBalancer" ] || fatal "INSTALL_METALLB=1 requires SERVICE_TYPE=LoadBalancer"
-  [ -n "$METALLB_IP_RANGE" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example 172.31.11.120-172.31.11.130"
+  [ -n "$METALLB_IP_RANGE" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example <first-ip>-<last-ip>"
 
   log "installing MetalLB $METALLB_VERSION from $METALLB_MANIFEST_URL"
   k3s kubectl apply -f "$METALLB_MANIFEST_URL"
