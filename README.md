@@ -50,7 +50,7 @@
 
 ```
 Client browser
-  ──► DNS: srvotptest26.init-db.lan
+  ──► DNS: ${TLS_HOST}
   ──► Traefik HTTPS Ingress (TLS termination)
   ──► Kubernetes Service: otp-relay (ClusterIP)
   ──► FastAPI portal pod (2 replicas, RollingUpdate)
@@ -78,7 +78,7 @@ Monitor pod
 
 ```
                   ┌─────────────────────────────┐
-                  │   srvotptest26.init-db.lan   │
+                  │   ${TLS_HOST}   │
                   └──────────────┬──────────────┘
                                  │
                   ┌──────────────▼──────────────┐
@@ -254,7 +254,7 @@ redis>=5.0.0,<6.0.0
 
 ### OTP flow (end-to-end)
 
-1. A user navigates to `https://srvotptest26.init-db.lan` and logs in with their 2–3 character token.
+1. A user navigates to `https://${TLS_HOST}` and logs in with their 2–3 character token.
 2. The portal validates the token against `users.xlsx` via `POST /user/login`.
 3. The user claims the OTP slot via `POST /claim` — their token is enqueued in Redis.
 4. Meanwhile, the company iPhone receives an SMS containing the OTP.
@@ -292,11 +292,11 @@ redis>=5.0.0,<6.0.0
 
 ```
 Namespace:         otp-relay
-Portal URL:        https://srvotptest26.init-db.lan
+Portal URL:        https://${TLS_HOST}
 SERVICE_TYPE:      ClusterIP
 INGRESS_ENABLED:   1
 TLS_ENABLED:       1
-TLS_HOST:          srvotptest26.init-db.lan
+TLS_HOST:          ${TLS_HOST}
 REPLICA_COUNT:     2
 REDIS_REQUIRED:    1
 REDIS_URL:         redis://otp-redis-haproxy:6379/0
@@ -424,10 +424,10 @@ audit.log
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SMS_SECRET_TOKEN` | `changeme` | Bearer token for `/sms-received` |
-| `SMTP_HOST` | `mail.company.local` | SMTP server (diagnostics only) |
+| `SMS_SECRET_TOKEN` | `${SMS_SECRET_TOKEN}` | Bearer token for `/sms-received` |
+| `SMTP_HOST` | `${SMTP_HOST}` | SMTP server (diagnostics only) |
 | `SMTP_PORT` | `587` | SMTP port |
-| `SMTP_USER` | `otp-relay@company.com` | SMTP user |
+| `SMTP_USER` | `${SMTP_USER}` | SMTP user |
 | `SMTP_PASSWORD` | _(empty)_ | SMTP password |
 | `SMTP_USE_TLS` | `true` | Enable STARTTLS |
 | `SMTP_AUTH` | `true` | Enable SMTP auth |
@@ -550,7 +550,7 @@ Application state files that **must** survive pod restarts are stored on a share
 | PV name | `otp-relay-data-nfs-pv` |
 | Access mode | `ReadWriteMany` (RWX) |
 | StorageClass | `otp-relay-nfs` |
-| NFS server | `172.31.11.108` |
+| NFS server | `${NFS_SERVER}` |
 | NFS export path | `/export/otp-relay-data` |
 | Container mount | `/app/data` |
 | App UID/GID | `999:999` (user `otprelay`) |
@@ -595,15 +595,15 @@ Expected output: `WRITE_OK` from both pods.
 
 | Property | Value |
 |----------|-------|
-| Portal URL | `https://srvotptest26.init-db.lan` |
+| Portal URL | `https://${TLS_HOST}` |
 | Certificate | Self-signed (pending IT Group Policy trust rollout) |
 | DNS resolution | Internal LAN DNS |
 
 Because the certificate is self-signed, CLI validation uses `curl -k`:
 
 ```bash
-curl -k https://srvotptest26.init-db.lan/healthz
-curl -k https://srvotptest26.init-db.lan/readyz
+curl -k https://${TLS_HOST}/healthz
+curl -k https://${TLS_HOST}/readyz
 ```
 
 **Production requirement:** IT distributes and trusts the internal CA certificate via Group Policy, or a CA-signed certificate is installed. Until then, browser users will see a certificate warning.
@@ -785,8 +785,8 @@ sudo k3s kubectl get pods -n observability -o wide
 sudo k3s kubectl -n observability get configmap otp-relay-live-dashboard
 sudo k3s kubectl -n observability get servicemonitor
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
-curl -k https://srvotptest26.init-db.lan/healthz
-curl -k https://srvotptest26.init-db.lan/readyz
+curl -k https://${TLS_HOST}/healthz
+curl -k https://${TLS_HOST}/readyz
 ```
 
 Expected state: all required pods Running/Ready, all PVCs Bound, monitor reports OK, both health endpoints return 200.
@@ -841,7 +841,7 @@ sudo k3s kubectl -n otp-relay rollout restart deployment/otp-monitor
 sudo k3s kubectl -n otp-relay delete pod <POD_NAME>
 for i in $(seq 1 30); do
   curl -k -s -o /dev/null -w "%{http_code}\n" \
-    https://srvotptest26.init-db.lan/readyz
+    https://${TLS_HOST}/readyz
   sleep 0.5
 done
 ```
@@ -1106,7 +1106,7 @@ Tokens must be unique. Duplicate tokens and invalid rows are skipped and written
 # Via API
 curl -k -X POST \
   -H "X-Admin-Session: <SESSION>" \
-  https://srvotptest26.init-db.lan/admin/reload-users
+  https://${TLS_HOST}/admin/reload-users
 ```
 
 ---
@@ -1156,7 +1156,7 @@ curl -k -X POST \
 
 ### DNS/TLS client checklist
 
-- [ ] `srvotptest26.init-db.lan` resolves from user machines
+- [ ] `${TLS_HOST}` resolves from user machines
 - [ ] HTTPS loads from user machines
 - [ ] Certificate trust warning disappears after IT Group Policy rollout
 - [ ] Portal works from the intended client network
@@ -1167,7 +1167,7 @@ curl -k -X POST \
 Before drain, confirm:
 ```bash
 sudo k3s kubectl get pods -n otp-relay -o wide
-curl -k https://srvotptest26.init-db.lan/readyz
+curl -k https://${TLS_HOST}/readyz
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
 ```
 
@@ -1224,4 +1224,46 @@ Monitor pod remains internal and unexposed.
 
 ---
 
-*This document was generated from the [psi1703/k8s](https://github.com/psi1703/k8s) repository — commit history, README, source files (`main.py`, `requirements.txt`), and inline code comments.*
+## Runtime configuration source of truth
+
+The repository root `.env` file is the single source of operator-provided
+deployment values. Fresh installs create `.env` interactively unless
+`NONINTERACTIVE=1` is set. Updates load the existing `.env` automatically and do
+not overwrite it silently. The installer renders Kubernetes manifests and the
+Ansible handoff from `.env`. Do not place site-specific values directly in
+Python, shell, Kubernetes YAML, or Ansible task files.
+
+Change map:
+
+| Change needed | Edit here |
+| --- | --- |
+| Installer prompts, saved values, required variable validation | `scripts/lib/env.sh` |
+| Installer launcher flow | `install-otp-relay-k8s.sh` |
+| Host preflight, package install, K3s readiness | `scripts/lib/preflight.sh` |
+| Repository sync and source-tree validation | `scripts/lib/repo-sync.sh` |
+| Help docs/frontend build and manifest staging validation | `scripts/lib/build-stage.sh` |
+| Secret apply, image build/import, Kubernetes resource apply | `scripts/lib/apply-deploy.sh` |
+| Kubernetes rendered ConfigMap, Service, Ingress, PVC, Redis values | `.env` rendered by `scripts/lib/manifests.sh` |
+| Final installer output | `scripts/lib/summary.sh` |
+| Portal app assembly / router registration | `otp_relay/routes.py` |
+| Portal runtime configuration | `otp_relay/config.py` |
+| Shared in-memory fallback state | `otp_relay/state.py` |
+| JSON/PVC-backed admin and wizard files | `otp_relay/storage.py` |
+| `users.xlsx` import and validation | `otp_relay/users.py` |
+| Redis queue, pending OTP, admin session backing store | `otp_relay/redis_state.py` |
+| OTP claim, status, cancel, SMS receive flow | `otp_relay/otp_flow.py` |
+| Admin auth, users, queue, wizard, SMTP diagnostic endpoints | `otp_relay/admin.py` |
+| Audit log write/read behavior | `otp_relay/audit.py` |
+| Prometheus metrics | `otp_relay/metrics.py` |
+| Static frontend mounting and `guide.html` | `otp_relay/frontend.py` |
+| Monitor launcher flow | `monitor.py` / `otp_monitor/runner.py` |
+| Monitor runtime configuration | `otp_monitor/config.py` |
+| iPhone ARP detection | `otp_monitor/phone.py` |
+| Telegram alerts | `otp_monitor/alerts.py` |
+| Monitor audit-log tailing | `otp_monitor/audit_tail.py` |
+| Monitor Prometheus metrics | `otp_monitor/metrics.py` |
+| Ansible deployment handoff | `.env`, consumed by `automation/ansible/roles/otp_relay_deploy/tasks/main.yml` |
+
+Site-specific values such as phone IP, interface name, TLS host, NFS server,
+MetalLB range, Telegram credentials, SMS secret, Redis URL, storage classes,
+replica counts, and node selectors belong in `.env` only.
