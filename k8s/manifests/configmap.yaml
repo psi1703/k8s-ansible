@@ -13,8 +13,8 @@ data:
   AUDIT_LOG_PATH: "/app/data/audit.log"
 
   # ── Monitor ───────────────────────────────────────────────────────────────
-  PHONE_IP: "172.31.10.161"
-  PHONE_INTERFACE: "eth0"
+  PHONE_IP: "172.31.11.123"
+  PHONE_INTERFACE: "ens33"
   PHONE_PING_INTERVAL: "150"
   PHONE_OFFLINE_THRESHOLD: "2"
   BATCH_WINDOW_SEC: "10"
