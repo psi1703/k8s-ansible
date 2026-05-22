@@ -4,21 +4,24 @@ metadata:
   name: otp-relay-config
   namespace: otp-relay
 data:
-  # ── App ───────────────────────────────────────────────────────────────────
-  CLAIM_EXPIRY_SEC: "90"
-  OTP_DISPLAY_SEC: "285"
-  CONCURRENT_RISK_SEC: "30"
-  OTP_RELAY_DATA_DIR: "/app/data"
-  USERS_EXCEL_PATH: "/app/data/users.xlsx"
-  AUDIT_LOG_PATH: "/app/data/audit.log"
+  # App values are rendered from the installer .env file.
+  CLAIM_EXPIRY_SEC: ""
+  OTP_DISPLAY_SEC: ""
+  CONCURRENT_RISK_SEC: ""
+  OTP_RELAY_DATA_DIR: ""
+  USERS_EXCEL_PATH: ""
+  AUDIT_LOG_PATH: ""
 
-  # ── Monitor ───────────────────────────────────────────────────────────────
-  PHONE_IP: "172.31.11.123"
-  PHONE_INTERFACE: "ens33"
-  PHONE_PING_INTERVAL: "150"
-  PHONE_OFFLINE_THRESHOLD: "2"
-  BATCH_WINDOW_SEC: "10"
-  ALERT_LEVEL: "error"
-  SERVER_HOSTNAME: "otp-relay-k8s"
-  SERVER_IP: "127.0.0.1"
-  PORTAL_URL: "https://svotptest26.init-db.lan"
+  # Monitor values are rendered from the installer .env file.
+  PHONE_IP: ""
+  PHONE_INTERFACE: ""
+  PHONE_PING_INTERVAL: ""
+  PHONE_OFFLINE_THRESHOLD: ""
+  PHONE_ARP_COUNT: ""
+  PHONE_ARP_TIMEOUT: ""
+  MONITOR_METRICS_PORT: ""
+  BATCH_WINDOW_SEC: ""
+  ALERT_LEVEL: ""
+  SERVER_HOSTNAME: ""
+  SERVER_IP: ""
+  PORTAL_URL: ""

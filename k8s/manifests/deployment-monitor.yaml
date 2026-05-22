@@ -35,8 +35,6 @@ spec:
                 name: otp-relay-config
 
           env:
-            - name: OTP_RELAY_DATA_DIR
-              value: /app/data
             - name: TELEGRAM_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -66,7 +64,7 @@ spec:
 
           volumeMounts:
             - name: data
-              mountPath: /app/data
+              mountPath: __OTP_RELAY_DATA_DIR__
 
       volumes:
         - name: data
