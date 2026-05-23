@@ -474,10 +474,23 @@ existing_vm_matches_expected_identity() {
 
 remove_existing_vm() {
   local name="$1"
+  local disk="${VM_IMAGE_DIR}/${name}.qcow2"
 
   warn "Removing existing VM: $name"
   sudo virsh destroy "$name" >/dev/null 2>&1 || true
+
+  # Remove the disk file before undefining so libvirt releases the path
+  # reference cleanly. If undefine --remove-all-storage runs first and fails
+  # to delete the file, the path stays registered and blocks qemu-img create.
+  sudo rm -f "$disk"
+
   sudo virsh undefine "$name" --remove-all-storage >/dev/null 2>&1 || sudo virsh undefine "$name" >/dev/null 2>&1 || true
+
+  # Belt-and-suspenders: if the domain record somehow survived, force it out.
+  if sudo virsh dominfo "$name" >/dev/null 2>&1; then
+    warn "virsh undefine did not fully remove $name; forcing with --nvram"
+    sudo virsh undefine "$name" --nvram >/dev/null 2>&1 || true
+  fi
 }
 
 prepare_vm_slot() {
