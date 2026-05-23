@@ -39,7 +39,8 @@ PREFIX="${PREFIX:-24}"
 
 VM_USER="${VM_USER:-otp-relay}"
 VM_PASSWORD="${VM_PASSWORD:-otp-relay}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
+_REAL_HOME="$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)"
+SSH_KEY="${SSH_KEY:-${_REAL_HOME}/.ssh/otp-relay-poc}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
 VM_IMAGE_DIR="${VM_IMAGE_DIR:-/var/lib/libvirt/images}"
