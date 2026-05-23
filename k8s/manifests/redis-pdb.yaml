@@ -8,25 +8,3 @@ spec:
   selector:
     matchLabels:
       app: otp-redis
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: otp-redis-sentinel-pdb
-  namespace: otp-relay
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: otp-redis-sentinel
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: otp-redis-haproxy-pdb
-  namespace: otp-relay
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: otp-redis-haproxy
