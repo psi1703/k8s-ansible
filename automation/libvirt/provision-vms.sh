@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# OTP Relay VM provisioner
+# OTP Relay worker VM provisioner
 #
-# Creates three Debian cloud-image VMs for the OTP Relay K3s-Ansible cluster:
-#   otp-master
-#   otp-worker1
-#   otp-worker2
+# New target design:
+#   - The physical/server host is the K3s control-plane and Ansible runner.
+#   - This provisioner creates only two Debian cloud-image worker VMs:
+#       otp-worker1
+#       otp-worker2
+#   - NFS is external and is not provisioned here.
 #
 # Default behavior:
 #   - Must be run as a normal user, not with sudo bash.
@@ -15,6 +17,14 @@ set -Eeuo pipefail
 #   - Creates VM login user: otp-relay
 #   - Auto-assigns free LAN IPs by scanning IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END
 #   - Writes Ansible inventory: automation/ansible/inventory.generated.ini
+#
+# Generated inventory shape:
+#   [control_plane]
+#   localhost ansible_connection=local
+#
+#   [workers]
+#   worker1 ansible_host=<worker1-ip>
+#   worker2 ansible_host=<worker2-ip>
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROVISIONER_PATH="${REPO_ROOT}/automation/libvirt/$(basename "${BASH_SOURCE[0]}")"
@@ -47,7 +57,6 @@ OS_VARIANT="${OS_VARIANT:-debian12}"
 
 ANSIBLE_INVENTORY="${REPO_ROOT}/automation/ansible/inventory.generated.ini"
 
-CP_NAME="${CP_NAME:-otp-master}"
 WORKER1_NAME="${WORKER1_NAME:-otp-worker1}"
 WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 
@@ -60,7 +69,6 @@ AUTO_RECREATE_INCOMPATIBLE_VMS="${AUTO_RECREATE_INCOMPATIBLE_VMS:-1}"
 EXISTING_VM_SSH_CHECK_ATTEMPTS="${EXISTING_VM_SSH_CHECK_ATTEMPTS:-6}"
 EXISTING_VM_SSH_CHECK_SLEEP="${EXISTING_VM_SSH_CHECK_SLEEP:-5}"
 
-CP_IP="${CP_IP:-}"
 WORKER1_IP="${WORKER1_IP:-}"
 WORKER2_IP="${WORKER2_IP:-}"
 
@@ -82,19 +90,14 @@ need_cmd() {
 
 host_dns_servers() {
   {
-    # Prefer the host's real upstream resolvers from systemd-resolved.
-    # Do not use the host-local stub 127.0.0.53 inside guests.
     if command -v resolvectl >/dev/null 2>&1; then
       resolvectl dns 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true
     fi
 
-    # NetworkManager exposes the host DNS per device on many Debian installs.
     if command -v nmcli >/dev/null 2>&1; then
       nmcli -t -f IP4.DNS dev show 2>/dev/null | awk -F: '$2 != "" {print $2}' || true
     fi
 
-    # /run/systemd/resolve/resolv.conf normally contains upstream resolvers,
-    # unlike /etc/resolv.conf which may contain 127.0.0.53.
     awk '/^nameserver / {print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
     awk '/^nameserver / {print $2}' /etc/resolv.conf 2>/dev/null || true
   } | awk '
@@ -151,7 +154,20 @@ detect_iface() {
 install_packages() {
   log "Installing host virtualization packages..."
   sudo apt-get update
-  sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils cloud-image-utils genisoimage curl jq openssh-client iproute2 net-tools dnsutils
+  sudo apt-get install -y \
+    qemu-kvm \
+    libvirt-daemon-system \
+    libvirt-clients \
+    virtinst \
+    bridge-utils \
+    cloud-image-utils \
+    genisoimage \
+    curl \
+    jq \
+    openssh-client \
+    iproute2 \
+    net-tools \
+    dnsutils
 }
 
 enable_libvirt() {
@@ -367,27 +383,20 @@ next_free_ip() {
 }
 
 validate_fixed_ips() {
-  [[ -n "$CP_IP" ]] || fatal "CP_IP is empty"
   [[ -n "$WORKER1_IP" ]] || fatal "WORKER1_IP is empty"
   [[ -n "$WORKER2_IP" ]] || fatal "WORKER2_IP is empty"
 
-  [[ "$CP_IP" != "$WORKER1_IP" ]] || fatal "CP_IP and WORKER1_IP are identical"
-  [[ "$CP_IP" != "$WORKER2_IP" ]] || fatal "CP_IP and WORKER2_IP are identical"
   [[ "$WORKER1_IP" != "$WORKER2_IP" ]] || fatal "WORKER1_IP and WORKER2_IP are identical"
 }
 
 assign_vm_ips() {
   if [[ "$AUTO_ASSIGN_IPS" == "0" ]]; then
-    log "Using pre-assigned VM IPs"
-    [[ -n "$CP_IP" ]] || fatal "AUTO_ASSIGN_IPS=0 requires CP_IP"
+    log "Using pre-assigned worker VM IPs"
     [[ -n "$WORKER1_IP" ]] || fatal "AUTO_ASSIGN_IPS=0 requires WORKER1_IP"
     [[ -n "$WORKER2_IP" ]] || fatal "AUTO_ASSIGN_IPS=0 requires WORKER2_IP"
     validate_fixed_ips
   else
-    log "Auto-assigning VM IPs from ${IP_SCAN_PREFIX}.${IP_SCAN_START}-${IP_SCAN_PREFIX}.${IP_SCAN_END}"
-
-    CP_IP="${CP_IP:-$(next_free_ip "$IP_SCAN_START" "$IP_SCAN_END")}"
-    RESERVED_IPS="${RESERVED_IPS} ${CP_IP}"
+    log "Auto-assigning worker VM IPs from ${IP_SCAN_PREFIX}.${IP_SCAN_START}-${IP_SCAN_PREFIX}.${IP_SCAN_END}"
 
     WORKER1_IP="${WORKER1_IP:-$(next_free_ip "$IP_SCAN_START" "$IP_SCAN_END")}"
     RESERVED_IPS="${RESERVED_IPS} ${WORKER1_IP}"
@@ -400,10 +409,12 @@ assign_vm_ips() {
 
   cat <<IPINFO
 
-[INFO] VM IP assignment:
-  ${CP_NAME}:       ${CP_IP}
+[INFO] Worker VM IP assignment:
   ${WORKER1_NAME}:  ${WORKER1_IP}
   ${WORKER2_NAME}:  ${WORKER2_IP}
+
+[INFO] Control-plane:
+  localhost / this server
 
 IPINFO
 }
@@ -685,7 +696,6 @@ ethernets:
 $(dns_yaml_nameservers)
 CLOUDNET
 
-
   local seed_tmp="${BUILD_DIR}/${name}-seed.iso"
   rm -f "$seed_tmp"
   cloud-localds --network-config="$network_config" "$seed_tmp" "$user_data" "$meta_data"
@@ -724,8 +734,10 @@ wait_for_ssh() {
       ok "SSH ready: $name ($ip)"
       return 0
     fi
+
     sleep 5
     elapsed=$((elapsed + 5))
+
     if [ $((elapsed % 30)) -eq 0 ]; then
       log "Still waiting for SSH on $name ($ip), elapsed ${elapsed}s"
     fi
@@ -758,11 +770,11 @@ set -eu
 dns_servers='${DNS_SERVERS}'
 rm -f /etc/resolv.conf
 : >/etc/resolv.conf
-for dns in $dns_servers; do
-  case "$dns" in
+for dns in \$dns_servers; do
+  case "\$dns" in
     ''|127.*|::1|169.254.*) continue ;;
   esac
-  printf 'nameserver %s\n' "$dns" >>/etc/resolv.conf
+  printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
 done
 printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
 mkdir -p /etc/systemd/resolved.conf.d
@@ -776,11 +788,11 @@ EOF_RESOLVED
 systemctl restart systemd-resolved >/dev/null 2>&1 || true
 rm -f /etc/resolv.conf
 : >/etc/resolv.conf
-for dns in $dns_servers; do
-  case "$dns" in
+for dns in \$dns_servers; do
+  case "\$dns" in
     ''|127.*|::1|169.254.*) continue ;;
   esac
-  printf 'nameserver %s\n' "$dns" >>/etc/resolv.conf
+  printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
 done
 printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
 timeout 10 getent hosts deb.debian.org >/dev/null
@@ -811,7 +823,7 @@ write_ansible_inventory() {
 
   cat > "$ANSIBLE_INVENTORY" <<INVEOF
 [control_plane]
-cp ansible_host=${CP_IP}
+localhost ansible_connection=local
 
 [workers]
 worker1 ansible_host=${WORKER1_IP}
@@ -822,9 +834,11 @@ control_plane
 workers
 
 [all:vars]
+ansible_python_interpreter=/usr/bin/python3
+
+[workers:vars]
 ansible_user=${VM_USER}
 ansible_become=true
-ansible_python_interpreter=/usr/bin/python3
 ansible_ssh_private_key_file=${SSH_KEY}
 INVEOF
 
@@ -834,19 +848,19 @@ INVEOF
 print_summary() {
   cat <<SUMMARY
 
-[DONE] cluster VM provisioning step finished.
+[DONE] worker VM provisioning step finished.
 
-VM access:
+Control-plane:
+  Host:      this server / localhost
+  Inventory: localhost ansible_connection=local
+
+Worker VM access:
   User:      ${VM_USER}
   Password:  ${VM_PASSWORD}
   SSH key:   ${SSH_KEY}
   DNS:       ${DNS_SERVERS}
 
-VMs:
-  Hostname: ${CP_NAME}
-  IP:       ${CP_IP}
-  SSH:      ssh -i ${SSH_KEY} ${VM_USER}@${CP_IP}
-
+Worker VMs:
   Hostname: ${WORKER1_NAME}
   IP:       ${WORKER1_IP}
   SSH:      ssh -i ${SSH_KEY} ${VM_USER}@${WORKER1_IP}
@@ -859,11 +873,12 @@ Inventory:
   ${ANSIBLE_INVENTORY}
 
 Automation note:
-  This provisioner creates or repairs the VM layer and writes the generated inventory.
-  The workflow should continue with Ansible ping, OS baseline, K3s setup, storage validation,
-  deployment, and final validation.
+  This provisioner now creates or repairs only the worker VM layer.
+  The physical/server host remains the K3s control-plane.
+  The workflow should continue with Ansible ping, OS baseline, K3s setup,
+  storage validation, OTP Relay deployment, and final validation.
 
-To force VM recreation later:
+To force worker VM recreation later:
   RECREATE_VMS=1 VM_USER=${VM_USER} ${PROVISIONER_PATH}
 
 SUMMARY
@@ -879,7 +894,7 @@ main() {
   enable_libvirt
   ensure_ssh_key
 
-  log "Host DNS servers for VMs: ${DNS_SERVERS}"
+  log "Host DNS servers for worker VMs: ${DNS_SERVERS}"
 
   local iface
   iface="$(detect_iface)"
@@ -891,15 +906,12 @@ main() {
   mkdir -p "$BUILD_DIR"
   download_base_image
 
-  create_vm "$CP_NAME" "$CP_IP"
   create_vm "$WORKER1_NAME" "$WORKER1_IP"
   create_vm "$WORKER2_NAME" "$WORKER2_IP"
 
-  wait_for_ssh "$CP_IP" "$CP_NAME"
   wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME"
   wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME"
 
-  repair_guest_dns_and_validate "$CP_IP" "$CP_NAME"
   repair_guest_dns_and_validate "$WORKER1_IP" "$WORKER1_NAME"
   repair_guest_dns_and_validate "$WORKER2_IP" "$WORKER2_NAME"
 
