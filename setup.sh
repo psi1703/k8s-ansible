@@ -2,16 +2,12 @@
 set -Eeuo pipefail
 
 # Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
+# Normal use: ./setup.sh
 #
-# Normal use:
-#   ./setup.sh
-#
-# Behavior:
-#   - Creates or reuses .env as the single source of configuration values.
-#   - Does not require workflow flags for fresh setup.
-#   - Detects local K3s, generated Ansible inventory, libvirt VMs, and repo scripts.
-#   - Chooses the missing setup path automatically.
-#   - Does not use .env to decide whether VM provisioning is enabled.
+# This version does not select Ansible merely because an inventory file exists.
+# It verifies that inventory hosts are SSH reachable first. If not, it runs the
+# VM provisioner in repair/recreate mode so stale shut-off domains, missing seed
+# ISOs, stale inventories, and broken VM identities do not trap the installer.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -23,7 +19,6 @@ FORCE_LOCAL="0"
 FORCE_REPROVISION_VMS="0"
 SKIP_ANSIBLE="0"
 
-# OTP Relay should deploy during smart Ansible setup unless explicitly overridden.
 DEPLOY_OTP_RELAY="${DEPLOY_OTP_RELAY:-1}"
 VALIDATE_OTP_RELAY="${VALIDATE_OTP_RELAY:-0}"
 
@@ -40,46 +35,28 @@ Optional overrides:
   --edit-env          Open the saved .env change menu before continuing.
   --dry-run           Detect state and print planned action without changing the system.
   --local             Force local K3s/app installer path for this run.
-  --reprovision-vms   Force VM provisioner even if inventory/VMs already exist.
+  --reprovision-vms   Force VM recreation/repair even if inventory/VMs already exist.
   --no-ansible        Provision/update VMs only; skip Ansible cluster setup.
   --noninteractive    Do not prompt where supported; requires complete .env/exported env.
   -h, --help          Show this help.
 
 Default behavior:
-  ./setup.sh creates or reuses .env, detects missing components, and chooses
-  the correct setup path automatically. The .env file stores configuration
-  values only; it does not decide the workflow mode.
+  ./setup.sh creates or reuses .env, validates real runtime state, and chooses
+  the correct setup path automatically. .env stores configuration values only;
+  it does not decide workflow mode.
 USAGE
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --edit-env)
-      FORCE_ENV_MENU="1"
-      ;;
-    --dry-run)
-      DRY_RUN="1"
-      ;;
-    --local)
-      FORCE_LOCAL="1"
-      ;;
-    --reprovision-vms)
-      FORCE_REPROVISION_VMS="1"
-      ;;
-    --no-ansible)
-      SKIP_ANSIBLE="1"
-      ;;
-    --noninteractive)
-      NONINTERACTIVE="1"
-      export NONINTERACTIVE
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      fatal "unknown argument: $1"
-      ;;
+    --edit-env) FORCE_ENV_MENU="1" ;;
+    --dry-run) DRY_RUN="1" ;;
+    --local) FORCE_LOCAL="1" ;;
+    --reprovision-vms) FORCE_REPROVISION_VMS="1" ;;
+    --no-ansible) SKIP_ANSIBLE="1" ;;
+    --noninteractive) NONINTERACTIVE="1"; export NONINTERACTIVE ;;
+    -h|--help) usage; exit 0 ;;
+    *) fatal "unknown argument: $1" ;;
   esac
   shift
 done
@@ -243,7 +220,41 @@ default_iface() {
 }
 
 default_dns() {
-  awk '/^nameserver / {print $2; exit}' /etc/resolv.conf 2>/dev/null || true
+  local dns=""
+
+  dns="$(awk '/^nameserver / {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+
+  case "$dns" in
+    ""|127.*|::1)
+      dns="$(default_gateway)"
+      ;;
+  esac
+
+  case "$dns" in
+    ""|127.*|::1)
+      dns="1.1.1.1"
+      ;;
+  esac
+
+  printf '%s\n' "$dns"
+}
+
+sanitize_dns_value() {
+  local dns="${1:-}"
+
+  case "$dns" in
+    ""|127.*|::1)
+      dns="$(default_gateway)"
+      ;;
+  esac
+
+  case "$dns" in
+    ""|127.*|::1)
+      dns="1.1.1.1"
+      ;;
+  esac
+
+  printf '%s\n' "$dns"
 }
 
 default_host_cidr() {
@@ -267,10 +278,11 @@ default_scan_prefix() {
 ensure_vm_env() {
   source_env_if_present
 
+  BRIDGE_NAME="${BRIDGE_NAME:-br0}"
   HOST_IFACE="${HOST_IFACE:-$(default_iface)}"
   HOST_IP_CIDR="${HOST_IP_CIDR:-$(default_host_cidr)}"
   GATEWAY="${GATEWAY:-$(default_gateway)}"
-  DNS="${DNS:-$(default_dns)}"
+  DNS="$(sanitize_dns_value "${DNS:-$(default_dns)}")"
   PREFIX="${PREFIX:-24}"
   IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-$(default_scan_prefix)}"
   IP_SCAN_START="${IP_SCAN_START:-150}"
@@ -286,10 +298,11 @@ ensure_vm_env() {
 
 VM provisioning settings
 EOF_VM_INFO
+  prompt_value BRIDGE_NAME "Libvirt bridge name" 1 0
   prompt_value HOST_IFACE "Host interface to bridge for VMs" 1 0
   prompt_value HOST_IP_CIDR "Host bridge IP/CIDR" 1 0
   prompt_value GATEWAY "Network gateway" 1 0
-  prompt_value DNS "DNS server" 1 0
+  prompt_value DNS "DNS server for VMs" 1 0
   prompt_value PREFIX "Network prefix length" 1 0
   prompt_value IP_SCAN_PREFIX "IP scan prefix for VM auto assignment, for example 172.31.11" 1 0
   prompt_value IP_SCAN_START "IP scan start octet" 1 0
@@ -342,6 +355,89 @@ ansible_inventory_path() {
   return 1
 }
 
+inventory_hosts() {
+  local inventory="$1"
+
+  awk '
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*#/ { next }
+    /^\[/ { next }
+    {
+      host=$1
+      ip=""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^ansible_host=/) {
+          split($i, a, "=")
+          ip=a[2]
+        }
+      }
+      if (host != "" && ip != "") {
+        print host, ip
+      }
+    }
+  ' "$inventory"
+}
+
+ssh_ready_for_inventory_host() {
+  local host="$1"
+  local ip="$2"
+  local user="${VM_USER:-otp-relay}"
+  local key="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
+
+  [ -n "$host" ] || return 1
+  [ -n "$ip" ] || return 1
+  [ -f "$key" ] || return 1
+
+  ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+
+  ssh \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+    -o ConnectTimeout=5 \
+    -i "$key" \
+    "${user}@${ip}" \
+    'hostname >/dev/null 2>&1' >/dev/null 2>&1
+}
+
+inventory_ssh_ready() {
+  local inventory="$1"
+  local host ip
+  local count=0
+
+  [ -f "$inventory" ] || return 1
+
+  while read -r host ip; do
+    [ -n "$host" ] || continue
+    count=$((count + 1))
+    if ! ssh_ready_for_inventory_host "$host" "$ip"; then
+      return 1
+    fi
+  done <<EOF_INVENTORY_HOSTS
+$(inventory_hosts "$inventory")
+EOF_INVENTORY_HOSTS
+
+  [ "$count" -gt 0 ]
+}
+
+print_inventory_reachability() {
+  local inventory="$1"
+  local host ip
+
+  [ -f "$inventory" ] || return 0
+
+  while read -r host ip; do
+    [ -n "$host" ] || continue
+    if ssh_ready_for_inventory_host "$host" "$ip"; then
+      log "  inventory host ${host} (${ip}): ssh reachable"
+    else
+      log "  inventory host ${host} (${ip}): ssh unreachable"
+    fi
+  done <<EOF_INVENTORY_HOSTS
+$(inventory_hosts "$inventory")
+EOF_INVENTORY_HOSTS
+}
+
 local_kubectl() {
   if command -v k3s >/dev/null 2>&1; then
     k3s kubectl "$@"
@@ -378,13 +474,25 @@ redis_deployed() {
   local_kubectl get statefulset otp-redis -n "$ns" >/dev/null 2>&1
 }
 
+virsh_cmd() {
+  if command -v virsh >/dev/null 2>&1; then
+    if virsh list --all >/dev/null 2>&1; then
+      virsh "$@"
+    else
+      sudo virsh "$@"
+    fi
+  else
+    return 127
+  fi
+}
+
 libvirt_vm_exists() {
   command -v virsh >/dev/null 2>&1 || return 1
   local cp_name="${CP_NAME:-otp-master}"
   local w1_name="${WORKER1_NAME:-otp-worker1}"
   local w2_name="${WORKER2_NAME:-otp-worker2}"
 
-  virsh list --all --name 2>/dev/null | grep -Eq "^(${cp_name}|${w1_name}|${w2_name})$"
+  virsh_cmd list --all --name 2>/dev/null | grep -Eq "^(${cp_name}|${w1_name}|${w2_name})$"
 }
 
 detect_setup_path() {
@@ -409,8 +517,18 @@ detect_setup_path() {
   fi
 
   if [ -n "$inventory" ] && [ -n "$runner" ]; then
-    printf '%s\n' "ansible-existing"
-    return 0
+    if inventory_ssh_ready "$inventory"; then
+      printf '%s\n' "ansible-existing"
+      return 0
+    fi
+
+    warn "generated inventory exists, but one or more inventory hosts are not SSH reachable"
+    if [ -n "$provisioner" ]; then
+      printf '%s\n' "vm-provision"
+      return 0
+    fi
+
+    fatal "inventory hosts are unreachable and VM provisioner is missing"
   fi
 
   if local_k3s_reachable; then
@@ -441,6 +559,9 @@ print_detected_state() {
   log "  provisioner: ${provisioner:-missing}"
   log "  ansible runner: ${runner:-missing}"
   log "  ansible inventory: ${inventory:-missing}"
+  if [ -n "$inventory" ]; then
+    print_inventory_reachability "$inventory"
+  fi
   if local_k3s_reachable; then
     log "  local cluster: reachable"
   elif local_k3s_installed; then
@@ -477,15 +598,23 @@ run_local_install() {
 }
 
 run_vm_provisioner() {
-  local provisioner
+  local provisioner inventory
   provisioner="$(provisioner_path || true)"
   [ -n "$provisioner" ] || fatal "missing VM provisioner: automation/libvirt/provision-vms.sh"
 
   ensure_vm_env
   chown_env_to_original_user
 
+  inventory="$(ansible_inventory_path || true)"
+  if [ "$FORCE_REPROVISION_VMS" = "1" ]; then
+    export RECREATE_VMS="1"
+  elif [ -n "$inventory" ] && ! inventory_ssh_ready "$inventory"; then
+    warn "existing inventory is not reachable; forcing VM recreation/repair"
+    export RECREATE_VMS="1"
+  fi
+
   log "running VM provisioner: automation/libvirt/provision-vms.sh"
-  run_as_original_user bash "$provisioner"
+  run_as_original_user env RECREATE_VMS="${RECREATE_VMS:-0}" bash "$provisioner"
 }
 
 run_ansible_cluster() {
@@ -495,6 +624,10 @@ run_ansible_cluster() {
 
   [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-poc-cluster.sh"
   [ -n "$inventory" ] || fatal "missing generated inventory; run VM provisioning first"
+
+  if ! inventory_ssh_ready "$inventory"; then
+    fatal "inventory exists but hosts are not SSH reachable; rerun setup so VM provisioning can repair/recreate them"
+  fi
 
   if [ "$SKIP_ANSIBLE" = "1" ]; then
     log "Ansible cluster setup skipped by --no-ansible"
