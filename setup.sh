@@ -333,7 +333,7 @@ ansible_runner_path() {
   for candidate in \
     "$SCRIPT_DIR/automation/ansible/run-cluster" \
     "$SCRIPT_DIR/automation/ansible/run-cluster.sh" \
-    "$SCRIPT_DIR/automation/ansible/run-poc-cluster.sh"; do
+    "$SCRIPT_DIR/automation/ansible/run-cluster.sh"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -346,7 +346,7 @@ ansible_inventory_path() {
   local candidate
   for candidate in \
     "$SCRIPT_DIR/automation/ansible/inventory.generated.ini" \
-    "$SCRIPT_DIR/automation/ansible/inventory.poc.generated.ini"; do
+    "$SCRIPT_DIR/automation/ansible/inventory.generated.ini"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -384,7 +384,7 @@ ssh_ready_for_inventory_host() {
   local user="${VM_USER:-otp-relay}"
   local _real_home
   _real_home="$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)"
-  local key="${SSH_KEY:-${_real_home}/.ssh/otp-relay-poc}"
+  local key="${SSH_KEY:-${_real_home}/.ssh/otp-relay-cluster}"
 
   [ -n "$host" ] || return 1
   [ -n "$ip" ] || return 1
@@ -624,7 +624,7 @@ run_ansible_cluster() {
   runner="$(ansible_runner_path || true)"
   inventory="$(ansible_inventory_path || true)"
 
-  [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-poc-cluster.sh"
+  [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-cluster.sh"
   [ -n "$inventory" ] || fatal "missing generated inventory; run VM provisioning first"
 
   # VMs may still be running cloud-init after provisioning. Wait up to 3 minutes
