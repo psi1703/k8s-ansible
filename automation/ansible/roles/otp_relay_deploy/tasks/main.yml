@@ -50,31 +50,107 @@
     executable: /bin/bash
   become: true
 
-- name: Deploy OTP Relay through the project installer using .env source of truth
+- name: Define OTP Relay installer paths
+  ansible.builtin.set_fact:
+    otp_relay_install_dir: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
+    otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
+    otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
+
+- name: Clear previous OTP Relay installer log
+  ansible.builtin.file:
+    path: "{{ otp_relay_installer_log }}"
+    state: absent
+  become: true
+
+- name: Start OTP Relay installer in background
   ansible.builtin.shell: |
     set -euo pipefail
 
-    install_dir="{{ otp_install_dir | default('/opt/k8s-ansible') }}"
-    env_file="{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
-    log_file="/tmp/otp-relay-installer-$(date +%Y%m%d-%H%M%S).log"
+    install_dir="{{ otp_relay_install_dir }}"
+    env_file="{{ otp_relay_env_file }}"
+    log_file="{{ otp_relay_installer_log }}"
 
     cd "$install_dir"
 
-    echo "[INFO] Starting OTP Relay installer on $(hostname)"
-    echo "[INFO] Install directory: $install_dir"
-    echo "[INFO] Env file: $env_file"
-    echo "[INFO] Log file: $log_file"
-    echo "[INFO] Long-running steps may include Docker builds, K3s checks, image import, kubectl apply, and rollout waits."
-    echo "[INFO] To follow live progress on the control-plane, run:"
-    echo "[INFO]   sudo tail -f $log_file"
+    {
+      echo "[INFO] Starting OTP Relay installer on $(hostname)"
+      echo "[INFO] Started at: $(date -Is)"
+      echo "[INFO] Install directory: $install_dir"
+      echo "[INFO] Env file: $env_file"
+      echo "[INFO] Log file: $log_file"
+      echo "[INFO] Long-running steps may include apt, Docker builds, K3s checks, image import, kubectl apply, and rollout waits."
+      echo
+    } > "$log_file"
 
-    ENV_FILE="$env_file" \
-    NONINTERACTIVE=1 \
-    SKIP_REPO_SYNC=1 \
-    GIT_CLEAN=0 \
-    stdbuf -oL -eL bash install-otp-relay-k8s.sh 2>&1 | tee "$log_file"
+    (
+      set -o pipefail
+      ENV_FILE="$env_file" \
+      NONINTERACTIVE=1 \
+      SKIP_REPO_SYNC=1 \
+      GIT_CLEAN=0 \
+      stdbuf -oL -eL bash install-otp-relay-k8s.sh 2>&1 | tee -a "$log_file"
+      exit "${PIPESTATUS[0]}"
+    )
+  args:
+    executable: /bin/bash
+    chdir: "{{ otp_relay_install_dir }}"
+  become: true
+  async: 7200
+  poll: 0
+  register: otp_relay_installer_job
 
-    echo "[INFO] OTP Relay installer completed successfully"
+- name: Show OTP Relay installer live-log command
+  ansible.builtin.debug:
+    msg:
+      - "OTP Relay installer started asynchronously."
+      - "Live log on control-plane:"
+      - "sudo tail -f {{ otp_relay_installer_log }}"
+
+- name: Poll OTP Relay installer and print recent log output
+  ansible.builtin.shell: |
+    set -eu
+
+    echo "===== installer job status ====="
+    echo "job id: {{ otp_relay_installer_job.ansible_job_id }}"
+    echo
+
+    echo "===== recent installer log ====="
+    if [ -f "{{ otp_relay_installer_log }}" ]; then
+      tail -40 "{{ otp_relay_installer_log }}"
+    else
+      echo "installer log not created yet: {{ otp_relay_installer_log }}"
+    fi
   args:
     executable: /bin/bash
   become: true
+  changed_when: false
+  register: otp_relay_installer_log_tail
+  until: false
+  retries: 1
+  failed_when: false
+
+- name: Wait for OTP Relay installer to finish
+  ansible.builtin.async_status:
+    jid: "{{ otp_relay_installer_job.ansible_job_id }}"
+  register: otp_relay_installer_status
+  until: otp_relay_installer_status.finished
+  retries: 720
+  delay: 10
+  become: true
+
+- name: Show final OTP Relay installer log
+  ansible.builtin.shell: |
+    set -eu
+    echo "===== final installer log tail ====="
+    tail -160 "{{ otp_relay_installer_log }}" || true
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+
+- name: Fail when OTP Relay installer failed
+  ansible.builtin.fail:
+    msg: >-
+      OTP Relay installer failed with rc={{ otp_relay_installer_status.rc | default('unknown') }}.
+      Review the control-plane log: {{ otp_relay_installer_log }}
+  when: otp_relay_installer_status.rc | default(0) != 0
