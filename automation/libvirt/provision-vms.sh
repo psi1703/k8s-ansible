@@ -77,6 +77,29 @@ BUILD_DIR="${REPO_ROOT}/automation/libvirt/build"
 # can be mode 0750/root-owned after git/sudo operations.
 SEED_IMAGE_DIR="${SEED_IMAGE_DIR:-${VM_IMAGE_DIR}}"
 
+
+sanitize_dns_value() {
+  local candidate="${1:-}"
+
+  # Do not pass host-only/systemd-resolved loopback DNS into guests.
+  # 127.0.0.53 works on the host only; VMs need a LAN/public resolver.
+  case "$candidate" in
+    ""|127.*|::1)
+      candidate="${GATEWAY:-}"
+      ;;
+  esac
+
+  case "$candidate" in
+    ""|127.*|::1)
+      candidate="1.1.1.1"
+      ;;
+  esac
+
+  printf '%s\n' "$candidate"
+}
+
+DNS="$(sanitize_dns_value "$DNS")"
+
 : "${HOST_IP_CIDR:?HOST_IP_CIDR must be set in .env or the shell environment}"
 : "${GATEWAY:?GATEWAY must be set in .env or the shell environment}"
 : "${DNS:?DNS must be set in .env or the shell environment}"
@@ -575,23 +598,20 @@ users:
 ssh_pwauth: true
 disable_root: true
 
-package_update: true
-packages:
-  - openssh-server
-  - sudo
-  - curl
-  - ca-certificates
-  - gnupg
-  - git
-  - jq
-  - python3
-  - nfs-common
+# Keep first boot minimal. Package installation belongs in Ansible,
+# where DNS/mirror failures are visible and retryable. If cloud-init does
+# apt work here, a transient resolver failure leaves the VM in status:error.
+package_update: false
+package_upgrade: false
 
 bootcmd:
   - [ sh, -c, "systemctl enable serial-getty@ttyS0.service || true" ]
 
 runcmd:
-  - systemctl enable --now ssh
+  - mkdir -p /etc/systemd/resolved.conf.d
+  - printf '[Resolve]\nDNS=${DNS} 1.1.1.1 8.8.8.8\nFallbackDNS=1.1.1.1 8.8.8.8\n' > /etc/systemd/resolved.conf.d/otp-relay-dns.conf
+  - systemctl restart systemd-resolved || true
+  - systemctl enable --now ssh || systemctl enable --now sshd || true
 CLOUDUSER
 
   cat > "$meta_data" <<CLOUDMETA
@@ -615,6 +635,7 @@ ethernets:
     nameservers:
       addresses:
         - ${DNS}
+        - 1.1.1.1
         - 8.8.8.8
 CLOUDNET
 
@@ -735,6 +756,13 @@ main() {
   install_packages
   enable_libvirt
   ensure_ssh_key
+
+  log "VM DNS resolver: ${DNS}"
+  case "${DNS}" in
+    127.*|::1)
+      fatal "Refusing to use loopback DNS inside VMs: ${DNS}"
+      ;;
+  esac
 
   local iface
   iface="$(detect_iface)"
