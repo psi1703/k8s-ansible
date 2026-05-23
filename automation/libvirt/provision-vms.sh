@@ -80,25 +80,46 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fatal "Missing command: $1"
 }
 
-sanitize_dns_value() {
-  local candidate="${1:-}"
+host_dns_servers() {
+  {
+    # Prefer the host's real upstream resolvers from systemd-resolved.
+    # Do not use the host-local stub 127.0.0.53 inside guests.
+    if command -v resolvectl >/dev/null 2>&1; then
+      resolvectl dns 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true
+    fi
 
-  case "$candidate" in
-    ""|127.*|::1)
-      candidate="${GATEWAY:-}"
-      ;;
-  esac
+    # NetworkManager exposes the host DNS per device on many Debian installs.
+    if command -v nmcli >/dev/null 2>&1; then
+      nmcli -t -f IP4.DNS dev show 2>/dev/null | awk -F: '$2 != "" {print $2}' || true
+    fi
 
-  case "$candidate" in
-    ""|127.*|::1)
-      candidate="1.1.1.1"
-      ;;
-  esac
-
-  printf '%s\n' "$candidate"
+    # /run/systemd/resolve/resolv.conf normally contains upstream resolvers,
+    # unlike /etc/resolv.conf which may contain 127.0.0.53.
+    awk '/^nameserver / {print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
+    awk '/^nameserver / {print $2}' /etc/resolv.conf 2>/dev/null || true
+  } | awk '
+    NF && $1 !~ /^127\./ && $1 != "::1" && $1 !~ /^169\.254\./ && !seen[$1]++ {print $1}
+  '
 }
 
-DNS="$(sanitize_dns_value "$DNS")"
+DNS_SERVERS="${DNS_SERVERS:-$(host_dns_servers | paste -sd' ' -)}"
+[ -n "$DNS_SERVERS" ] || fatal "Could not detect a non-loopback DNS server from the host. Fix host DNS or set DNS_SERVERS explicitly."
+DNS="$(printf '%s\n' "$DNS_SERVERS" | awk '{print $1}')"
+
+dns_resolv_conf_content() {
+  local dns
+  for dns in $DNS_SERVERS; do
+    printf 'nameserver %s\n' "$dns"
+  done
+  printf 'options timeout:2 attempts:2 rotate\n'
+}
+
+dns_yaml_nameservers() {
+  local dns
+  for dns in $DNS_SERVERS; do
+    printf '        - %s\n' "$dns"
+  done
+}
 
 : "${HOST_IP_CIDR:?HOST_IP_CIDR must be set in .env or the shell environment}"
 : "${GATEWAY:?GATEWAY must be set in .env or the shell environment}"
@@ -213,7 +234,7 @@ ensure_bridge_networkmanager() {
     ipv4.method manual \
     ipv4.addresses "$HOST_IP_CIDR" \
     ipv4.gateway "$GATEWAY" \
-    ipv4.dns "$DNS 1.1.1.1 8.8.8.8" \
+    ipv4.dns "$DNS_SERVERS" \
     ipv6.method ignore
 
   sudo nmcli con add type ethernet ifname "$iface" master "$BRIDGE_NAME" con-name "${BRIDGE_NAME}-slave-${iface}"
@@ -255,7 +276,7 @@ iface ${BRIDGE_NAME} inet static
     bridge_ports ${iface}
     bridge_stp off
     bridge_fd 0
-    dns-nameservers ${DNS} 1.1.1.1 8.8.8.8
+    dns-nameservers ${DNS_SERVERS}
 NETEOF
 
   sudo systemctl restart networking
@@ -605,6 +626,9 @@ create_vm() {
   sudo qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$disk" "${VM_DISK_GB}G"
   validate_qcow2_or_remove "$disk" "New VM disk" || fatal "Failed to create valid qcow2 disk: $disk"
 
+  local DNS_RESOLV_ESCAPED
+  DNS_RESOLV_ESCAPED="$(dns_resolv_conf_content | sed ':a;N;$!ba;s/\n/\\n/g')"
+
   cat > "$user_data" <<CLOUDUSER
 #cloud-config
 hostname: ${name}
@@ -631,9 +655,10 @@ bootcmd:
 
 runcmd:
   - [ sh, -c, "mkdir -p /etc/systemd/resolved.conf.d" ]
-  - [ sh, -c, "printf '[Resolve]\nDNS=${DNS} 1.1.1.1 8.8.8.8\nFallbackDNS=1.1.1.1 8.8.8.8\nDNSSEC=no\nDNSOverTLS=no\n' > /etc/systemd/resolved.conf.d/otp-relay-dns.conf" ]
-  - [ sh, -c, "rm -f /etc/resolv.conf && ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf" ]
+  - [ sh, -c, "printf '[Resolve]\nDNS=${DNS_SERVERS}\nFallbackDNS=${DNS_SERVERS}\nDNSSEC=no\nDNSOverTLS=no\n' > /etc/systemd/resolved.conf.d/otp-relay-dns.conf" ]
+  - [ sh, -c, "rm -f /etc/resolv.conf && printf '${DNS_RESOLV_ESCAPED}' > /etc/resolv.conf" ]
   - [ sh, -c, "systemctl restart systemd-resolved || true" ]
+  - [ sh, -c, "rm -f /etc/resolv.conf && printf '${DNS_RESOLV_ESCAPED}' > /etc/resolv.conf" ]
   - [ sh, -c, "systemctl enable --now ssh || systemctl enable --now sshd || true" ]
 CLOUDUSER
 
@@ -657,10 +682,9 @@ ethernets:
         via: ${GATEWAY}
     nameservers:
       addresses:
-        - ${DNS}
-        - 1.1.1.1
-        - 8.8.8.8
+$(dns_yaml_nameservers)
 CLOUDNET
+
 
   local seed_tmp="${BUILD_DIR}/${name}-seed.iso"
   rm -f "$seed_tmp"
@@ -719,6 +743,7 @@ repair_guest_dns_and_validate() {
   local attempt
 
   log "Repairing and validating DNS inside $name ($ip)..."
+  log "Host DNS servers for $name: ${DNS_SERVERS}"
 
   for attempt in $(seq 1 12); do
     if ssh \
@@ -728,7 +753,39 @@ repair_guest_dns_and_validate() {
       -o ConnectTimeout=10 \
       -i "$SSH_KEY" \
       "${VM_USER}@${ip}" \
-      "sudo sh -c 'mkdir -p /etc/systemd/resolved.conf.d && printf \"[Resolve]\\nDNS=${DNS} 1.1.1.1 8.8.8.8\\nFallbackDNS=1.1.1.1 8.8.8.8\\nDNSSEC=no\\nDNSOverTLS=no\\n\" > /etc/systemd/resolved.conf.d/otp-relay-dns.conf && rm -f /etc/resolv.conf && ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf && systemctl restart systemd-resolved || true' && getent hosts deb.debian.org" >/dev/null 2>&1; then
+      "sudo sh -s" <<DNS_REMOTE >/dev/null 2>&1
+set -eu
+dns_servers='${DNS_SERVERS}'
+rm -f /etc/resolv.conf
+: >/etc/resolv.conf
+for dns in $dns_servers; do
+  case "$dns" in
+    ''|127.*|::1|169.254.*) continue ;;
+  esac
+  printf 'nameserver %s\n' "$dns" >>/etc/resolv.conf
+done
+printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
+mkdir -p /etc/systemd/resolved.conf.d
+cat >/etc/systemd/resolved.conf.d/otp-relay-dns.conf <<EOF_RESOLVED
+[Resolve]
+DNS=${DNS_SERVERS}
+FallbackDNS=${DNS_SERVERS}
+DNSSEC=no
+DNSOverTLS=no
+EOF_RESOLVED
+systemctl restart systemd-resolved >/dev/null 2>&1 || true
+rm -f /etc/resolv.conf
+: >/etc/resolv.conf
+for dns in $dns_servers; do
+  case "$dns" in
+    ''|127.*|::1|169.254.*) continue ;;
+  esac
+  printf 'nameserver %s\n' "$dns" >>/etc/resolv.conf
+done
+printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
+timeout 10 getent hosts deb.debian.org >/dev/null
+DNS_REMOTE
+    then
       ok "DNS validated: $name ($ip) can resolve deb.debian.org"
       return 0
     fi
@@ -783,7 +840,7 @@ VM access:
   User:      ${VM_USER}
   Password:  ${VM_PASSWORD}
   SSH key:   ${SSH_KEY}
-  DNS:       ${DNS}, 1.1.1.1, 8.8.8.8
+  DNS:       ${DNS_SERVERS}
 
 VMs:
   Hostname: ${CP_NAME}
@@ -822,12 +879,7 @@ main() {
   enable_libvirt
   ensure_ssh_key
 
-  log "VM DNS resolver: ${DNS}"
-  case "${DNS}" in
-    127.*|::1)
-      fatal "Refusing to use loopback DNS inside VMs: ${DNS}"
-      ;;
-  esac
+  log "Host DNS servers for VMs: ${DNS_SERVERS}"
 
   local iface
   iface="$(detect_iface)"
