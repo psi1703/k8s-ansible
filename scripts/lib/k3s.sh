@@ -2,6 +2,8 @@
 # Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
 
 validate_k8s_topology_settings() {
+  log "validating Kubernetes topology settings"
+
   case "$SERVICE_TYPE" in
     ClusterIP|NodePort|LoadBalancer) ;;
     *) fatal "unsupported SERVICE_TYPE=$SERVICE_TYPE. Use ClusterIP, NodePort, or LoadBalancer." ;;
@@ -56,6 +58,7 @@ validate_k8s_topology_settings() {
   fi
 
   if [ "$NFS_ENABLED" = "1" ]; then
+    log "validating NFS storage settings"
     [ -n "$NFS_SERVER" ] || fatal "NFS_ENABLED=1 requires NFS_SERVER"
     [ -n "$NFS_PATH" ] || fatal "NFS_ENABLED=1 requires NFS_PATH"
 
@@ -69,12 +72,14 @@ validate_k8s_topology_settings() {
   fi
 
   if [ "$TLS_ENABLED" = "1" ]; then
+    log "validating TLS settings"
     [ "$INGRESS_ENABLED" = "1" ] || fatal "TLS_ENABLED=1 requires INGRESS_ENABLED=1"
     [ -n "$TLS_HOST" ] || fatal "TLS_ENABLED=1 requires TLS_HOST"
     [ -n "$TLS_SECRET_NAME" ] || fatal "TLS_ENABLED=1 requires TLS_SECRET_NAME"
   fi
 
   if [ "$SERVICE_TYPE" = "NodePort" ]; then
+    log "validating NodePort service settings"
     case "$SERVICE_NODE_PORT" in
       ''|*[!0-9]*) fatal "SERVICE_NODE_PORT must be numeric for SERVICE_TYPE=NodePort" ;;
     esac
@@ -109,6 +114,8 @@ validate_k8s_topology_settings() {
   if { [ -n "$REDIS_NODE_SELECTOR_KEY" ] && [ -z "$REDIS_NODE_SELECTOR_VALUE" ]; } || { [ -z "$REDIS_NODE_SELECTOR_KEY" ] && [ -n "$REDIS_NODE_SELECTOR_VALUE" ]; }; then
     fatal "REDIS_NODE_SELECTOR_KEY and REDIS_NODE_SELECTOR_VALUE must be set together"
   fi
+
+  log "Kubernetes topology settings validated"
 }
 
 validate_selected_node() {
@@ -123,6 +130,8 @@ validate_selected_node() {
   if ! k3s kubectl get node -l "$label_key=$label_value" -o name | grep -q .; then
     fatal "$label_name node selector did not match any node: $label_key=$label_value"
   fi
+
+  log "node selector matched at least one node for $label_name"
 }
 
 mark_deployment_restart_required() {
