@@ -625,9 +625,19 @@ run_ansible_cluster() {
   [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-poc-cluster.sh"
   [ -n "$inventory" ] || fatal "missing generated inventory; run VM provisioning first"
 
-  if ! inventory_ssh_ready "$inventory"; then
-    fatal "inventory exists but hosts are not SSH reachable; rerun setup so VM provisioning can repair/recreate them"
-  fi
+  # VMs may still be running cloud-init after provisioning. Wait up to 3 minutes
+  # for all inventory hosts to become SSH-reachable before handing off to Ansible.
+  log "waiting for all inventory hosts to become SSH reachable (up to 180s)..."
+  local elapsed=0
+  until inventory_ssh_ready "$inventory"; do
+    if [ "$elapsed" -ge 180 ]; then
+      fatal "inventory hosts are not SSH reachable after ${elapsed}s; check VM console or rerun setup"
+    fi
+    log "  not yet reachable, retrying in 10s (${elapsed}s elapsed)..."
+    sleep 10
+    elapsed=$((elapsed + 10))
+  done
+  log "all inventory hosts are SSH reachable"
 
   if [ "$SKIP_ANSIBLE" = "1" ]; then
     log "Ansible cluster setup skipped by --no-ansible"
