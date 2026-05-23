@@ -52,13 +52,29 @@
 
 - name: Deploy OTP Relay through the project installer using .env source of truth
   ansible.builtin.shell: |
-    set -eu
-    cd "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
-    ENV_FILE="{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}" \
+    set -euo pipefail
+
+    install_dir="{{ otp_install_dir | default('/opt/k8s-ansible') }}"
+    env_file="{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
+    log_file="/tmp/otp-relay-installer-$(date +%Y%m%d-%H%M%S).log"
+
+    cd "$install_dir"
+
+    echo "[INFO] Starting OTP Relay installer on $(hostname)"
+    echo "[INFO] Install directory: $install_dir"
+    echo "[INFO] Env file: $env_file"
+    echo "[INFO] Log file: $log_file"
+    echo "[INFO] Long-running steps may include Docker builds, K3s checks, image import, kubectl apply, and rollout waits."
+    echo "[INFO] To follow live progress on the control-plane, run:"
+    echo "[INFO]   sudo tail -f $log_file"
+
+    ENV_FILE="$env_file" \
     NONINTERACTIVE=1 \
     SKIP_REPO_SYNC=1 \
     GIT_CLEAN=0 \
-    bash install-otp-relay-k8s.sh
+    stdbuf -oL -eL bash install-otp-relay-k8s.sh 2>&1 | tee "$log_file"
+
+    echo "[INFO] OTP Relay installer completed successfully"
   args:
     executable: /bin/bash
   become: true
