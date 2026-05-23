@@ -32,12 +32,17 @@ detect_host_environment() {
   fi
 
   log "detected OS/arch: $OS_NAME / $ARCH_RAW"
-  [ "$IS_RPI" = "1" ] && log "detected Raspberry Pi hardware"
+
+  if [ "$IS_RPI" = "1" ]; then
+    log "detected Raspberry Pi hardware"
+  fi
+
+  return 0
 }
 
 prompt_optional_runner_setup() {
   # Optional runner prompt before validation, matching the existing installer behavior.
-  if [ -z "$INSTALL_GITHUB_RUNNER" ]; then
+  if [ -z "${INSTALL_GITHUB_RUNNER:-}" ]; then
     if prompt_yes_no "Install a GitHub Actions self-hosted runner for CI/CD deployments from GitHub? [y/N]" "N"; then
       INSTALL_GITHUB_RUNNER=1
     else
@@ -54,6 +59,7 @@ run_preflight_and_prepare_cluster() {
   is_debian_family || fatal "this installer currently supports Debian-family systems only"
 
   log "running non-invasive preflight checks"
+
   if ! ss -lnt 2>/dev/null | grep -qE '(^|[[:space:]]|:)22[[:space:]]'; then
     warn "SSH does not appear to be listening on TCP/22. I will not change SSH, but confirm console access before continuing."
   fi
