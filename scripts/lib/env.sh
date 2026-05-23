@@ -210,14 +210,12 @@ create_env_interactive() {
   log "creating first-run environment file at $ENV_FILE"
   log "interactive setup will ask only for operator-owned values"
 
-  # Internal installer values. Do not ask these during deployment install.
   _env_set_default REPO_URL ""
   _env_set_default REPO_REF "main"
   _env_set_default INSTALL_DIR "$SCRIPT_DIR"
   _env_set_default DEPLOY_MODE "full"
   _env_set_default RUNNER_ONLY "0"
 
-  # Generic defaults. Site-specific values are still asked below.
   _env_set_default NAMESPACE "otp-relay"
   _env_set_default SERVICE_TYPE "ClusterIP"
   _env_set_default INGRESS_ENABLED "1"
@@ -409,10 +407,31 @@ load_or_create_env() {
   ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
   export ENV_FILE
 
+  # Runtime overrides passed by Ansible/caller must win over persisted .env values.
+  # Example: .env may contain NONINTERACTIVE=0, but Ansible deployment must run with NONINTERACTIVE=1.
+  local runtime_noninteractive="${NONINTERACTIVE:-}"
+  local runtime_skip_repo_sync="${SKIP_REPO_SYNC:-}"
+  local runtime_git_clean="${GIT_CLEAN:-}"
+
   if [ -f "$ENV_FILE" ]; then
     log "loading environment from $ENV_FILE"
     source_env_file "$ENV_FILE"
     ENV_FILE_LOADED=1
+
+    if [ -n "$runtime_noninteractive" ]; then
+      NONINTERACTIVE="$runtime_noninteractive"
+      export NONINTERACTIVE
+    fi
+
+    if [ -n "$runtime_skip_repo_sync" ]; then
+      SKIP_REPO_SYNC="$runtime_skip_repo_sync"
+      export SKIP_REPO_SYNC
+    fi
+
+    if [ -n "$runtime_git_clean" ]; then
+      GIT_CLEAN="$runtime_git_clean"
+      export GIT_CLEAN
+    fi
 
     normalize_loaded_env
 
@@ -420,6 +439,22 @@ load_or_create_env() {
       if prompt_yes_no "Change saved installer environment values before continuing? [y/N]" "N"; then
         change_env_menu
         source_env_file "$ENV_FILE"
+
+        if [ -n "$runtime_noninteractive" ]; then
+          NONINTERACTIVE="$runtime_noninteractive"
+          export NONINTERACTIVE
+        fi
+
+        if [ -n "$runtime_skip_repo_sync" ]; then
+          SKIP_REPO_SYNC="$runtime_skip_repo_sync"
+          export SKIP_REPO_SYNC
+        fi
+
+        if [ -n "$runtime_git_clean" ]; then
+          GIT_CLEAN="$runtime_git_clean"
+          export GIT_CLEAN
+        fi
+
         normalize_loaded_env
       fi
     else
@@ -434,6 +469,22 @@ load_or_create_env() {
 
     source_env_file "$ENV_FILE"
     ENV_FILE_LOADED=1
+
+    if [ -n "$runtime_noninteractive" ]; then
+      NONINTERACTIVE="$runtime_noninteractive"
+      export NONINTERACTIVE
+    fi
+
+    if [ -n "$runtime_skip_repo_sync" ]; then
+      SKIP_REPO_SYNC="$runtime_skip_repo_sync"
+      export SKIP_REPO_SYNC
+    fi
+
+    if [ -n "$runtime_git_clean" ]; then
+      GIT_CLEAN="$runtime_git_clean"
+      export GIT_CLEAN
+    fi
+
     normalize_loaded_env
   fi
 
