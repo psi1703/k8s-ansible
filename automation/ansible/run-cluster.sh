@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${ANSIBLE_DIR}/../.." && pwd)"
 INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
+ANSIBLE_CONFIG="${ANSIBLE_CONFIG:-${ANSIBLE_DIR}/ansible.cfg}"
+export ANSIBLE_CONFIG
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
 SSH_USER="${VM_USER:-otp-relay}"
@@ -21,10 +23,13 @@ cd "$ANSIBLE_DIR"
 [[ -f "$INVENTORY" ]] || fatal "Missing inventory: $INVENTORY. Run automation/libvirt/provision-vms.sh first."
 
 if [[ -f "${REPO_ROOT}/.env" ]]; then
+  log "Loading environment from ${REPO_ROOT}/.env"
   set -a
   # shellcheck disable=SC1091
   . "${REPO_ROOT}/.env"
   set +a
+else
+  warn "No ${REPO_ROOT}/.env found; continuing with exported/default variables only"
 fi
 
 BRIDGE_NAME="${BRIDGE_NAME:-br0}"
@@ -32,6 +37,8 @@ BRIDGE_NAME="${BRIDGE_NAME:-br0}"
 fix_local_ssh_permissions() {
   local ssh_dir="$HOME/.ssh"
   local known_hosts="$ssh_dir/known_hosts"
+
+  log "Ensuring local SSH directory/key permissions are safe"
 
   mkdir -p "$ssh_dir"
   chmod 700 "$ssh_dir" || true
@@ -85,11 +92,15 @@ cleanup_known_hosts() {
     ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$host" >/dev/null 2>&1 || true
     ssh-keygen -f "$HOME/.ssh/known_hosts" -R "[$host]:22" >/dev/null 2>&1 || true
   done
+
+  ok "known_hosts cleanup completed"
 }
 
 write_ansible_ssh_defaults() {
+  log "Configuring Ansible SSH defaults"
   export ANSIBLE_HOST_KEY_CHECKING=False
   export ANSIBLE_SSH_ARGS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=15"
+  log "Using ANSIBLE_CONFIG=$ANSIBLE_CONFIG"
 }
 
 raw_ssh_check() {
@@ -117,9 +128,12 @@ raw_ssh_check() {
 
 ensure_ansible_installed() {
   if ! command -v ansible >/dev/null 2>&1; then
-    log "Installing Ansible on runner host..."
+    log "Installing Ansible on runner host; this may take a few minutes"
     sudo apt-get update
     sudo apt-get install -y ansible
+    ok "Ansible installed"
+  else
+    log "Ansible already installed: $(command -v ansible)"
   fi
 }
 
@@ -202,6 +216,7 @@ ensure_vm_bridge_forwarding() {
 
   uplink="$(detect_host_uplink_iface)"
   vm_cidr="${IP_SCAN_PREFIX:-}"
+
   if [[ -n "$vm_cidr" ]]; then
     vm_cidr="${vm_cidr}.0/${PREFIX:-24}"
   elif [[ -n "${HOST_IP_CIDR:-}" ]]; then
@@ -223,17 +238,16 @@ ensure_vm_bridge_forwarding() {
     fatal "iptables is required to allow VM bridge forwarding"
   fi
 
-  # Allow bridged VM traffic through the host FORWARD chain. Docker often sets FORWARD policy DROP.
   sudo iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null || \
     sudo iptables -I FORWARD 1 -i "$bridge" -j ACCEPT
 
   sudo iptables -C FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
     sudo iptables -I FORWARD 1 -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
-  # Add NAT for environments where bridged guests can reach the host but upstream gateway/firewall
-  # does not route/permit the guest source IPs. This is harmless if routing already works.
   sudo iptables -t nat -C POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE 2>/dev/null || \
     sudo iptables -t nat -A POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE
+
+  ok "VM bridge forwarding/NAT rules are present"
 }
 
 configure_host_dns_forwarder() {
@@ -251,7 +265,7 @@ configure_host_dns_forwarder() {
   log "Host upstream DNS servers: ${dns_servers}"
 
   if ! command -v dnsmasq >/dev/null 2>&1; then
-    log "Installing dnsmasq on host..."
+    log "Installing dnsmasq on host; this may take a few minutes"
     sudo apt-get update
     sudo apt-get install -y dnsmasq
   fi
@@ -269,6 +283,7 @@ configure_host_dns_forwarder() {
     done
   } | sudo tee "$config" >/dev/null
 
+  log "Restarting dnsmasq"
   sudo systemctl restart dnsmasq
   sudo systemctl enable dnsmasq >/dev/null 2>&1 || true
 
@@ -282,12 +297,13 @@ configure_host_dns_forwarder() {
 
   VM_DNS_SERVER="$host_ip"
   export VM_DNS_SERVER
+  ok "Host DNS forwarder is ready for VMs"
 }
 
 repair_and_validate_vm_dns() {
   local host_ip="${VM_DNS_SERVER:?VM_DNS_SERVER is not set}"
 
-  log "Repairing and validating DNS on all cluster VMs..."
+  log "Repairing and validating DNS on all cluster VMs"
   log "VM DNS server: ${host_ip} (host bridge DNS forwarder)"
 
   ansible -i "$INVENTORY" all -b -m shell -a "
@@ -302,6 +318,7 @@ cat /etc/resolv.conf
 ip route
 timeout 10 getent hosts deb.debian.org
 "
+  ok "VM DNS repair/validation completed"
 }
 
 validate_vm_outbound_https() {
@@ -320,6 +337,8 @@ timeout 15 bash -c "cat < /dev/null > /dev/tcp/deb.debian.org/443"
     sudo iptables -t nat -S || true
     fatal "VM outbound HTTPS failed; refusing to run apt until forwarding is fixed"
   }
+
+  ok "Outbound HTTPS validation completed on all cluster VMs"
 }
 
 print_cloud_init_diagnostics() {
@@ -342,7 +361,8 @@ dpkg --audit || true
 }
 
 wait_for_cloud_init_and_locks() {
-  log "Checking cloud-init status on all cluster VMs..."
+  log "Checking cloud-init status on all cluster VMs"
+  log "cloud-init wait timeout: approximately 15 minutes"
 
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eu
@@ -380,7 +400,10 @@ exit 51
     fatal "cloud-init did not complete successfully"
   }
 
-  log "Waiting for apt/dpkg locks on all cluster VMs..."
+  ok "cloud-init completed on all cluster VMs"
+
+  log "Waiting for apt/dpkg locks on all cluster VMs"
+  log "apt/dpkg lock wait timeout: approximately 15 minutes"
 
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eu
@@ -434,11 +457,13 @@ exit 52
     print_cloud_init_diagnostics 200
     fatal "apt/dpkg lock wait failed"
   }
+
+  ok "apt/dpkg locks are clear on all cluster VMs"
 }
 
 repair_apt_if_needed() {
-  log "Repairing apt/dpkg state if needed..."
-  log "This can take several minutes on first boot; apt has 30s network timeouts and 2 retries."
+  log "Repairing apt/dpkg state if needed"
+  log "This can take several minutes on first boot; apt has 30s network timeouts and 2 retries"
 
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eux
@@ -477,6 +502,7 @@ apt-get \
   python3 \
   nfs-common
 '
+  ok "apt/dpkg repair and required package install completed"
 }
 
 run_playbook_if_present() {
@@ -490,9 +516,17 @@ run_playbook_if_present() {
 
   log "$label"
   ansible-playbook -i "$INVENTORY" "$playbook"
+  ok "$label completed"
 }
 
 main() {
+  log "Starting cluster automation"
+  log "Repository root: $REPO_ROOT"
+  log "Ansible directory: $ANSIBLE_DIR"
+  log "Inventory: $INVENTORY"
+  log "SSH key: $SSH_KEY"
+  log "SSH user: $SSH_USER"
+
   ensure_ansible_installed
   fix_local_ssh_permissions
   cleanup_known_hosts
@@ -500,8 +534,9 @@ main() {
 
   raw_ssh_check
 
-  log "Waiting for Ansible SSH connection on all cluster VMs..."
+  log "Waiting for Ansible SSH connection on all cluster VMs"
   ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=180 sleep=5"
+  ok "Ansible SSH connection is ready on all cluster VMs"
 
   wait_for_cloud_init_and_locks
   ensure_vm_bridge_forwarding
@@ -510,26 +545,31 @@ main() {
   validate_vm_outbound_https
   repair_apt_if_needed
 
-  log "Running Ansible ping..."
+  log "Running Ansible ping"
   ansible -i "$INVENTORY" all -m ping
+  ok "Ansible ping completed"
 
-  run_playbook_if_present "Running OS baseline..." "playbooks/00-os-baseline.yml"
-  run_playbook_if_present "Installing K3s control-plane..." "playbooks/10-k3s-control-plane.yml"
-  run_playbook_if_present "Installing K3s workers..." "playbooks/20-k3s-workers.yml"
-  run_playbook_if_present "Applying node labels..." "playbooks/30-node-labels.yml"
+  run_playbook_if_present "Running OS baseline" "playbooks/00-os-baseline.yml"
+  run_playbook_if_present "Installing K3s control-plane" "playbooks/10-k3s-control-plane.yml"
+  run_playbook_if_present "Installing K3s workers" "playbooks/20-k3s-workers.yml"
+  run_playbook_if_present "Applying node labels" "playbooks/30-node-labels.yml"
 
-  if [[ -n "${NFS_SERVER:-}" || -n "${NFS_EXPORT:-}" || -n "${STORAGE_SERVER_IP:-}" ]]; then
-    run_playbook_if_present "Validating storage..." "playbooks/40-storage-validate.yml"
+  if [[ -n "${NFS_SERVER:-}" || -n "${NFS_PATH:-}" ]]; then
+    run_playbook_if_present "Validating storage" "playbooks/40-storage-validate.yml"
   else
-    log "Skipping storage validation because no NFS/storage variables are configured"
+    log "Skipping storage validation because NFS_SERVER/NFS_PATH are not configured"
   fi
 
   if [[ "${DEPLOY_OTP_RELAY:-0}" == "1" ]]; then
-    run_playbook_if_present "Deploying OTP Relay..." "playbooks/50-deploy-otp-relay.yml"
+    run_playbook_if_present "Deploying OTP Relay" "playbooks/50-deploy-otp-relay.yml"
+  else
+    log "DEPLOY_OTP_RELAY=${DEPLOY_OTP_RELAY:-0}; skipping OTP Relay deployment"
   fi
 
   if [[ "${VALIDATE_OTP_RELAY:-0}" == "1" ]]; then
-    run_playbook_if_present "Validating production state..." "playbooks/70-validate-production.yml"
+    run_playbook_if_present "Validating production state" "playbooks/70-validate-production.yml"
+  else
+    log "VALIDATE_OTP_RELAY=${VALIDATE_OTP_RELAY:-0}; skipping production validation"
   fi
 
   ok "Cluster automation completed."
