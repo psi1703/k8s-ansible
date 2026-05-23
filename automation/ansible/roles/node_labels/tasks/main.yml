@@ -5,46 +5,136 @@
   register: k8s_node_names
   changed_when: false
 
-- name: Resolve control-plane Kubernetes node name
+- name: Get Kubernetes nodes with internal IPs
+  ansible.builtin.command:
+    cmd: kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}'
+  register: k8s_node_ip_rows
+  changed_when: false
+
+- name: Resolve control-plane Kubernetes node name from hostname
+  ansible.builtin.shell: |
+    set -eu
+
+    short_hostname="$(hostname -s)"
+    fqdn="$(hostname -f 2>/dev/null || hostname)"
+
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+      awk -v short="$short_hostname" -v fqdn="$fqdn" '
+        $0 == short { print; found=1; exit }
+        $0 == fqdn { print; found=1; exit }
+        index($0, short) > 0 { candidate=$0 }
+        END { if (!found && candidate != "") print candidate }
+      '
+  args:
+    executable: /bin/bash
+  register: control_plane_k8s_node_raw
+  changed_when: false
+
+- name: Set control-plane Kubernetes node fact
   ansible.builtin.set_fact:
-    control_plane_k8s_node: >-
-      {{
-        (k8s_node_names.stdout_lines
-          | select('equalto', inventory_hostname)
-          | list
-          | first)
-        | default(
-            (k8s_node_names.stdout_lines
-              | select('search', inventory_hostname)
-              | list
-              | first),
-            true
-          )
-        | default(
-            (k8s_node_names.stdout_lines
-              | select('search', 'cp|control|master')
-              | list
-              | first),
-            true
-          )
-      }}
+    control_plane_k8s_node: "{{ control_plane_k8s_node_raw.stdout | trim }}"
 
 - name: Fail if control-plane Kubernetes node name could not be resolved
   ansible.builtin.fail:
-    msg: "Could not resolve Kubernetes node for inventory host {{ inventory_hostname }}. Found nodes: {{ k8s_node_names.stdout_lines }}"
+    msg: >-
+      Could not resolve Kubernetes node for localhost control-plane.
+      Found nodes: {{ k8s_node_names.stdout_lines }}
   when: control_plane_k8s_node | length == 0
 
-- name: Label control-plane for Redis eligibility
-  ansible.builtin.command:
-    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node=true --overwrite
-  changed_when: true
+- name: Build worker IP list from inventory
+  ansible.builtin.set_fact:
+    worker_ips: "{{ groups['workers'] | map('extract', hostvars, 'ansible_host') | list }}"
 
-- name: Label control-plane for app storage eligibility
-  ansible.builtin.command:
-    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/storage-node=true --overwrite
-  changed_when: true
+- name: Resolve worker Kubernetes node names by InternalIP
+  ansible.builtin.shell: |
+    set -eu
+
+    worker_ips="{{ worker_ips | join(' ') }}"
+
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}' |
+      awk -v ips="$worker_ips" '
+        BEGIN {
+          n=split(ips, iplist, " ")
+          for (i=1; i<=n; i++) wanted[iplist[i]]=1
+        }
+        {
+          node=$1
+          for (i=2; i<=NF; i++) {
+            if ($i in wanted) print node
+          }
+        }
+      '
+  args:
+    executable: /bin/bash
+  register: worker_k8s_nodes_raw
+  changed_when: false
+
+- name: Set worker Kubernetes node facts
+  ansible.builtin.set_fact:
+    worker_k8s_nodes: "{{ worker_k8s_nodes_raw.stdout_lines | unique | list }}"
+
+- name: Fail if not all worker Kubernetes nodes could be resolved
+  ansible.builtin.fail:
+    msg: >-
+      Could not resolve all worker Kubernetes nodes by inventory IP.
+      Worker inventory IPs: {{ worker_ips }}
+      Resolved Kubernetes worker nodes: {{ worker_k8s_nodes }}
+      Kubernetes node/IP rows: {{ k8s_node_ip_rows.stdout_lines }}
+  when: worker_k8s_nodes | length != worker_ips | length
+
+- name: Show resolved Kubernetes node placement
+  ansible.builtin.debug:
+    msg:
+      - "Control-plane Kubernetes node: {{ control_plane_k8s_node }}"
+      - "Worker Kubernetes nodes: {{ worker_k8s_nodes }}"
 
 - name: Label control-plane for monitor eligibility
   ansible.builtin.command:
     cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/monitor-node=true --overwrite
   changed_when: true
+
+- name: Remove app eligibility from control-plane
+  ansible.builtin.command:
+    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/app-node- --overwrite
+  changed_when: true
+  failed_when: false
+
+- name: Remove Redis eligibility from control-plane
+  ansible.builtin.command:
+    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node- --overwrite
+  changed_when: true
+  failed_when: false
+
+- name: Remove storage eligibility from control-plane
+  ansible.builtin.command:
+    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/storage-node- --overwrite
+  changed_when: true
+  failed_when: false
+
+- name: Label workers for app eligibility
+  ansible.builtin.command:
+    cmd: kubectl label node {{ item }} otp-relay/app-node=true --overwrite
+  loop: "{{ worker_k8s_nodes }}"
+  changed_when: true
+
+- name: Label workers for Redis eligibility
+  ansible.builtin.command:
+    cmd: kubectl label node {{ item }} otp-relay/redis-node=true --overwrite
+  loop: "{{ worker_k8s_nodes }}"
+  changed_when: true
+
+- name: Label workers for storage eligibility
+  ansible.builtin.command:
+    cmd: kubectl label node {{ item }} otp-relay/storage-node=true --overwrite
+  loop: "{{ worker_k8s_nodes }}"
+  changed_when: true
+
+- name: Show final node labels
+  ansible.builtin.command:
+    cmd: kubectl get nodes -L otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node
+  register: final_node_labels
+  changed_when: false
+
+- name: Print final node labels
+  ansible.builtin.debug:
+    var: final_node_labels.stdout_lines
