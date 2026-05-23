@@ -58,9 +58,11 @@ validate_k8s_topology_settings() {
   if [ "$NFS_ENABLED" = "1" ]; then
     [ -n "$NFS_SERVER" ] || fatal "NFS_ENABLED=1 requires NFS_SERVER"
     [ -n "$NFS_PATH" ] || fatal "NFS_ENABLED=1 requires NFS_PATH"
+
     if [ -z "$PVC_STORAGE_CLASS" ]; then
       PVC_STORAGE_CLASS="$NFS_STORAGE_CLASS"
     fi
+
     if [ "$PVC_STORAGE_CLASS" != "$NFS_STORAGE_CLASS" ]; then
       fatal "NFS_ENABLED=1 requires PVC_STORAGE_CLASS=$NFS_STORAGE_CLASS or an empty PVC_STORAGE_CLASS"
     fi
@@ -76,6 +78,7 @@ validate_k8s_topology_settings() {
     case "$SERVICE_NODE_PORT" in
       ''|*[!0-9]*) fatal "SERVICE_NODE_PORT must be numeric for SERVICE_TYPE=NodePort" ;;
     esac
+
     if [ "$SERVICE_NODE_PORT" -lt 30000 ] || [ "$SERVICE_NODE_PORT" -gt 32767 ]; then
       fatal "SERVICE_NODE_PORT must be between 30000 and 32767"
     fi
@@ -88,7 +91,9 @@ validate_k8s_topology_settings() {
   case "$REPLICA_COUNT" in
     ''|*[!0-9]*) fatal "REPLICA_COUNT must be a positive integer" ;;
   esac
+
   [ "$REPLICA_COUNT" -ge 1 ] || fatal "REPLICA_COUNT must be at least 1"
+
   if [ "$REPLICA_COUNT" -gt 1 ]; then
     warn "REPLICA_COUNT=$REPLICA_COUNT selected. Confirm OTP validation across multiple app pods before treating this as production-final."
   fi
@@ -96,9 +101,11 @@ validate_k8s_topology_settings() {
   if { [ -n "$APP_NODE_SELECTOR_KEY" ] && [ -z "$APP_NODE_SELECTOR_VALUE" ]; } || { [ -z "$APP_NODE_SELECTOR_KEY" ] && [ -n "$APP_NODE_SELECTOR_VALUE" ]; }; then
     fatal "APP_NODE_SELECTOR_KEY and APP_NODE_SELECTOR_VALUE must be set together"
   fi
+
   if { [ -n "$MONITOR_NODE_SELECTOR_KEY" ] && [ -z "$MONITOR_NODE_SELECTOR_VALUE" ]; } || { [ -z "$MONITOR_NODE_SELECTOR_KEY" ] && [ -n "$MONITOR_NODE_SELECTOR_VALUE" ]; }; then
     fatal "MONITOR_NODE_SELECTOR_KEY and MONITOR_NODE_SELECTOR_VALUE must be set together"
   fi
+
   if { [ -n "$REDIS_NODE_SELECTOR_KEY" ] && [ -z "$REDIS_NODE_SELECTOR_VALUE" ]; } || { [ -z "$REDIS_NODE_SELECTOR_KEY" ] && [ -n "$REDIS_NODE_SELECTOR_VALUE" ]; }; then
     fatal "REDIS_NODE_SELECTOR_KEY and REDIS_NODE_SELECTOR_VALUE must be set together"
   fi
@@ -108,7 +115,11 @@ validate_selected_node() {
   local label_key="$1"
   local label_value="$2"
   local label_name="$3"
+
   [ -n "$label_key" ] || return 0
+
+  log "validating node selector for $label_name: $label_key=$label_value"
+
   if ! k3s kubectl get node -l "$label_key=$label_value" -o name | grep -q .; then
     fatal "$label_name node selector did not match any node: $label_key=$label_value"
   fi
@@ -116,6 +127,7 @@ validate_selected_node() {
 
 mark_deployment_restart_required() {
   local deployment_name="$1"
+
   case "$deployment_name" in
     otp-relay) RESTART_APP_REQUIRED=1 ;;
     otp-monitor) RESTART_MONITOR_REQUIRED=1 ;;
@@ -132,9 +144,13 @@ rollout_restart_deployment_if_exists() {
   fi
 
   for attempt in 1 2 3; do
+    log "triggering rollout restart for deployment/$deployment_name, attempt $attempt"
+
     if k3s kubectl rollout restart "deployment/$deployment_name" -n "$NAMESPACE"; then
+      log "rollout restart accepted for deployment/$deployment_name"
       return 0
     fi
+
     if [ "$attempt" -lt 3 ]; then
       warn "rollout restart for deployment/$deployment_name was rejected or raced; retrying"
       sleep 2
@@ -146,18 +162,24 @@ rollout_restart_deployment_if_exists() {
 
 perform_pending_rollout_restarts() {
   if [ "$RESTART_APP_REQUIRED" = "1" ]; then
-    log "restarting app deployment"
+    log "restarting app deployment otp-relay"
     rollout_restart_deployment_if_exists otp-relay
-    log "waiting for app rollout"
+
+    log "waiting for app deployment rollout; this can take a few minutes while pods restart"
     k3s kubectl rollout status deployment/otp-relay -n "$NAMESPACE" --timeout=240s
+    log "app deployment rollout completed"
+
     RESTART_APP_REQUIRED=0
   fi
 
   if [ "$RESTART_MONITOR_REQUIRED" = "1" ]; then
-    log "restarting monitor deployment"
+    log "restarting monitor deployment otp-monitor"
     rollout_restart_deployment_if_exists otp-monitor
-    log "waiting for monitor rollout"
+
+    log "waiting for monitor deployment rollout; this can take a few minutes while pods restart"
     k3s kubectl rollout status deployment/otp-monitor -n "$NAMESPACE" --timeout=180s
+    log "monitor deployment rollout completed"
+
     RESTART_MONITOR_REQUIRED=0
   fi
 }
@@ -182,9 +204,15 @@ resolve_portal_url_from_service() {
     return 0
   fi
 
-  log "waiting for LoadBalancer address assignment for service otp-relay"
+  log "waiting for LoadBalancer address assignment for service $NAMESPACE/otp-relay"
+  log "this can take up to 120s depending on MetalLB and service reconciliation"
+
   for i in $(seq 1 60); do
     local assigned_address
+    local elapsed
+
+    elapsed=$((i * 2))
+
     assigned_address="$({
       k3s kubectl get svc otp-relay \
         -n "$NAMESPACE" \
@@ -211,9 +239,13 @@ resolve_portal_url_from_service() {
       return 0
     fi
 
+    if [ $((elapsed % 30)) -eq 0 ]; then
+      log "still waiting for LoadBalancer address after ${elapsed}s"
+      k3s kubectl get svc otp-relay -n "$NAMESPACE" -o wide || true
+    fi
+
     sleep 2
   done
 
   warn "LoadBalancer address was not assigned within timeout; keeping PORTAL_URL=$PORTAL_URL"
 }
-
