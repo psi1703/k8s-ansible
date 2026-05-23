@@ -1,6 +1,6 @@
 ---
-- name: Validate NFS storage
-  hosts: all
+- name: Validate external NFS storage from K3s nodes
+  hosts: k3s_cluster
   become: true
   gather_facts: false
 
@@ -12,7 +12,9 @@
   tasks:
     - name: Show NFS validation target
       ansible.builtin.debug:
-        msg: "Validating NFS export {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
+        msg:
+          - "Validating external NFS export from K3s node {{ inventory_hostname }}"
+          - "NFS target: {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
 
     - name: Require NFS server
       ansible.builtin.assert:
@@ -26,12 +28,12 @@
           - resolved_nfs_path | length > 0
         fail_msg: "NFS path is not configured. Set NFS_PATH in .env."
 
-    - name: Ensure NFS client tools are installed
+    - name: Ensure NFS client tools are installed on K3s node
       ansible.builtin.package:
         name: nfs-common
         state: present
 
-    - name: Check exported NFS paths from server
+    - name: Check exported NFS paths from external NFS server
       ansible.builtin.command:
         cmd: "showmount -e {{ resolved_nfs_server }}"
       register: nfs_exports
@@ -60,7 +62,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Mount and validate NFS export
+    - name: Mount and validate NFS export from this K3s node
       block:
         - name: Mount NFS export for validation
           ansible.builtin.command:
@@ -68,15 +70,15 @@
           when: nfs_test_mountpoint.rc != 0
           changed_when: true
 
-        - name: Verify NFS test mount is writable
+        - name: Verify NFS test mount is writable from this K3s node
           ansible.builtin.copy:
-            dest: "{{ nfs_test_mount }}/.otp-relay-nfs-validation"
+            dest: "{{ nfs_test_mount }}/.otp-relay-nfs-validation-{{ inventory_hostname }}"
             content: "ok\n"
             mode: "0644"
 
         - name: Remove NFS validation file
           ansible.builtin.file:
-            path: "{{ nfs_test_mount }}/.otp-relay-nfs-validation"
+            path: "{{ nfs_test_mount }}/.otp-relay-nfs-validation-{{ inventory_hostname }}"
             state: absent
 
       always:
@@ -101,4 +103,4 @@
 
     - name: NFS validation completed
       ansible.builtin.debug:
-        msg: "NFS validation succeeded for {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
+        msg: "NFS validation succeeded from {{ inventory_hostname }} to {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
