@@ -137,10 +137,8 @@ for i in $(seq 1 180); do
     blocked=1
   fi
 
-  if pgrep -f unattended-upgrade >/dev/null 2>&1; then
-    echo "unattended-upgrade is still running"
-    blocked=1
-  fi
+  # Do not block on unattended-upgrade-shutdown --wait-for-signal.
+  # That helper can remain idle after boot and does not indicate an active apt/dpkg transaction.
 
   if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
     echo "/var/lib/dpkg/lock-frontend is locked"
@@ -201,11 +199,58 @@ apt-get install -y \
 '
 }
 
+inventory_hosts() {
+  awk '
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*#/ { next }
+    /^\[/ { next }
+    {
+      host=$1
+      ip=""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^ansible_host=/) {
+          split($i, a, "=")
+          ip=a[2]
+        }
+      }
+      if (host != "" && ip != "") {
+        print host, ip
+      }
+    }
+  ' "$INVENTORY"
+}
+
+check_raw_ssh_reachability() {
+  log "Checking raw SSH reachability for each inventory host..."
+
+  inventory_hosts | while read -r host ip; do
+    [ -n "$host" ] || continue
+    [ -n "$ip" ] || continue
+
+    log "checking SSH: ${host} (${ip})"
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+
+    if ssh \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+        -o ConnectTimeout=15 \
+        -i "$SSH_KEY" \
+        "${SSH_USER}@${ip}" \
+        'hostname; cloud-init status --long || true; ip -br addr || true; ip route || true; getent hosts deb.debian.org || true' ; then
+      ok "SSH reachable: ${host} (${ip})"
+    else
+      fatal "SSH failed for ${host} (${ip}). Check VM state/network before continuing."
+    fi
+  done
+}
+
 cleanup_known_hosts
 write_ansible_ssh_defaults
+check_raw_ssh_reachability
 
 log "Waiting for Ansible SSH connection on all POC VMs..."
-ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=900 sleep=5"
+ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=180 sleep=5" -vv
 
 wait_for_cloud_init_and_locks
 repair_apt_if_needed
