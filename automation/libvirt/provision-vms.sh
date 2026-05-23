@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # Default behavior:
 #   - Must be run as a normal user, not with "sudo bash".
 #   - Uses sudo internally only where required.
-#   - Creates/uses SSH key: ~/.ssh/otp-relay-poc
+#   - Creates/uses SSH key: ~/.ssh/otp-relay-cluster
 #   - Creates VM login user: otp-relay
 #   - Auto-assigns free LAN IPs by scanning the configured IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END range
 #   - Writes Ansible inventory:
@@ -39,8 +39,7 @@ PREFIX="${PREFIX:-24}"
 
 VM_USER="${VM_USER:-otp-relay}"
 VM_PASSWORD="${VM_PASSWORD:-otp-relay}"
-_REAL_HOME="$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)"
-SSH_KEY="${SSH_KEY:-${_REAL_HOME}/.ssh/otp-relay-poc}"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
 VM_IMAGE_DIR="${VM_IMAGE_DIR:-/var/lib/libvirt/images}"
@@ -57,8 +56,8 @@ WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 
 AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
 IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-}"
-IP_SCAN_START="${IP_SCAN_START:-100}"
-IP_SCAN_END="${IP_SCAN_END:-249}"
+IP_SCAN_START="${IP_SCAN_START:-150}"
+IP_SCAN_END="${IP_SCAN_END:-199}"
 RESERVED_IPS="${RESERVED_IPS:-}"
 AUTO_RECREATE_INCOMPATIBLE_VMS="${AUTO_RECREATE_INCOMPATIBLE_VMS:-1}"
 EXISTING_VM_SSH_CHECK_ATTEMPTS="${EXISTING_VM_SSH_CHECK_ATTEMPTS:-6}"
@@ -117,7 +116,7 @@ need_cmd() {
 
 require_non_root() {
   if [[ "${EUID}" -eq 0 && "${ALLOW_ROOT_RUN:-0}" != "1" ]]; then
-    fatal "Do not run this script with sudo. Run it as your normal user: ./automation/libvirt/provision-poc-vms.sh"
+    fatal "Do not run this script with sudo. Run it as your normal user: ./automation/libvirt/provision-vms.sh"
   fi
 }
 
@@ -162,7 +161,7 @@ ensure_ssh_key() {
 
   if [[ ! -f "$SSH_KEY" ]]; then
     log "Creating SSH key: $SSH_KEY"
-    ssh-keygen -t ed25519 -f "$SSH_KEY" -C "otp-relay-poc" -N ""
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -C "otp-relay-cluster" -N ""
   fi
 
   [[ -f "$SSH_PUB_KEY" ]] || fatal "Missing SSH public key: $SSH_PUB_KEY"
@@ -276,34 +275,8 @@ ensure_bridge() {
   log "Host bridge IP: $HOST_IP_CIDR"
 
   if ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
-    # Bridge exists — but verify that the physical NIC is actually enslaved.
-    # A bridge with no slave forwards nothing: VMs will be isolated even though
-    # br0 is UP and has the host IP.
-    local slave_count
-    slave_count="$(bridge link show 2>/dev/null | grep -c "master $BRIDGE_NAME" || true)"
-    if [[ "$slave_count" -eq 0 ]]; then
-      warn "$BRIDGE_NAME exists but has no enslaved interface — VMs will be unreachable"
-      warn "Attempting to repair: enslaving $iface to $BRIDGE_NAME"
-      if systemctl is-active --quiet NetworkManager; then
-        # Remove any existing stale connection for this iface, then re-add the slave.
-        sudo nmcli con delete "${BRIDGE_NAME}-slave-${iface}" >/dev/null 2>&1 || true
-        sudo nmcli con add type ethernet ifname "$iface" master "$BRIDGE_NAME"           con-name "${BRIDGE_NAME}-slave-${iface}"
-        sudo nmcli con up "${BRIDGE_NAME}-slave-${iface}" || true
-        wait_for_bridge_activation
-      elif [[ -f /etc/network/interfaces ]]; then
-        # For interfaces-managed systems, bring the iface down, set master, bring up.
-        sudo ip link set "$iface" down 2>/dev/null || true
-        sudo ip link set "$iface" master "$BRIDGE_NAME"
-        sudo ip link set "$iface" up
-        sudo ip link set "$BRIDGE_NAME" up
-        wait_for_bridge_activation
-      else
-        fatal "$BRIDGE_NAME has no slave and no supported network manager found to repair it"
-      fi
-    else
-      ok "$BRIDGE_NAME already exists and has $slave_count enslaved interface(s)"
-      sudo ip link set "$BRIDGE_NAME" up >/dev/null 2>&1 || true
-    fi
+    ok "$BRIDGE_NAME already exists"
+    sudo ip link set "$BRIDGE_NAME" up >/dev/null 2>&1 || true
   else
     if systemctl is-active --quiet NetworkManager; then
       ensure_bridge_networkmanager "$iface"
@@ -501,23 +474,10 @@ existing_vm_matches_expected_identity() {
 
 remove_existing_vm() {
   local name="$1"
-  local disk="${VM_IMAGE_DIR}/${name}.qcow2"
 
   warn "Removing existing VM: $name"
   sudo virsh destroy "$name" >/dev/null 2>&1 || true
-
-  # Remove the disk file before undefining so libvirt releases the path
-  # reference cleanly. If undefine --remove-all-storage runs first and fails
-  # to delete the file, the path stays registered and blocks qemu-img create.
-  sudo rm -f "$disk"
-
   sudo virsh undefine "$name" --remove-all-storage >/dev/null 2>&1 || sudo virsh undefine "$name" >/dev/null 2>&1 || true
-
-  # Belt-and-suspenders: if the domain record somehow survived, force it out.
-  if sudo virsh dominfo "$name" >/dev/null 2>&1; then
-    warn "virsh undefine did not fully remove $name; forcing with --nvram"
-    sudo virsh undefine "$name" --nvram >/dev/null 2>&1 || true
-  fi
 }
 
 prepare_vm_slot() {
@@ -607,8 +567,7 @@ create_vm() {
 
   log "Creating VM: $name at $ip"
 
-  sudo mkdir -p "$BUILD_DIR"
-  sudo chown "$(id -un):$(id -gn)" "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR"
   sudo mkdir -p "$SEED_IMAGE_DIR"
   rm -f "$user_data" "$meta_data" "$network_config"
   sudo rm -f "$seed"
@@ -627,7 +586,7 @@ manage_etc_hosts: true
 
 users:
   - name: ${VM_USER}
-    gecos: OTP Relay POC User
+    gecos: OTP Relay Cluster User
     groups: sudo
     shell: /bin/bash
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
@@ -663,9 +622,10 @@ CLOUDMETA
   cat > "$network_config" <<CLOUDNET
 version: 2
 ethernets:
-  id0:
+  eth0:
     match:
       macaddress: "${mac}"
+    set-name: eth0
     dhcp4: false
     addresses:
       - ${ip}/${PREFIX}
@@ -753,7 +713,7 @@ INVEOF
 print_summary() {
   cat <<SUMMARY
 
-[DONE] POC VM provisioning step finished.
+[DONE] cluster VM provisioning step finished.
 
 VM access:
   User:      ${VM_USER}
@@ -811,8 +771,7 @@ main() {
   ensure_bridge "$iface"
   assign_vm_ips
 
-  sudo mkdir -p "$BUILD_DIR"
-  sudo chown "$(id -un):$(id -gn)" "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR"
   download_base_image
 
   create_vm "$CP_NAME" "$CP_IP"
