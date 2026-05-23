@@ -142,10 +142,21 @@ detect_host_bridge_ip() {
   printf '%s\n' "$ip"
 }
 
+detect_host_uplink_iface() {
+  local iface=""
+
+  iface="$(ip route show default 2>/dev/null | awk '{print $5; exit}' || true)"
+
+  if [[ -z "$iface" ]]; then
+    iface="$(ip route get 8.8.8.8 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' || true)"
+  fi
+
+  [[ -n "$iface" ]] || fatal "Could not detect host uplink/default interface"
+  printf '%s\n' "$iface"
+}
+
 host_dns_servers() {
   {
-    # Prefer the host's real upstream resolver list. Avoid /etc/resolv.conf first,
-    # because on systemd-resolved hosts it is commonly only 127.0.0.53.
     if command -v resolvectl >/dev/null 2>&1; then
       resolvectl dns 2>/dev/null | awk '
         {
@@ -168,6 +179,61 @@ host_dns_servers() {
     $1 ~ /^169\.254\./ { next }
     !seen[$1]++ { print $1 }
   '
+}
+
+ensure_ipv4_forwarding() {
+  log "Ensuring host IPv4 forwarding is enabled"
+
+  if [[ -w /proc/sys/net/ipv4/ip_forward ]]; then
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+  else
+    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward >/dev/null
+  fi
+
+  sudo mkdir -p /etc/sysctl.d
+  echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/99-otp-relay-cluster-forwarding.conf >/dev/null
+  sudo sysctl -p /etc/sysctl.d/99-otp-relay-cluster-forwarding.conf >/dev/null 2>&1 || true
+}
+
+ensure_vm_bridge_forwarding() {
+  local bridge="${BRIDGE_NAME:-br0}"
+  local uplink
+  local vm_cidr
+
+  uplink="$(detect_host_uplink_iface)"
+  vm_cidr="${IP_SCAN_PREFIX:-}"
+  if [[ -n "$vm_cidr" ]]; then
+    vm_cidr="${vm_cidr}.0/${PREFIX:-24}"
+  elif [[ -n "${HOST_IP_CIDR:-}" ]]; then
+    vm_cidr="${HOST_IP_CIDR%.*}.0/${HOST_IP_CIDR#*/}"
+  else
+    vm_cidr="$(ip -o -4 addr show dev "$bridge" 2>/dev/null | awk '{print $4; exit}' | awk -F. '{print $1"."$2"."$3".0/24"}')"
+  fi
+
+  [[ -n "$vm_cidr" ]] || fatal "Could not determine VM CIDR for forwarding/NAT"
+
+  log "Ensuring host firewall allows VM bridge traffic"
+  log "Bridge: ${bridge}"
+  log "Uplink: ${uplink}"
+  log "VM CIDR: ${vm_cidr}"
+
+  ensure_ipv4_forwarding
+
+  if ! command -v iptables >/dev/null 2>&1; then
+    fatal "iptables is required to allow VM bridge forwarding"
+  fi
+
+  # Allow bridged VM traffic through the host FORWARD chain. Docker often sets FORWARD policy DROP.
+  sudo iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null || \
+    sudo iptables -I FORWARD 1 -i "$bridge" -j ACCEPT
+
+  sudo iptables -C FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    sudo iptables -I FORWARD 1 -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+  # Add NAT for environments where bridged guests can reach the host but upstream gateway/firewall
+  # does not route/permit the guest source IPs. This is harmless if routing already works.
+  sudo iptables -t nat -C POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE 2>/dev/null || \
+    sudo iptables -t nat -A POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE
 }
 
 configure_host_dns_forwarder() {
@@ -236,6 +302,24 @@ cat /etc/resolv.conf
 ip route
 timeout 10 getent hosts deb.debian.org
 "
+}
+
+validate_vm_outbound_https() {
+  log "Validating outbound HTTPS from all cluster VMs"
+
+  ansible -i "$INVENTORY" all -b -m shell -a '
+set -eux
+hostname
+ip route
+getent ahostsv4 deb.debian.org
+timeout 15 bash -c "cat < /dev/null > /dev/tcp/deb.debian.org/443"
+' || {
+    warn "VM DNS resolves, but outbound HTTPS to deb.debian.org:443 failed"
+    warn "Host forwarding/firewall/NAT rules are below for diagnostics"
+    sudo iptables -S FORWARD || true
+    sudo iptables -t nat -S || true
+    fatal "VM outbound HTTPS failed; refusing to run apt until forwarding is fixed"
+  }
 }
 
 print_cloud_init_diagnostics() {
@@ -364,18 +448,21 @@ export DEBIAN_FRONTEND=noninteractive
 dpkg --configure -a || true
 
 apt-get \
+  -o Acquire::ForceIPv4=true \
   -o Acquire::http::Timeout=30 \
   -o Acquire::https::Timeout=30 \
   -o Acquire::Retries=2 \
   update
 
 apt-get \
+  -o Acquire::ForceIPv4=true \
   -o Acquire::http::Timeout=30 \
   -o Acquire::https::Timeout=30 \
   -o Acquire::Retries=2 \
   install -f -y
 
 apt-get \
+  -o Acquire::ForceIPv4=true \
   -o Acquire::http::Timeout=30 \
   -o Acquire::https::Timeout=30 \
   -o Acquire::Retries=2 \
@@ -405,10 +492,6 @@ run_playbook_if_present() {
   ansible-playbook -i "$INVENTORY" "$playbook"
 }
 
-cleanup_known_hosts_for_inventory_after_dns() {
-  cleanup_known_hosts
-}
-
 main() {
   ensure_ansible_installed
   fix_local_ssh_permissions
@@ -421,8 +504,10 @@ main() {
   ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=180 sleep=5"
 
   wait_for_cloud_init_and_locks
+  ensure_vm_bridge_forwarding
   configure_host_dns_forwarder
   repair_and_validate_vm_dns
+  validate_vm_outbound_https
   repair_apt_if_needed
 
   log "Running Ansible ping..."
