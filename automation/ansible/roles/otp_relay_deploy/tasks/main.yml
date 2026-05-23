@@ -64,36 +64,20 @@
 
 - name: Start OTP Relay installer in background
   ansible.builtin.shell: |
-    set -euo pipefail
-
-    install_dir="{{ otp_relay_install_dir }}"
-    env_file="{{ otp_relay_env_file }}"
-    log_file="{{ otp_relay_installer_log }}"
-
-    cd "$install_dir"
-
-    {
-      echo "[INFO] Starting OTP Relay installer on $(hostname)"
-      echo "[INFO] Started at: $(date -Is)"
-      echo "[INFO] Install directory: $install_dir"
-      echo "[INFO] Env file: $env_file"
-      echo "[INFO] Log file: $log_file"
-      echo "[INFO] Long-running steps may include apt, Docker builds, K3s checks, image import, kubectl apply, and rollout waits."
-      echo
-    } > "$log_file"
-
-    (
-      set -o pipefail
-      ENV_FILE="$env_file" \
-      NONINTERACTIVE=1 \
-      SKIP_REPO_SYNC=1 \
-      GIT_CLEAN=0 \
-      stdbuf -oL -eL bash install-otp-relay-k8s.sh 2>&1 | tee -a "$log_file"
-      exit "${PIPESTATUS[0]}"
-    )
+    LOG="{{ otp_relay_installer_log }}"
+    echo "[INFO] Starting OTP Relay installer on $(hostname)" > "$LOG"
+    echo "[INFO] Started at: $(date -Is)" >> "$LOG"
+    echo "[INFO] Install dir: {{ otp_relay_install_dir }}" >> "$LOG"
+    echo "[INFO] Env file: {{ otp_relay_env_file }}" >> "$LOG"
+    echo >> "$LOG"
+    cd "{{ otp_relay_install_dir }}"
+    export ENV_FILE="{{ otp_relay_env_file }}"
+    export NONINTERACTIVE=1
+    export SKIP_REPO_SYNC=1
+    export GIT_CLEAN=0
+    bash install-otp-relay-k8s.sh >> "$LOG" 2>&1
   args:
     executable: /bin/bash
-    chdir: "{{ otp_relay_install_dir }}"
   become: true
   async: 7200
   poll: 0
