@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.poc.generated.ini}"
+INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
 SSH_USER="${VM_USER:-otp-relay}"
