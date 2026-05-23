@@ -567,7 +567,8 @@ create_vm() {
 
   log "Creating VM: $name at $ip"
 
-  mkdir -p "$BUILD_DIR"
+  sudo mkdir -p "$BUILD_DIR"
+  sudo chown "$(id -un):$(id -gn)" "$BUILD_DIR"
   sudo mkdir -p "$SEED_IMAGE_DIR"
   rm -f "$user_data" "$meta_data" "$network_config"
   sudo rm -f "$seed"
@@ -771,7 +772,8 @@ main() {
   ensure_bridge "$iface"
   assign_vm_ips
 
-  mkdir -p "$BUILD_DIR"
+  sudo mkdir -p "$BUILD_DIR"
+  sudo chown "$(id -un):$(id -gn)" "$BUILD_DIR"
   download_base_image
 
   create_vm "$CP_NAME" "$CP_IP"
