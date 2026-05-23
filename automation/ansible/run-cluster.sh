@@ -3,19 +3,13 @@ set -Eeuo pipefail
 
 ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${ANSIBLE_DIR}/../.." && pwd)"
-
-if [ -f "${REPO_ROOT}/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "${REPO_ROOT}/.env"
-  set +a
-fi
-
 INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
 SSH_USER="${VM_USER:-otp-relay}"
-KNOWN_HOSTS="${KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+
+DEPLOY_OTP_RELAY="${DEPLOY_OTP_RELAY:-1}"
+VALIDATE_OTP_RELAY="${VALIDATE_OTP_RELAY:-0}"
 
 log() { echo "[INFO] $*"; }
 ok() { echo "[OK] $*"; }
@@ -26,31 +20,34 @@ cd "$ANSIBLE_DIR"
 
 [[ -f "$INVENTORY" ]] || fatal "Missing inventory: $INVENTORY. Run automation/libvirt/provision-vms.sh first."
 
-if ! command -v ansible >/dev/null 2>&1; then
-  log "Installing Ansible on runner host..."
-  sudo apt-get update
-  sudo apt-get install -y ansible
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${REPO_ROOT}/.env"
+  set +a
 fi
 
+BRIDGE_NAME="${BRIDGE_NAME:-br0}"
+
 fix_local_ssh_permissions() {
-  local ssh_dir
-  ssh_dir="$(dirname "$KNOWN_HOSTS")"
+  local ssh_dir="$HOME/.ssh"
+  local known_hosts="$ssh_dir/known_hosts"
 
   mkdir -p "$ssh_dir"
   chmod 700 "$ssh_dir" || true
 
-  if [ -n "${USER:-}" ]; then
+  if [[ -n "${USER:-}" ]]; then
     sudo chown -R "$USER:$USER" "$ssh_dir" 2>/dev/null || true
   fi
 
-  touch "$KNOWN_HOSTS"
-  chmod 644 "$KNOWN_HOSTS" || true
+  touch "$known_hosts"
+  chmod 644 "$known_hosts" || true
 
-  if [ -f "$SSH_KEY" ]; then
+  if [[ -f "$SSH_KEY" ]]; then
     chmod 600 "$SSH_KEY" || true
   fi
 
-  if [ -f "${SSH_KEY}.pub" ]; then
+  if [[ -f "${SSH_KEY}.pub" ]]; then
     chmod 644 "${SSH_KEY}.pub" || true
   fi
 }
@@ -73,48 +70,172 @@ inventory_hosts() {
         print host, ip
       }
     }
-  ' "$INVENTORY" | sort -u
+  ' "$INVENTORY"
+}
+
+inventory_ips() {
+  inventory_hosts | awk '{print $2}' | sort -u
 }
 
 cleanup_known_hosts() {
   log "Removing stale SSH known_hosts entries for inventory hosts"
 
-  inventory_hosts | while read -r host ip; do
-    [ -n "$ip" ] || continue
-    ssh-keygen -f "$KNOWN_HOSTS" -R "$ip" >/dev/null 2>&1 || true
-    ssh-keygen -f "$KNOWN_HOSTS" -R "[$ip]:22" >/dev/null 2>&1 || true
+  inventory_ips | while read -r host; do
+    [[ -n "$host" ]] || continue
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$host" >/dev/null 2>&1 || true
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "[$host]:22" >/dev/null 2>&1 || true
   done
 }
 
 write_ansible_ssh_defaults() {
   export ANSIBLE_HOST_KEY_CHECKING=False
-  export ANSIBLE_SSH_ARGS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$KNOWN_HOSTS -o ConnectTimeout=15"
+  export ANSIBLE_SSH_ARGS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=15"
 }
 
 raw_ssh_check() {
-  log "Checking raw SSH reachability for each inventory host..."
+  log "Checking raw SSH reachability for each inventory host"
 
   inventory_hosts | while read -r host ip; do
     log "checking SSH: ${host} (${ip})"
 
-    if ssh \
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "[$ip]:22" >/dev/null 2>&1 || true
+
+    ssh \
       -o BatchMode=yes \
       -o StrictHostKeyChecking=accept-new \
-      -o UserKnownHostsFile="$KNOWN_HOSTS" \
+      -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
       -o ConnectTimeout=15 \
       -i "$SSH_KEY" \
       "${SSH_USER}@${ip}" \
-      'hostname; cloud-init status --long 2>/dev/null || true' >/tmp/otp-relay-ssh-check.$$ 2>&1; then
-      sed 's/^/[ssh-check] /' /tmp/otp-relay-ssh-check.$$ || true
-      ok "SSH reachable: ${host} (${ip})"
-    else
-      sed 's/^/[ssh-check] /' /tmp/otp-relay-ssh-check.$$ >&2 || true
-      rm -f /tmp/otp-relay-ssh-check.$$
-      fatal "SSH failed for ${host} (${ip}). Check VM console/network before continuing."
+      'hostname; cloud-init status --long 2>/dev/null || true' >/dev/null ||
+      fatal "SSH failed for ${host} (${ip}). Check VM power, IP, key, and inventory before continuing."
+
+    ok "SSH reachable: ${host} (${ip})"
+  done
+}
+
+ensure_ansible_installed() {
+  if ! command -v ansible >/dev/null 2>&1; then
+    log "Installing Ansible on runner host..."
+    sudo apt-get update
+    sudo apt-get install -y ansible
+  fi
+}
+
+detect_host_bridge_ip() {
+  local ip=""
+
+  if [[ -n "${HOST_IP_CIDR:-}" ]]; then
+    ip="${HOST_IP_CIDR%%/*}"
+  fi
+
+  if [[ -z "$ip" && -n "$BRIDGE_NAME" ]]; then
+    ip="$(ip -o -4 addr show dev "$BRIDGE_NAME" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1 || true)"
+  fi
+
+  if [[ -z "$ip" ]]; then
+    ip="$(ip route get "$(inventory_ips | head -1)" 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
+  fi
+
+  [[ -n "$ip" ]] || fatal "Could not detect host bridge IP for VM DNS forwarding"
+  printf '%s\n' "$ip"
+}
+
+host_dns_servers() {
+  {
+    # Prefer the host's real upstream resolver list. Avoid /etc/resolv.conf first,
+    # because on systemd-resolved hosts it is commonly only 127.0.0.53.
+    if command -v resolvectl >/dev/null 2>&1; then
+      resolvectl dns 2>/dev/null | awk '
+        {
+          for (i=1; i<=NF; i++) {
+            if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || $i ~ /:/) print $i
+          }
+        }'
     fi
 
-    rm -f /tmp/otp-relay-ssh-check.$$
-  done
+    if command -v nmcli >/dev/null 2>&1; then
+      nmcli -t -f IP4.DNS dev show 2>/dev/null | awk -F: '/IP4.DNS/ {print $2}'
+    fi
+
+    awk '/^nameserver / {print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
+    awk '/^nameserver / {print $2}' /etc/resolv.conf 2>/dev/null || true
+  } | awk '
+    $1 == "" { next }
+    $1 ~ /^127\./ { next }
+    $1 == "::1" { next }
+    $1 ~ /^169\.254\./ { next }
+    !seen[$1]++ { print $1 }
+  '
+}
+
+configure_host_dns_forwarder() {
+  local host_ip
+  local dns_servers
+  local config="/etc/dnsmasq.d/otp-relay-cluster-vm-dns.conf"
+
+  host_ip="$(detect_host_bridge_ip)"
+  dns_servers="$(host_dns_servers | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+  [[ -n "$dns_servers" ]] || fatal "Could not detect non-loopback DNS servers from host"
+
+  log "Configuring host DNS forwarder for VMs"
+  log "Host VM DNS listen address: ${host_ip}"
+  log "Host upstream DNS servers: ${dns_servers}"
+
+  if ! command -v dnsmasq >/dev/null 2>&1; then
+    log "Installing dnsmasq on host..."
+    sudo apt-get update
+    sudo apt-get install -y dnsmasq
+  fi
+
+  {
+    echo "# Managed by k8s-ansible automation/ansible/run-cluster.sh"
+    echo "interface=${BRIDGE_NAME}"
+    echo "listen-address=${host_ip}"
+    echo "bind-interfaces"
+    echo "domain-needed"
+    echo "bogus-priv"
+    echo "cache-size=1000"
+    for server in $dns_servers; do
+      echo "server=${server}"
+    done
+  } | sudo tee "$config" >/dev/null
+
+  sudo systemctl restart dnsmasq
+  sudo systemctl enable dnsmasq >/dev/null 2>&1 || true
+
+  if command -v dig >/dev/null 2>&1; then
+    dig @"$host_ip" deb.debian.org +time=3 +tries=1 >/dev/null ||
+      fatal "Host dnsmasq is not resolving deb.debian.org on ${host_ip}"
+  else
+    timeout 5 getent hosts deb.debian.org >/dev/null ||
+      warn "Host can not validate deb.debian.org with getent; VM validation will be authoritative"
+  fi
+
+  VM_DNS_SERVER="$host_ip"
+  export VM_DNS_SERVER
+}
+
+repair_and_validate_vm_dns() {
+  local host_ip="${VM_DNS_SERVER:?VM_DNS_SERVER is not set}"
+
+  log "Repairing and validating DNS on all cluster VMs..."
+  log "VM DNS server: ${host_ip} (host bridge DNS forwarder)"
+
+  ansible -i "$INVENTORY" all -b -m shell -a "
+set -eux
+
+cat >/etc/resolv.conf <<EOF
+nameserver ${host_ip}
+options timeout:2 attempts:2
+EOF
+
+cat /etc/resolv.conf
+ip route
+timeout 10 getent hosts deb.debian.org
+"
 }
 
 print_cloud_init_diagnostics() {
@@ -127,18 +248,10 @@ echo '===== cloud-init status ====='
 cloud-init status --long || true
 echo '===== cloud-init-output.log ====='
 tail -${limit} /var/log/cloud-init-output.log 2>/dev/null || true
-echo '===== cloud-init.log ====='
-tail -${limit} /var/log/cloud-init.log 2>/dev/null || true
-echo '===== resolv.conf ====='
-cat /etc/resolv.conf || true
-echo '===== resolved status ====='
-resolvectl status 2>/dev/null || true
 echo '===== apt term.log ====='
 tail -${limit} /var/log/apt/term.log 2>/dev/null || true
-echo '===== apt history.log ====='
-tail -${limit} /var/log/apt/history.log 2>/dev/null || true
 echo '===== apt/dpkg/cloud-init processes ====='
-ps aux | grep -E 'apt-get|apt |dpkg|cloud-init|unattended' | grep -v grep || true
+ps aux | grep -E 'apt|dpkg|cloud-init|unattended' | grep -v grep || true
 echo '===== dpkg audit ====='
 dpkg --audit || true
 " || true
@@ -157,7 +270,6 @@ fi
 
 for i in $(seq 1 180); do
   status="$(cloud-init status 2>/dev/null || true)"
-
   echo "cloud-init status: ${status}"
 
   if printf "%s" "$status" | grep -q "status: done"; then
@@ -167,10 +279,7 @@ for i in $(seq 1 180); do
   if printf "%s" "$status" | grep -q "status: error"; then
     echo "cloud-init is in ERROR state"
     cloud-init status --long || true
-    echo "---- /var/log/cloud-init-output.log ----"
     tail -200 /var/log/cloud-init-output.log 2>/dev/null || true
-    echo "---- /var/log/apt/term.log ----"
-    tail -120 /var/log/apt/term.log 2>/dev/null || true
     exit 50
   fi
 
@@ -192,7 +301,7 @@ exit 51
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eu
 
-for i in $(seq 1 120); do
+for i in $(seq 1 180); do
   blocked=0
 
   if pgrep -x apt-get >/dev/null 2>&1; then
@@ -234,7 +343,7 @@ for i in $(seq 1 120); do
 done
 
 echo "Timed out waiting for apt/dpkg locks"
-ps aux | grep -E "apt-get|apt |dpkg|cloud-init|unattended" | grep -v grep || true
+ps aux | grep -E "apt|dpkg|cloud-init|unattended" | grep -v grep || true
 exit 52
 ' || {
     warn "apt/dpkg locks did not clear on at least one VM"
@@ -243,86 +352,34 @@ exit 52
   }
 }
 
-host_dns_servers() {
-  {
-    if command -v resolvectl >/dev/null 2>&1; then
-      resolvectl dns 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true
-    fi
-    if command -v nmcli >/dev/null 2>&1; then
-      nmcli -t -f IP4.DNS dev show 2>/dev/null | awk -F: '$2 != "" {print $2}' || true
-    fi
-    awk '/^nameserver / {print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
-    awk '/^nameserver / {print $2}' /etc/resolv.conf 2>/dev/null || true
-  } | awk 'NF && $1 !~ /^127\./ && $1 != "::1" && $1 !~ /^169\.254\./ && !seen[$1]++ {print $1}'
-}
-
-repair_dns_on_guests() {
-  local dns_servers
-  dns_servers="${DNS_SERVERS:-$(host_dns_servers | paste -sd' ' -)}"
-
-  [ -n "$dns_servers" ] || fatal "Could not detect a non-loopback DNS server from the host. Fix host DNS or set DNS_SERVERS explicitly."
-
-  log "Repairing and validating DNS on all cluster VMs..."
-  log "Using host DNS servers: ${dns_servers}"
-
-  ansible -i "$INVENTORY" all -b -m shell -a "
-set -eu
-
-dns_servers='${dns_servers}'
-
-rm -f /etc/resolv.conf
-: >/etc/resolv.conf
-for dns in \$dns_servers; do
-  case "\$dns" in
-    ''|127.*|::1|169.254.*) continue ;;
-  esac
-  printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
-done
-printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
-
-mkdir -p /etc/systemd/resolved.conf.d
-cat >/etc/systemd/resolved.conf.d/otp-relay-dns.conf <<EOF_RESOLVED
-[Resolve]
-DNS=${dns_servers}
-FallbackDNS=${dns_servers}
-DNSSEC=no
-DNSOverTLS=no
-EOF_RESOLVED
-
-systemctl restart systemd-resolved >/dev/null 2>&1 || true
-# Keep apt deterministic even after resolved restarts.
-rm -f /etc/resolv.conf
-: >/etc/resolv.conf
-for dns in \$dns_servers; do
-  case "\$dns" in
-    ''|127.*|::1|169.254.*) continue ;;
-  esac
-  printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
-done
-printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
-
-echo 'DNS copied from host:' ${dns_servers}
-cat /etc/resolv.conf
-timeout 10 getent hosts deb.debian.org
-"
-}
-
 repair_apt_if_needed() {
   log "Repairing apt/dpkg state if needed..."
-  log "This can take several minutes if Debian mirrors are slow. Apt timeouts are capped at 30s with retries."
+  log "This can take several minutes on first boot; apt has 30s network timeouts and 2 retries."
 
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eux
 
 export DEBIAN_FRONTEND=noninteractive
 
-apt_opts="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2"
-
 dpkg --configure -a || true
 
-apt-get $apt_opts update
-apt-get $apt_opts install -f -y
-apt-get $apt_opts install -y \
+apt-get \
+  -o Acquire::http::Timeout=30 \
+  -o Acquire::https::Timeout=30 \
+  -o Acquire::Retries=2 \
+  update
+
+apt-get \
+  -o Acquire::http::Timeout=30 \
+  -o Acquire::https::Timeout=30 \
+  -o Acquire::Retries=2 \
+  install -f -y
+
+apt-get \
+  -o Acquire::http::Timeout=30 \
+  -o Acquire::https::Timeout=30 \
+  -o Acquire::Retries=2 \
+  install -y \
   openssh-server \
   sudo \
   curl \
@@ -335,48 +392,62 @@ apt-get $apt_opts install -y \
 '
 }
 
-run_playbook() {
+run_playbook_if_present() {
   local label="$1"
   local playbook="$2"
+
+  if [[ ! -f "$playbook" ]]; then
+    warn "Skipping missing playbook: $playbook"
+    return 0
+  fi
 
   log "$label"
   ansible-playbook -i "$INVENTORY" "$playbook"
 }
 
-fix_local_ssh_permissions
-cleanup_known_hosts
-write_ansible_ssh_defaults
-raw_ssh_check
+cleanup_known_hosts_for_inventory_after_dns() {
+  cleanup_known_hosts
+}
 
-log "Waiting for Ansible SSH connection on all cluster VMs..."
-ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=180 sleep=5" -vv
+main() {
+  ensure_ansible_installed
+  fix_local_ssh_permissions
+  cleanup_known_hosts
+  write_ansible_ssh_defaults
 
-wait_for_cloud_init_and_locks
-repair_dns_on_guests
-repair_apt_if_needed
+  raw_ssh_check
 
-log "Running Ansible ping..."
-ansible -i "$INVENTORY" all -m ping
+  log "Waiting for Ansible SSH connection on all cluster VMs..."
+  ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=180 sleep=5"
 
-run_playbook "Running OS baseline..." playbooks/00-os-baseline.yml
-run_playbook "Installing K3s control-plane..." playbooks/10-k3s-control-plane.yml
-run_playbook "Installing K3s workers..." playbooks/20-k3s-workers.yml
-run_playbook "Applying node labels..." playbooks/30-node-labels.yml
+  wait_for_cloud_init_and_locks
+  configure_host_dns_forwarder
+  repair_and_validate_vm_dns
+  repair_apt_if_needed
 
-if [ -f playbooks/40-storage-validate.yml ]; then
-  if [ -n "${NFS_SERVER:-}" ] || [ -n "${STORAGE_SERVER:-}" ] || [ -n "${NFS_EXPORT:-}" ]; then
-    run_playbook "Validating storage..." playbooks/40-storage-validate.yml
+  log "Running Ansible ping..."
+  ansible -i "$INVENTORY" all -m ping
+
+  run_playbook_if_present "Running OS baseline..." "playbooks/00-os-baseline.yml"
+  run_playbook_if_present "Installing K3s control-plane..." "playbooks/10-k3s-control-plane.yml"
+  run_playbook_if_present "Installing K3s workers..." "playbooks/20-k3s-workers.yml"
+  run_playbook_if_present "Applying node labels..." "playbooks/30-node-labels.yml"
+
+  if [[ -n "${NFS_SERVER:-}" || -n "${NFS_EXPORT:-}" || -n "${STORAGE_SERVER_IP:-}" ]]; then
+    run_playbook_if_present "Validating storage..." "playbooks/40-storage-validate.yml"
   else
-    log "Skipping storage validation because no NFS/storage variables are configured."
+    log "Skipping storage validation because no NFS/storage variables are configured"
   fi
-fi
 
-if [[ "${DEPLOY_OTP_RELAY:-0}" == "1" ]]; then
-  run_playbook "Deploying OTP Relay..." playbooks/50-deploy-otp-relay.yml
-fi
+  if [[ "${DEPLOY_OTP_RELAY:-0}" == "1" ]]; then
+    run_playbook_if_present "Deploying OTP Relay..." "playbooks/50-deploy-otp-relay.yml"
+  fi
 
-if [[ "${VALIDATE_OTP_RELAY:-0}" == "1" ]]; then
-  run_playbook "Validating production state..." playbooks/70-validate-production.yml
-fi
+  if [[ "${VALIDATE_OTP_RELAY:-0}" == "1" ]]; then
+    run_playbook_if_present "Validating production state..." "playbooks/70-validate-production.yml"
+  fi
 
-ok "Cluster automation completed."
+  ok "Cluster automation completed."
+}
+
+main "$@"
