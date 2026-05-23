@@ -382,18 +382,20 @@ ssh_ready_for_inventory_host() {
   local host="$1"
   local ip="$2"
   local user="${VM_USER:-otp-relay}"
-  local key="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
+  local _real_home
+  _real_home="$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)"
+  local key="${SSH_KEY:-${_real_home}/.ssh/otp-relay-poc}"
 
   [ -n "$host" ] || return 1
   [ -n "$ip" ] || return 1
   [ -f "$key" ] || return 1
 
-  ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+  ssh-keygen -f "${_real_home}/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
 
   ssh \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+    -o UserKnownHostsFile="${_real_home}/.ssh/known_hosts" \
     -o ConnectTimeout=5 \
     -i "$key" \
     "${user}@${ip}" \
