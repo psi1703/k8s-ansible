@@ -106,14 +106,15 @@
       - "Live log on control-plane:"
       - "sudo tail -f {{ otp_relay_installer_log }}"
 
-- name: Poll OTP Relay installer and print recent log output
+- name: Wait briefly then snapshot installer log
+  ansible.builtin.pause:
+    seconds: 15
+
+- name: Print recent installer log output
   ansible.builtin.shell: |
     set -eu
-
-    echo "===== installer job status ====="
-    echo "job id: {{ otp_relay_installer_job.ansible_job_id }}"
+    echo "===== installer job id: {{ otp_relay_installer_job.ansible_job_id }} ====="
     echo
-
     echo "===== recent installer log ====="
     if [ -f "{{ otp_relay_installer_log }}" ]; then
       tail -40 "{{ otp_relay_installer_log }}"
@@ -124,9 +125,6 @@
     executable: /bin/bash
   become: true
   changed_when: false
-  register: otp_relay_installer_log_tail
-  until: false
-  retries: 1
   failed_when: false
 
 - name: Wait for OTP Relay installer to finish
