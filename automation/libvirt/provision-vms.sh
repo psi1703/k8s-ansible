@@ -3,25 +3,22 @@ set -Eeuo pipefail
 
 # OTP Relay VM provisioner
 #
-# Creates three Debian cloud-image VMs for the OTP Relay K3s-Ansible:
+# Creates three Debian cloud-image VMs for the OTP Relay K3s-Ansible cluster:
 #   otp-master
 #   otp-worker1
 #   otp-worker2
 #
 # Default behavior:
-#   - Must be run as a normal user, not with "sudo bash".
+#   - Must be run as a normal user, not with sudo bash.
 #   - Uses sudo internally only where required.
 #   - Creates/uses SSH key: ~/.ssh/otp-relay-cluster
 #   - Creates VM login user: otp-relay
-#   - Auto-assigns free LAN IPs by scanning the configured IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END range
-#   - Writes Ansible inventory:
-#       automation/ansible/inventory.generated.ini
+#   - Auto-assigns free LAN IPs by scanning IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END
+#   - Writes Ansible inventory: automation/ansible/inventory.generated.ini
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROVISIONER_PATH="${REPO_ROOT}/automation/libvirt/$(basename "${BASH_SOURCE[0]}")"
 
-# Reuse the repository .env when present so VM provisioning can share the same
-# operator-provided source file instead of carrying lab-specific values here.
 if [ -f "${REPO_ROOT}/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -72,17 +69,20 @@ VM_VCPUS="${VM_VCPUS:-2}"
 VM_DISK_GB="${VM_DISK_GB:-20}"
 
 BUILD_DIR="${REPO_ROOT}/automation/libvirt/build"
-# Cloud-init seed ISOs must live where the libvirt/qemu service user can read them.
-# Files under /opt/k8s-ansible may be inaccessible to qemu because /opt or the repo
-# can be mode 0750/root-owned after git/sudo operations.
 SEED_IMAGE_DIR="${SEED_IMAGE_DIR:-${VM_IMAGE_DIR}}"
 
+log() { echo "[INFO] $*"; }
+ok() { echo "[OK] $*"; }
+warn() { echo "[WARN] $*" >&2; }
+fatal() { echo "[ERROR] $*" >&2; exit 1; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fatal "Missing command: $1"
+}
 
 sanitize_dns_value() {
   local candidate="${1:-}"
 
-  # Do not pass host-only/systemd-resolved loopback DNS into guests.
-  # 127.0.0.53 works on the host only; VMs need a LAN/public resolver.
   case "$candidate" in
     ""|127.*|::1)
       candidate="${GATEWAY:-}"
@@ -104,15 +104,6 @@ DNS="$(sanitize_dns_value "$DNS")"
 : "${GATEWAY:?GATEWAY must be set in .env or the shell environment}"
 : "${DNS:?DNS must be set in .env or the shell environment}"
 : "${IP_SCAN_PREFIX:?IP_SCAN_PREFIX must be set in .env or the shell environment}"
-
-log() { echo "[INFO] $*"; }
-ok() { echo "[OK] $*"; }
-warn() { echo "[WARN] $*" >&2; }
-fatal() { echo "[ERROR] $*" >&2; exit 1; }
-
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || fatal "Missing command: $1"
-}
 
 require_non_root() {
   if [[ "${EUID}" -eq 0 && "${ALLOW_ROOT_RUN:-0}" != "1" ]]; then
@@ -218,7 +209,12 @@ ensure_bridge_networkmanager() {
   warn "Network may briefly disconnect. Current active connection: $active_con"
 
   sudo nmcli con add type bridge ifname "$BRIDGE_NAME" con-name "$BRIDGE_NAME"
-  sudo nmcli con modify "$BRIDGE_NAME"     ipv4.method manual     ipv4.addresses "$HOST_IP_CIDR"     ipv4.gateway "$GATEWAY"     ipv4.dns "$DNS 8.8.8.8"     ipv6.method ignore
+  sudo nmcli con modify "$BRIDGE_NAME" \
+    ipv4.method manual \
+    ipv4.addresses "$HOST_IP_CIDR" \
+    ipv4.gateway "$GATEWAY" \
+    ipv4.dns "$DNS 1.1.1.1 8.8.8.8" \
+    ipv6.method ignore
 
   sudo nmcli con add type ethernet ifname "$iface" master "$BRIDGE_NAME" con-name "${BRIDGE_NAME}-slave-${iface}"
 
@@ -259,7 +255,7 @@ iface ${BRIDGE_NAME} inet static
     bridge_ports ${iface}
     bridge_stp off
     bridge_fd 0
-    dns-nameservers ${DNS} 8.8.8.8
+    dns-nameservers ${DNS} 1.1.1.1 8.8.8.8
 NETEOF
 
   sudo systemctl restart networking
@@ -474,10 +470,40 @@ existing_vm_matches_expected_identity() {
 
 remove_existing_vm() {
   local name="$1"
+  local disk="${VM_IMAGE_DIR}/${name}.qcow2"
+  local seed="${SEED_IMAGE_DIR}/${name}-seed.iso"
+  local nvram="/var/lib/libvirt/qemu/nvram/${name}_VARS.fd"
 
   warn "Removing existing VM: $name"
-  sudo virsh destroy "$name" >/dev/null 2>&1 || true
-  sudo virsh undefine "$name" --remove-all-storage >/dev/null 2>&1 || sudo virsh undefine "$name" >/dev/null 2>&1 || true
+
+  if sudo virsh dominfo "$name" >/dev/null 2>&1; then
+    sudo virsh destroy "$name" >/dev/null 2>&1 || true
+
+    sudo virsh undefine "$name" \
+      --nvram \
+      --managed-save \
+      --snapshots-metadata \
+      >/dev/null 2>&1 || true
+
+    sudo virsh undefine "$name" \
+      --remove-all-storage \
+      --nvram \
+      --managed-save \
+      --snapshots-metadata \
+      >/dev/null 2>&1 || true
+  fi
+
+  if sudo virsh dominfo "$name" >/dev/null 2>&1; then
+    warn "libvirt domain still exists after removal attempt: $name"
+    sudo virsh dumpxml "$name" | grep -E 'source file|nvram|loader|name' || true
+    fatal "refusing to recreate disk while libvirt domain still exists: $name"
+  fi
+
+  sudo rm -f "$disk" "$seed" "$nvram" 2>/dev/null || true
+
+  if sudo virsh list --all --name 2>/dev/null | grep -qx "$name"; then
+    fatal "libvirt domain still registered after cleanup: $name"
+  fi
 }
 
 prepare_vm_slot() {
@@ -510,8 +536,6 @@ prepare_vm_slot() {
   echo "new"
 }
 
-
-
 deterministic_vm_mac() {
   local name="$1"
   local ip="$2"
@@ -528,7 +552,6 @@ prepare_seed_iso_for_libvirt() {
   sudo chown root:libvirt-qemu "$SEED_IMAGE_DIR" 2>/dev/null || sudo chown root:qemu "$SEED_IMAGE_DIR" 2>/dev/null || true
   sudo chmod 0755 "$SEED_IMAGE_DIR" || true
 
-  # qemu must be able to traverse the directory and read the seed ISO.
   sudo chown root:libvirt-qemu "$seed" 2>/dev/null || sudo chown root:qemu "$seed" 2>/dev/null || sudo chown root:root "$seed" || true
   sudo chmod 0644 "$seed" || true
 
@@ -540,7 +563,6 @@ prepare_seed_iso_for_libvirt() {
     return 0
   fi
 
-  # Last-resort validation for distros where the qemu service user name differs.
   test -r "$seed" || fatal "seed ISO is not readable: $seed"
 }
 
@@ -572,6 +594,10 @@ create_vm() {
   rm -f "$user_data" "$meta_data" "$network_config"
   sudo rm -f "$seed"
 
+  if sudo virsh list --all --name 2>/dev/null | grep -qx "$name"; then
+    fatal "refusing to create disk while libvirt domain still exists: $name"
+  fi
+
   validate_qcow2_or_remove "$disk" "Existing VM disk" || true
   sudo rm -f "$disk"
 
@@ -597,10 +623,6 @@ users:
 
 ssh_pwauth: true
 disable_root: true
-
-# Keep first boot minimal. Package installation belongs in Ansible,
-# where DNS/mirror failures are visible and retryable. If cloud-init does
-# apt work here, a transient resolver failure leaves the VM in status:error.
 package_update: false
 package_upgrade: false
 
@@ -608,10 +630,11 @@ bootcmd:
   - [ sh, -c, "systemctl enable serial-getty@ttyS0.service || true" ]
 
 runcmd:
-  - mkdir -p /etc/systemd/resolved.conf.d
-  - printf '[Resolve]\nDNS=${DNS} 1.1.1.1 8.8.8.8\nFallbackDNS=1.1.1.1 8.8.8.8\n' > /etc/systemd/resolved.conf.d/otp-relay-dns.conf
-  - systemctl restart systemd-resolved || true
-  - systemctl enable --now ssh || systemctl enable --now sshd || true
+  - [ sh, -c, "mkdir -p /etc/systemd/resolved.conf.d" ]
+  - [ sh, -c, "printf '[Resolve]\nDNS=${DNS} 1.1.1.1 8.8.8.8\nFallbackDNS=1.1.1.1 8.8.8.8\nDNSSEC=no\nDNSOverTLS=no\n' > /etc/systemd/resolved.conf.d/otp-relay-dns.conf" ]
+  - [ sh, -c, "rm -f /etc/resolv.conf && ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf" ]
+  - [ sh, -c, "systemctl restart systemd-resolved || true" ]
+  - [ sh, -c, "systemctl enable --now ssh || systemctl enable --now sshd || true" ]
 CLOUDUSER
 
   cat > "$meta_data" <<CLOUDMETA
@@ -668,6 +691,7 @@ CLOUDNET
 wait_for_ssh() {
   local ip="$1"
   local name="$2"
+  local elapsed=0
 
   log "Waiting for SSH on $name ($ip)..."
 
@@ -677,12 +701,52 @@ wait_for_ssh() {
       return 0
     fi
     sleep 5
+    elapsed=$((elapsed + 5))
+    if [ $((elapsed % 30)) -eq 0 ]; then
+      log "Still waiting for SSH on $name ($ip), elapsed ${elapsed}s"
+    fi
   done
 
   warn "SSH did not become ready for $name ($ip) within timeout."
   warn "VM may still be booting/cloud-init may still be running."
   warn "Try manually: ssh -i ${SSH_KEY} ${VM_USER}@${ip}"
   return 1
+}
+
+repair_guest_dns_and_validate() {
+  local ip="$1"
+  local name="$2"
+  local attempt
+
+  log "Repairing and validating DNS inside $name ($ip)..."
+
+  for attempt in $(seq 1 12); do
+    if ssh \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=10 \
+      -i "$SSH_KEY" \
+      "${VM_USER}@${ip}" \
+      "sudo sh -c 'mkdir -p /etc/systemd/resolved.conf.d && printf \"[Resolve]\\nDNS=${DNS} 1.1.1.1 8.8.8.8\\nFallbackDNS=1.1.1.1 8.8.8.8\\nDNSSEC=no\\nDNSOverTLS=no\\n\" > /etc/systemd/resolved.conf.d/otp-relay-dns.conf && rm -f /etc/resolv.conf && ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf && systemctl restart systemd-resolved || true' && getent hosts deb.debian.org" >/dev/null 2>&1; then
+      ok "DNS validated: $name ($ip) can resolve deb.debian.org"
+      return 0
+    fi
+
+    sleep 5
+  done
+
+  warn "DNS validation failed for $name ($ip). Diagnostics:"
+  ssh \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=10 \
+    -i "$SSH_KEY" \
+    "${VM_USER}@${ip}" \
+    "hostname; ip route; cat /etc/resolv.conf || true; resolvectl status 2>/dev/null || true; getent hosts deb.debian.org || true" || true
+
+  fatal "VM DNS is not working on $name ($ip); refusing to write inventory"
 }
 
 write_ansible_inventory() {
@@ -719,6 +783,7 @@ VM access:
   User:      ${VM_USER}
   Password:  ${VM_PASSWORD}
   SSH key:   ${SSH_KEY}
+  DNS:       ${DNS}, 1.1.1.1, 8.8.8.8
 
 VMs:
   Hostname: ${CP_NAME}
@@ -781,6 +846,10 @@ main() {
   wait_for_ssh "$CP_IP" "$CP_NAME"
   wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME"
   wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME"
+
+  repair_guest_dns_and_validate "$CP_IP" "$CP_NAME"
+  repair_guest_dns_and_validate "$WORKER1_IP" "$WORKER1_NAME"
+  repair_guest_dns_and_validate "$WORKER2_IP" "$WORKER2_NAME"
 
   write_ansible_inventory
   sudo virsh list --all
