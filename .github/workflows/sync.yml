@@ -58,7 +58,7 @@ jobs:
           # Sync GitHub's checked-out workspace into the active server repo.
           #
           # Runtime/generated files are preserved:
-          # - inventory.poc.generated.ini is produced by the VM provisioner.
+          # - inventory.generated.ini is produced by the VM provisioner.
           # - automation/libvirt/build contains generated cloud-init seed files.
           #
           # No provisioning, Ansible playbooks, or deployment is run here.
