@@ -5,22 +5,15 @@
   gather_facts: false
 
   vars:
-    resolved_nfs_server: >-
-      {{
-        nfs_server_ip
-        | default(nfs_server, true)
-        | default(lookup('env', 'NFS_SERVER'), true)
-        | default(lookup('env', 'STORAGE_SERVER_IP'), true)
-      }}
-    resolved_nfs_path: >-
-      {{
-        nfs_export_path
-        | default(nfs_path, true)
-        | default(lookup('env', 'NFS_PATH'), true)
-        | default(lookup('env', 'NFS_EXPORT'), true)
-      }}
+    resolved_nfs_server: "{{ lookup('env', 'NFS_SERVER') | default('', true) }}"
+    resolved_nfs_path: "{{ lookup('env', 'NFS_PATH') | default('', true) }}"
+    nfs_test_mount: /mnt/otp-relay-nfs-test
 
   tasks:
+    - name: Show NFS validation target
+      ansible.builtin.debug:
+        msg: "Validating NFS export {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
+
     - name: Require NFS server
       ansible.builtin.assert:
         that:
@@ -38,11 +31,15 @@
         name: nfs-common
         state: present
 
-    - name: Check exported NFS path
+    - name: Check exported NFS paths from server
       ansible.builtin.command:
         cmd: "showmount -e {{ resolved_nfs_server }}"
       register: nfs_exports
       changed_when: false
+
+    - name: Show exported NFS paths
+      ansible.builtin.debug:
+        var: nfs_exports.stdout_lines
 
     - name: Verify configured NFS export exists
       ansible.builtin.assert:
@@ -52,41 +49,56 @@
 
     - name: Create temporary NFS test mount point
       ansible.builtin.file:
-        path: /mnt/otp-relay-nfs-test
+        path: "{{ nfs_test_mount }}"
         state: directory
         mode: "0755"
 
     - name: Check whether temporary NFS test mount is already mounted
       ansible.builtin.command:
-        cmd: mountpoint -q /mnt/otp-relay-nfs-test
+        cmd: "mountpoint -q {{ nfs_test_mount }}"
       register: nfs_test_mountpoint
       changed_when: false
       failed_when: false
 
-    - name: Mount NFS export for validation
-      ansible.builtin.command:
-        cmd: "mount -t nfs {{ resolved_nfs_server }}:{{ resolved_nfs_path }} /mnt/otp-relay-nfs-test"
-      when: nfs_test_mountpoint.rc != 0
-      changed_when: true
+    - name: Mount and validate NFS export
+      block:
+        - name: Mount NFS export for validation
+          ansible.builtin.command:
+            cmd: "mount -t nfs {{ resolved_nfs_server }}:{{ resolved_nfs_path }} {{ nfs_test_mount }}"
+          when: nfs_test_mountpoint.rc != 0
+          changed_when: true
 
-    - name: Verify NFS test mount is writable
-      ansible.builtin.copy:
-        dest: /mnt/otp-relay-nfs-test/.otp-relay-nfs-validation
-        content: "ok\n"
-        mode: "0644"
+        - name: Verify NFS test mount is writable
+          ansible.builtin.copy:
+            dest: "{{ nfs_test_mount }}/.otp-relay-nfs-validation"
+            content: "ok\n"
+            mode: "0644"
 
-    - name: Remove NFS validation file
-      ansible.builtin.file:
-        path: /mnt/otp-relay-nfs-test/.otp-relay-nfs-validation
-        state: absent
+        - name: Remove NFS validation file
+          ansible.builtin.file:
+            path: "{{ nfs_test_mount }}/.otp-relay-nfs-validation"
+            state: absent
 
-    - name: Unmount temporary NFS test mount
-      ansible.builtin.command:
-        cmd: umount /mnt/otp-relay-nfs-test
-      changed_when: true
-      failed_when: false
+      always:
+        - name: Check whether temporary NFS test mount is mounted before cleanup
+          ansible.builtin.command:
+            cmd: "mountpoint -q {{ nfs_test_mount }}"
+          register: nfs_test_mountpoint_after
+          changed_when: false
+          failed_when: false
 
-    - name: Remove temporary NFS test mount point
-      ansible.builtin.file:
-        path: /mnt/otp-relay-nfs-test
-        state: absent
+        - name: Unmount temporary NFS test mount
+          ansible.builtin.command:
+            cmd: "umount {{ nfs_test_mount }}"
+          when: nfs_test_mountpoint_after.rc == 0
+          changed_when: true
+          failed_when: false
+
+        - name: Remove temporary NFS test mount point
+          ansible.builtin.file:
+            path: "{{ nfs_test_mount }}"
+            state: absent
+
+    - name: NFS validation completed
+      ansible.builtin.debug:
+        msg: "NFS validation succeeded for {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
