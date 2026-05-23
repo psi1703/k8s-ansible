@@ -2,6 +2,15 @@
 set -Eeuo pipefail
 
 ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${ANSIBLE_DIR}/../.." && pwd)"
+
+if [ -f "${REPO_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${REPO_ROOT}/.env"
+  set +a
+fi
+
 INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
@@ -234,28 +243,68 @@ exit 52
   }
 }
 
+host_dns_servers() {
+  {
+    if command -v resolvectl >/dev/null 2>&1; then
+      resolvectl dns 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true
+    fi
+    if command -v nmcli >/dev/null 2>&1; then
+      nmcli -t -f IP4.DNS dev show 2>/dev/null | awk -F: '$2 != "" {print $2}' || true
+    fi
+    awk '/^nameserver / {print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
+    awk '/^nameserver / {print $2}' /etc/resolv.conf 2>/dev/null || true
+  } | awk 'NF && $1 !~ /^127\./ && $1 != "::1" && $1 !~ /^169\.254\./ && !seen[$1]++ {print $1}'
+}
+
 repair_dns_on_guests() {
+  local dns_servers
+  dns_servers="${DNS_SERVERS:-$(host_dns_servers | paste -sd' ' -)}"
+
+  [ -n "$dns_servers" ] || fatal "Could not detect a non-loopback DNS server from the host. Fix host DNS or set DNS_SERVERS explicitly."
+
   log "Repairing and validating DNS on all cluster VMs..."
+  log "Using host DNS servers: ${dns_servers}"
 
-  ansible -i "$INVENTORY" all -b -m shell -a '
-set -eux
+  ansible -i "$INVENTORY" all -b -m shell -a "
+set -eu
 
-mkdir -p /etc/systemd/resolved.conf.d
-cat >/etc/systemd/resolved.conf.d/otp-relay-dns.conf <<DNSCONF
-[Resolve]
-DNS=172.31.11.1 1.1.1.1 8.8.8.8
-FallbackDNS=1.1.1.1 8.8.8.8
-DNSSEC=no
-DNSOverTLS=no
-DNSCONF
+dns_servers='${dns_servers}'
 
 rm -f /etc/resolv.conf
-ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-systemctl restart systemd-resolved || true
+: >/etc/resolv.conf
+for dns in \$dns_servers; do
+  case "\$dns" in
+    ''|127.*|::1|169.254.*) continue ;;
+  esac
+  printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
+done
+printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
 
+mkdir -p /etc/systemd/resolved.conf.d
+cat >/etc/systemd/resolved.conf.d/otp-relay-dns.conf <<EOF_RESOLVED
+[Resolve]
+DNS=${dns_servers}
+FallbackDNS=${dns_servers}
+DNSSEC=no
+DNSOverTLS=no
+EOF_RESOLVED
+
+systemctl restart systemd-resolved >/dev/null 2>&1 || true
+# Keep apt deterministic even after resolved restarts.
+rm -f /etc/resolv.conf
+: >/etc/resolv.conf
+for dns in \$dns_servers; do
+  case "\$dns" in
+    ''|127.*|::1|169.254.*) continue ;;
+  esac
+  printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
+done
+printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
+
+echo 'DNS copied from host:' ${dns_servers}
 cat /etc/resolv.conf
-getent hosts deb.debian.org
-'
+timeout 10 getent hosts deb.debian.org
+"
 }
 
 repair_apt_if_needed() {
