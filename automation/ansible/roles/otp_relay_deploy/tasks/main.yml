@@ -26,7 +26,7 @@
       - "--exclude=.installer-venv/"
       - "--exclude=node_modules/"
       - "--exclude=automation/libvirt/build/"
-      - "--exclude=automation/ansible/inventory.poc.generated.ini"
+      - "--exclude=automation/ansible/inventory.generated.ini"
   delegate_to: localhost
 
 - name: Ensure required .env exists on control-plane
