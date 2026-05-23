@@ -4,27 +4,44 @@
     path: /usr/local/bin/k3s
   register: k3s_bin
 
-- name: Install K3s server
+- name: Install K3s server on localhost control-plane
   ansible.builtin.shell: |
     set -eu
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --write-kubeconfig-mode 644{% if k3s_disable_servicelb | bool %} --disable servicelb{% endif %}{% if k3s_disable_traefik | bool %} --disable traefik{% endif %}" sh -
+
+    INSTALL_K3S_EXEC="server --write-kubeconfig-mode 644"
+
+    if [ "{{ k3s_disable_servicelb | default(true) | bool | ternary('1', '0') }}" = "1" ]; then
+      INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC --disable servicelb"
+    fi
+
+    if [ "{{ k3s_disable_traefik | default(false) | bool | ternary('1', '0') }}" = "1" ]; then
+      INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC --disable traefik"
+    fi
+
+    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC" sh -
   args:
     executable: /bin/bash
   when: not k3s_bin.stat.exists
 
-- name: Wait for K3s node readiness
+- name: Ensure K3s service is enabled and running
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for K3s API to answer
   ansible.builtin.command:
     cmd: k3s kubectl get nodes
   register: k3s_get_nodes
   changed_when: false
-  retries: 30
+  retries: 60
   delay: 5
   until:
     - k3s_get_nodes.rc == 0
     - "'No resources found' not in k3s_get_nodes.stderr"
     - k3s_get_nodes.stdout_lines | length > 1
 
-- name: Wait for K3s node readiness
+- name: Wait for K3s control-plane node readiness
   ansible.builtin.command:
     cmd: k3s kubectl wait --for=condition=Ready node --all --timeout=300s
   changed_when: false
@@ -37,3 +54,31 @@
 - name: Publish K3s join token
   ansible.builtin.set_fact:
     k3s_join_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+
+- name: Detect control-plane advertise IP for worker joins
+  ansible.builtin.shell: |
+    set -eu
+
+    if [ -n "${HOST_IP_CIDR:-}" ]; then
+      printf '%s\n' "${HOST_IP_CIDR%%/*}"
+      exit 0
+    fi
+
+    if ip -o -4 addr show dev "{{ bridge_name | default('br0') }}" >/dev/null 2>&1; then
+      ip -o -4 addr show dev "{{ bridge_name | default('br0') }}" | awk '{print $4; exit}' | cut -d/ -f1
+      exit 0
+    fi
+
+    ip route get 8.8.8.8 | awk '/src/ {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}'
+  args:
+    executable: /bin/bash
+  register: k3s_server_ip_detect
+  changed_when: false
+
+- name: Publish K3s server URL for workers
+  ansible.builtin.set_fact:
+    k3s_server_url: "https://{{ k3s_server_ip_detect.stdout | trim }}:6443"
+
+- name: Show K3s worker join endpoint
+  ansible.builtin.debug:
+    msg: "Workers will join K3s using {{ k3s_server_url }}"
