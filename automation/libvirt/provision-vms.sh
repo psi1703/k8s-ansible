@@ -56,8 +56,8 @@ WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 
 AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
 IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-}"
-IP_SCAN_START="${IP_SCAN_START:-150}"
-IP_SCAN_END="${IP_SCAN_END:-199}"
+IP_SCAN_START="${IP_SCAN_START:-100}"
+IP_SCAN_END="${IP_SCAN_END:-249}"
 RESERVED_IPS="${RESERVED_IPS:-}"
 AUTO_RECREATE_INCOMPATIBLE_VMS="${AUTO_RECREATE_INCOMPATIBLE_VMS:-1}"
 EXISTING_VM_SSH_CHECK_ATTEMPTS="${EXISTING_VM_SSH_CHECK_ATTEMPTS:-6}"
@@ -275,8 +275,34 @@ ensure_bridge() {
   log "Host bridge IP: $HOST_IP_CIDR"
 
   if ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
-    ok "$BRIDGE_NAME already exists"
-    sudo ip link set "$BRIDGE_NAME" up >/dev/null 2>&1 || true
+    # Bridge exists — but verify that the physical NIC is actually enslaved.
+    # A bridge with no slave forwards nothing: VMs will be isolated even though
+    # br0 is UP and has the host IP.
+    local slave_count
+    slave_count="$(bridge link show 2>/dev/null | grep -c "master $BRIDGE_NAME" || true)"
+    if [[ "$slave_count" -eq 0 ]]; then
+      warn "$BRIDGE_NAME exists but has no enslaved interface — VMs will be unreachable"
+      warn "Attempting to repair: enslaving $iface to $BRIDGE_NAME"
+      if systemctl is-active --quiet NetworkManager; then
+        # Remove any existing stale connection for this iface, then re-add the slave.
+        sudo nmcli con delete "${BRIDGE_NAME}-slave-${iface}" >/dev/null 2>&1 || true
+        sudo nmcli con add type ethernet ifname "$iface" master "$BRIDGE_NAME"           con-name "${BRIDGE_NAME}-slave-${iface}"
+        sudo nmcli con up "${BRIDGE_NAME}-slave-${iface}" || true
+        wait_for_bridge_activation
+      elif [[ -f /etc/network/interfaces ]]; then
+        # For interfaces-managed systems, bring the iface down, set master, bring up.
+        sudo ip link set "$iface" down 2>/dev/null || true
+        sudo ip link set "$iface" master "$BRIDGE_NAME"
+        sudo ip link set "$iface" up
+        sudo ip link set "$BRIDGE_NAME" up
+        wait_for_bridge_activation
+      else
+        fatal "$BRIDGE_NAME has no slave and no supported network manager found to repair it"
+      fi
+    else
+      ok "$BRIDGE_NAME already exists and has $slave_count enslaved interface(s)"
+      sudo ip link set "$BRIDGE_NAME" up >/dev/null 2>&1 || true
+    fi
   else
     if systemctl is-active --quiet NetworkManager; then
       ensure_bridge_networkmanager "$iface"
@@ -636,10 +662,9 @@ CLOUDMETA
   cat > "$network_config" <<CLOUDNET
 version: 2
 ethernets:
-  eth0:
+  id0:
     match:
       macaddress: "${mac}"
-    set-name: eth0
     dhcp4: false
     addresses:
       - ${ip}/${PREFIX}
