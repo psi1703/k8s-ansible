@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
 
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-poc}"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
 SSH_USER="${VM_USER:-otp-relay}"
 
 log() { echo "[INFO] $*"; }
@@ -22,30 +22,87 @@ if ! command -v ansible >/dev/null 2>&1; then
   sudo apt-get install -y ansible
 fi
 
-cleanup_known_hosts() {
-  log "Removing stale SSH known_hosts entries for inventory hosts"
-
+inventory_hosts() {
   awk '
     /^[[:space:]]*$/ { next }
     /^[[:space:]]*#/ { next }
     /^\[/ { next }
     {
+      host=$1
+      ip=""
       for (i = 1; i <= NF; i++) {
         if ($i ~ /^ansible_host=/) {
           split($i, a, "=")
-          print a[2]
+          ip=a[2]
         }
       }
+      if (host != "" && ip != "") {
+        print host, ip
+      }
     }
-  ' "$INVENTORY" | sort -u | while read -r host; do
-    [ -n "$host" ] || continue
-    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$host" >/dev/null 2>&1 || true
+  ' "$INVENTORY"
+}
+
+fix_local_ssh_permissions() {
+  local ssh_dir="$HOME/.ssh"
+  local known_hosts="$ssh_dir/known_hosts"
+
+  mkdir -p "$ssh_dir"
+  chmod 700 "$ssh_dir" || true
+
+  if [ -n "${USER:-}" ]; then
+    sudo chown -R "$USER:$USER" "$ssh_dir" 2>/dev/null || true
+  fi
+
+  touch "$known_hosts"
+  chmod 644 "$known_hosts" || true
+
+  if [ -f "$SSH_KEY" ]; then
+    chmod 600 "$SSH_KEY" || true
+  fi
+
+  if [ -f "${SSH_KEY}.pub" ]; then
+    chmod 644 "${SSH_KEY}.pub" || true
+  fi
+}
+
+cleanup_known_hosts() {
+  log "Removing stale SSH known_hosts entries for inventory hosts"
+
+  inventory_hosts | while read -r host ip; do
+    [ -n "$ip" ] || continue
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "[$ip]:22" >/dev/null 2>&1 || true
   done
 }
 
 write_ansible_ssh_defaults() {
   export ANSIBLE_HOST_KEY_CHECKING=False
   export ANSIBLE_SSH_ARGS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=15"
+}
+
+check_raw_ssh_reachability() {
+  log "Checking raw SSH reachability for each inventory host..."
+
+  inventory_hosts | while read -r host ip; do
+    [ -n "$host" ] || continue
+    [ -n "$ip" ] || continue
+
+    log "checking SSH: ${host} (${ip})"
+
+    if ssh \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+        -o ConnectTimeout=15 \
+        -i "$SSH_KEY" \
+        "${SSH_USER}@${ip}" \
+        'hostname; cloud-init status --long || true; ip -br addr || true; ip route || true; getent hosts deb.debian.org || true'; then
+      ok "SSH reachable: ${host} (${ip})"
+    else
+      fatal "SSH failed for ${host} (${ip}). Check VM state/network before continuing."
+    fi
+  done
 }
 
 print_cloud_init_diagnostics() {
@@ -72,7 +129,7 @@ dpkg --audit || true
 }
 
 wait_for_cloud_init_and_locks() {
-  log "Checking cloud-init status on all POC VMs..."
+  log "Checking cloud-init status on all cluster VMs..."
 
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eu
@@ -114,7 +171,7 @@ exit 51
     fatal "cloud-init did not complete successfully"
   }
 
-  log "Waiting for apt/dpkg locks on all POC VMs..."
+  log "Waiting for apt/dpkg locks on all cluster VMs..."
 
   ansible -i "$INVENTORY" all -b -m shell -a '
 set -eu
@@ -136,9 +193,6 @@ for i in $(seq 1 180); do
     echo "dpkg is still running"
     blocked=1
   fi
-
-  # Do not block on unattended-upgrade-shutdown --wait-for-signal.
-  # That helper can remain idle after boot and does not indicate an active apt/dpkg transaction.
 
   if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
     echo "/var/lib/dpkg/lock-frontend is locked"
@@ -199,57 +253,12 @@ apt-get install -y \
 '
 }
 
-inventory_hosts() {
-  awk '
-    /^[[:space:]]*$/ { next }
-    /^[[:space:]]*#/ { next }
-    /^\[/ { next }
-    {
-      host=$1
-      ip=""
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ /^ansible_host=/) {
-          split($i, a, "=")
-          ip=a[2]
-        }
-      }
-      if (host != "" && ip != "") {
-        print host, ip
-      }
-    }
-  ' "$INVENTORY"
-}
-
-check_raw_ssh_reachability() {
-  log "Checking raw SSH reachability for each inventory host..."
-
-  inventory_hosts | while read -r host ip; do
-    [ -n "$host" ] || continue
-    [ -n "$ip" ] || continue
-
-    log "checking SSH: ${host} (${ip})"
-    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
-
-    if ssh \
-        -o BatchMode=yes \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-        -o ConnectTimeout=15 \
-        -i "$SSH_KEY" \
-        "${SSH_USER}@${ip}" \
-        'hostname; cloud-init status --long || true; ip -br addr || true; ip route || true; getent hosts deb.debian.org || true' ; then
-      ok "SSH reachable: ${host} (${ip})"
-    else
-      fatal "SSH failed for ${host} (${ip}). Check VM state/network before continuing."
-    fi
-  done
-}
-
+fix_local_ssh_permissions
 cleanup_known_hosts
 write_ansible_ssh_defaults
 check_raw_ssh_reachability
 
-log "Waiting for Ansible SSH connection on all POC VMs..."
+log "Waiting for Ansible SSH connection on all cluster VMs..."
 ansible -i "$INVENTORY" all -m wait_for_connection -a "timeout=180 sleep=5" -vv
 
 wait_for_cloud_init_and_locks
@@ -270,8 +279,12 @@ ansible-playbook -i "$INVENTORY" playbooks/20-k3s-workers.yml
 log "Applying node labels..."
 ansible-playbook -i "$INVENTORY" playbooks/30-node-labels.yml
 
-log "Validating storage..."
-ansible-playbook -i "$INVENTORY" playbooks/40-storage-validate.yml
+if ansible -i "$INVENTORY" localhost -m debug -a 'var=nfs_server_host' 2>/dev/null | grep -q 'nfs_server_host'; then
+  log "Validating storage..."
+  ansible-playbook -i "$INVENTORY" playbooks/40-storage-validate.yml
+else
+  log "Skipping storage validation because nfs_server_host is not configured"
+fi
 
 if [[ "${DEPLOY_OTP_RELAY:-0}" == "1" ]]; then
   log "Deploying OTP Relay..."
@@ -279,7 +292,7 @@ if [[ "${DEPLOY_OTP_RELAY:-0}" == "1" ]]; then
 fi
 
 if [[ "${VALIDATE_OTP_RELAY:-0}" == "1" ]]; then
-  log "Validating production/POC state..."
+  log "Validating production/cluster state..."
   ansible-playbook -i "$INVENTORY" playbooks/70-validate-production.yml
 fi
 
