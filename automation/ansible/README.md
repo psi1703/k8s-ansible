@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/28172968/README.md)
 # OTP Relay headless automation
 
 This automation supports the SCH phase map without changing application behavior.
@@ -9,23 +10,23 @@ For the current proof-of-concept/module test, use three K3s VMs on the lab host 
 - VM3: `worker2` - K3s worker - max 3 GB RAM
 - Laptop: external NFS storage on the same LAN
 
-The laptop/NFS host is not joined to Kubernetes. It backs the Kubernetes PVC used by the app data path. This is acceptable for POC validation; production should use a dedicated always-on NFS server or storage service.
+The laptop/NFS host is not joined to Kubernetes. It backs the Kubernetes PVC used by the app data path. This is acceptable for cluster validation; production should use a dedicated always-on NFS server or storage service.
 
-## POC order with laptop-managed NFS
+## Cluster order with laptop-managed NFS
 
 Prepare the laptop NFS export manually first, then run:
 
 ```bash
-ansible-playbook -i inventory.poc.example.ini playbooks/00-os-baseline.yml
-ansible-playbook -i inventory.poc.example.ini playbooks/10-k3s-control-plane.yml
-ansible-playbook -i inventory.poc.example.ini playbooks/20-k3s-workers.yml
-ansible-playbook -i inventory.poc.example.ini playbooks/30-node-labels.yml
-ansible-playbook -i inventory.poc.example.ini playbooks/40-storage-validate.yml
-ansible-playbook -i inventory.poc.example.ini playbooks/50-deploy-otp-relay.yml
-ansible-playbook -i inventory.poc.example.ini playbooks/70-validate-production.yml
+ansible-playbook -i inventory.example.ini playbooks/00-os-baseline.yml
+ansible-playbook -i inventory.example.ini playbooks/10-k3s-control-plane.yml
+ansible-playbook -i inventory.example.ini playbooks/20-k3s-workers.yml
+ansible-playbook -i inventory.example.ini playbooks/30-node-labels.yml
+ansible-playbook -i inventory.example.ini playbooks/40-storage-validate.yml
+ansible-playbook -i inventory.example.ini playbooks/50-deploy-otp-relay.yml
+ansible-playbook -i inventory.example.ini playbooks/70-validate-production.yml
 ```
 
-Copy `inventory.poc.example.ini` to `inventory.poc.ini` and edit IPs before running.
+Copy `inventory.example.ini` to `inventory.ini` and edit IPs before running.
 
 ## Dedicated NFS server order
 
@@ -44,7 +45,7 @@ ansible-playbook -i inventory.prod.ini playbooks/70-validate-production.yml
 
 Use `inventory.prod.example.ini` as a template and save the real file as `inventory.prod.ini`.
 
-## POC sizing
+## Cluster sizing
 
 For the lab host, cap the three K3s VMs at 3 GB RAM each:
 
