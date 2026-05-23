@@ -97,6 +97,7 @@ def _redis_admin_login_attempt_key(client_ip: str) -> str:
     return f"{REDIS_ADMIN_LOGIN_ATTEMPT_PREFIX}{safe_ip}"
 
 
+@contextmanager
 def _redis_queue_lock():
     if redis_client is None:
         raise HTTPException(status_code=503, detail="Redis queue is unavailable")
