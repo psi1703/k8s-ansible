@@ -7,5 +7,6 @@ cluster_name: otp-relay-prod
 k3s_disable_servicelb: true
 k3s_disable_traefik: false
 
+otp_namespace: otp-relay
 otp_install_dir: /opt/k8s-ansible
 otp_env_file: /opt/k8s-ansible/.env
