@@ -28,6 +28,7 @@ _env_prompt() {
   local input=""
 
   current="$(_env_get_current "$name")"
+
   while true; do
     if [ "$secret" = "1" ]; then
       if [ -n "$current" ]; then
@@ -69,6 +70,7 @@ _env_prompt() {
 _env_set_default() {
   local name="$1"
   local value="${2:-}"
+
   if [ -z "${!name:-}" ]; then
     printf -v "$name" '%s' "$value"
     export "$name"
@@ -82,6 +84,8 @@ _env_default_interface() {
 _write_env_file() {
   local target="$1"
   local tmp="${target}.tmp"
+
+  log "writing installer environment file: $target"
 
   umask 077
   cat > "$tmp" <<EOF_ENV
@@ -182,15 +186,20 @@ DISTRIBUTE_IMAGES_TO_NODES=$(_env_quote "${DISTRIBUTE_IMAGES_TO_NODES:-1}")
 IMAGE_DISTRIBUTION_PORT=$(_env_quote "${IMAGE_DISTRIBUTION_PORT:-18080}")
 IMAGE_IMPORTER_IMAGE=$(_env_quote "${IMAGE_IMPORTER_IMAGE:-redis:7-alpine}")
 EOF_ENV
+
   mv "$tmp" "$target"
   chmod 0600 "$target"
+  log "environment file written with mode 0600: $target"
 }
 
 source_env_file() {
   local source_file="$1"
+
   if [ ! -f "$source_file" ]; then
     return 1
   fi
+
+  log "sourcing environment file: $source_file"
   set -a
   # shellcheck disable=SC1090
   . "$source_file"
@@ -199,6 +208,7 @@ source_env_file() {
 
 create_env_interactive() {
   log "creating first-run environment file at $ENV_FILE"
+  log "interactive setup will ask only for operator-owned values"
 
   # Internal installer values. Do not ask these during deployment install.
   _env_set_default REPO_URL ""
@@ -225,6 +235,7 @@ create_env_interactive() {
   _env_prompt SERVICE_TYPE "Service type: ClusterIP, NodePort, or LoadBalancer" 1 0
   _env_prompt INGRESS_ENABLED "Enable ingress? 1=yes, 0=no" 1 0
   _env_prompt TLS_ENABLED "Enable TLS? 1=yes, 0=no" 1 0
+
   if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
     _env_prompt TLS_HOST "Ingress/TLS hostname" 1 0
   fi
@@ -243,10 +254,12 @@ create_env_interactive() {
   fi
 
   _env_prompt PHONE_IP "Monitored phone IP" 1 0
+
   if [ -z "${PHONE_INTERFACE:-}" ]; then
     PHONE_INTERFACE="$(_env_default_interface)"
     export PHONE_INTERFACE
   fi
+
   _env_prompt PHONE_INTERFACE "Host network interface for ARP checks" 1 0
   _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
   _env_prompt PHONE_OFFLINE_THRESHOLD "Phone offline threshold" 1 0
@@ -260,10 +273,12 @@ create_env_interactive() {
   _env_prompt REPLICA_COUNT "App replica count" 1 0
   _env_prompt TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" 0 1
   _env_prompt TELEGRAM_CHAT_ID "Telegram chat ID (optional)" 0 0
+
   if [ -z "${SMS_SECRET_TOKEN:-}" ]; then
     SMS_SECRET_TOKEN="$(make_secret)"
     export SMS_SECRET_TOKEN
   fi
+
   _env_prompt SMS_SECRET_TOKEN "SMS webhook secret token" 1 1
 
   normalize_loaded_env
@@ -273,6 +288,7 @@ create_env_interactive() {
 
 create_env_noninteractive() {
   log "creating non-interactive environment file at $ENV_FILE from exported variables"
+  log "NONINTERACTIVE=1 is set and no .env file exists; missing required values will fail validation after defaults are written"
   normalize_loaded_env
   _write_env_file "$ENV_FILE"
   ENV_FILE_CREATED=1
@@ -292,8 +308,10 @@ Environment file: $ENV_FILE
 7) Installer behavior: DEPLOY_MODE, RUNNER_ONLY, SKIP_REPO_SYNC
 8) Save and continue
 EOF_MENU
+
     read -r -p "Choose what to change [8]: " choice
     choice="${choice:-8}"
+
     case "$choice" in
       1)
         _env_prompt SERVICE_TYPE "Service type" 1 0
@@ -350,31 +368,41 @@ EOF_MENU
 }
 
 validate_env_required() {
+  log "validating required installer environment values"
+
   [ -n "${NAMESPACE:-}" ] || fatal "NAMESPACE is required in $ENV_FILE"
   [ -n "${INSTALL_DIR:-}" ] || fatal "INSTALL_DIR is required in $ENV_FILE"
   [ -n "${SERVICE_TYPE:-}" ] || fatal "SERVICE_TYPE is required in $ENV_FILE"
   [ -n "${PHONE_IP:-}" ] || fatal "PHONE_IP is required in $ENV_FILE because the monitor is a core component"
   [ -n "${PHONE_INTERFACE:-}" ] || fatal "PHONE_INTERFACE is required in $ENV_FILE because ARP monitoring requires a host interface"
+
   if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
     [ -n "${TLS_HOST:-}" ] || fatal "TLS_HOST is required in $ENV_FILE when ingress or TLS is enabled"
   fi
+
   if [ "${NFS_ENABLED:-0}" = "1" ]; then
     [ -n "${NFS_SERVER:-}" ] || fatal "NFS_SERVER is required in $ENV_FILE when NFS_ENABLED=1"
     [ -n "${NFS_PATH:-}" ] || fatal "NFS_PATH is required in $ENV_FILE when NFS_ENABLED=1"
   fi
+
   if [ "${INSTALL_METALLB:-0}" = "1" ]; then
     [ -n "${METALLB_IP_RANGE:-}" ] || fatal "METALLB_IP_RANGE is required in $ENV_FILE when INSTALL_METALLB=1"
   fi
+
   [ -n "${SMS_SECRET_TOKEN:-}" ] || fatal "SMS_SECRET_TOKEN is required in $ENV_FILE"
+
   if [ "${REDIS_ENABLED:-0}" = "1" ]; then
     [ -n "${REDIS_URL:-}" ] || fatal "REDIS_URL is required in $ENV_FILE when REDIS_ENABLED=1"
   fi
+
   [ -n "${OTP_RELAY_DATA_DIR:-}" ] || fatal "OTP_RELAY_DATA_DIR is required in $ENV_FILE"
   [ -n "${USERS_EXCEL_PATH:-}" ] || fatal "USERS_EXCEL_PATH is required in $ENV_FILE"
   [ -n "${AUDIT_LOG_PATH:-}" ] || fatal "AUDIT_LOG_PATH is required in $ENV_FILE"
   [ -n "${CLAIM_EXPIRY_SEC:-}" ] || fatal "CLAIM_EXPIRY_SEC is required in $ENV_FILE"
   [ -n "${OTP_DISPLAY_SEC:-}" ] || fatal "OTP_DISPLAY_SEC is required in $ENV_FILE"
   [ -n "${CONCURRENT_RISK_SEC:-}" ] || fatal "CONCURRENT_RISK_SEC is required in $ENV_FILE"
+
+  log "required installer environment values validated"
 }
 
 load_or_create_env() {
@@ -385,13 +413,17 @@ load_or_create_env() {
     log "loading environment from $ENV_FILE"
     source_env_file "$ENV_FILE"
     ENV_FILE_LOADED=1
+
     normalize_loaded_env
+
     if [ "${NONINTERACTIVE:-0}" != "1" ]; then
       if prompt_yes_no "Change saved installer environment values before continuing? [y/N]" "N"; then
         change_env_menu
         source_env_file "$ENV_FILE"
         normalize_loaded_env
       fi
+    else
+      log "NONINTERACTIVE=1; using existing .env without prompting"
     fi
   else
     if [ "${NONINTERACTIVE:-0}" = "1" ]; then
@@ -399,6 +431,7 @@ load_or_create_env() {
     else
       create_env_interactive
     fi
+
     source_env_file "$ENV_FILE"
     ENV_FILE_LOADED=1
     normalize_loaded_env
@@ -409,6 +442,8 @@ load_or_create_env() {
 }
 
 normalize_loaded_env() {
+  log "normalizing installer environment values"
+
   REPO_URL="${REPO_URL:-}"
   REPO_REF="${REPO_REF:-main}"
   INSTALL_DIR="${INSTALL_DIR:-${SCRIPT_DIR}}"
@@ -455,11 +490,16 @@ normalize_loaded_env() {
   SERVER_IP="${SERVER_IP:-127.0.0.1}"
 
   PORTAL_URL_EXPLICIT=0
-  if [ -n "${PORTAL_URL:-}" ]; then PORTAL_URL_EXPLICIT=1; fi
+  if [ -n "${PORTAL_URL:-}" ]; then
+    PORTAL_URL_EXPLICIT=1
+  fi
+
   PORTAL_URL="${PORTAL_URL:-http://$SERVER_IP}"
+
   if [ "$PORTAL_URL_EXPLICIT" = "0" ] && [ "$TLS_ENABLED" = "1" ] && [ -n "$TLS_HOST" ]; then
     PORTAL_URL="https://$TLS_HOST"
   fi
+
   ASSIGNED_LOADBALANCER_ADDRESS=""
   PORTAL_URL_CONFIG_REFRESHED=0
 
@@ -519,4 +559,6 @@ normalize_loaded_env() {
   export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD GIT_CLEAN SKIP_REPO_SYNC NONINTERACTIVE INSTALL_GITHUB_RUNNER GITHUB_RUNNER_URL GITHUB_RUNNER_TOKEN
   export GITHUB_RUNNER_DIR GITHUB_RUNNER_USER RUNNER_ONLY DEPLOY_MODE DOCKER_BIN REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS
   export DISTRIBUTE_IMAGES_TO_NODES IMAGE_DISTRIBUTION_PORT IMAGE_IMPORTER_IMAGE SMS_SECRET_TOKEN RESTART_APP_REQUIRED RESTART_MONITOR_REQUIRED
+
+  log "installer environment normalization completed"
 }
