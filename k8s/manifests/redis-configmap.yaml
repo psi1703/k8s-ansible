@@ -9,7 +9,8 @@ data:
     set -eu
 
     ordinal="${HOSTNAME##*-}"
-    announce_host="${POD_NAME}.otp-redis-headless.otp-relay.svc.cluster.local"
+    announce_host="${POD_NAME}.otp-redis-headless"
+    primary_host="otp-redis-0.otp-redis-headless"
 
     cat > /tmp/redis.conf <<EOF
     port 6379
@@ -25,4 +26,4 @@ data:
       exec redis-server /tmp/redis.conf
     fi
 
-    exec redis-server /tmp/redis.conf --replicaof otp-redis-0.otp-redis-headless.otp-relay.svc.cluster.local 6379
+    exec redis-server /tmp/redis.conf --replicaof "${primary_host}" 6379
