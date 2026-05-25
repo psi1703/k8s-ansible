@@ -168,6 +168,7 @@ install_packages() {
     jq \
     openssh-client \
     iproute2 \
+    iptables \
     net-tools \
     dnsutils
 }
