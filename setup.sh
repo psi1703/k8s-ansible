@@ -571,10 +571,12 @@ detect_setup_path() {
   fi
 
   if local_k3s_reachable; then
+    warn "Ansible/provisioner path not available; falling back to local existing cluster"
     printf '%s\n' "local-existing"
     return 0
   fi
 
+  warn "Ansible/provisioner path not available; falling back to local fresh installer"
   printf '%s\n' "local-fresh"
 }
 
