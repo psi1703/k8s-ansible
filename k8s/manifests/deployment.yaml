@@ -19,6 +19,7 @@ spec:
     metadata:
       labels:
         app: otp-relay
+        metrics: enabled
     spec:
       securityContext:
         runAsNonRoot: true
@@ -29,8 +30,11 @@ spec:
         - name: app
           image: otp-relay:latest
           imagePullPolicy: IfNotPresent
+
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
+              protocol: TCP
 
           envFrom:
             - configMapRef:
