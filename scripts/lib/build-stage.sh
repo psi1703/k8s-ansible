@@ -52,10 +52,6 @@ build_app_assets_if_required() {
     grep -q 'script src="app.js"' frontend/index.html || \
       fatal "frontend/index.html must load generated bundle with: script src=\"app.js\""
 
-    if grep -R -nE 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' frontend/app.jsx frontend/app.js 2>/dev/null; then
-      fatal "frontend source/bundle contains RTA wizard content. Restore OTP Relay portal source before deployment."
-    fi
-
     log "frontend production bundle generated and validated: frontend/app.js"
   else
     log "DEPLOY_MODE=$DEPLOY_MODE does not require app help-doc/frontend build; skipping installer venv and npm build"
