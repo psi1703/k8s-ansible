@@ -4,8 +4,9 @@ set -Eeuo pipefail
 # Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
 # Normal use: bash setup.sh
 #
-# Do not run this file with sudo. It must run as the normal operator user.
-# The script uses sudo internally only for privileged system operations.
+# If started with sudo, this script repairs repo ownership and re-runs itself
+# as the original sudo user. The repo working tree must be owned by the
+# normal operator user, while privileged operations are performed via sudo.
 #
 # Current design:
 #   - This server is the K3s control-plane and Ansible runner.
@@ -36,45 +37,6 @@ log() { printf '[setup] %s\n' "$*"; }
 warn() { printf '[setup] WARNING: %s\n' "$*" >&2; }
 fatal() { printf '[setup] ERROR: %s\n' "$*" >&2; exit 1; }
 
-require_normal_operator_user() {
-  if [ "$(id -u)" -eq 0 ]; then
-    cat >&2 <<EOF
-
-[setup] ERROR: Do not run setup.sh with sudo.
-
-Run it as your normal operator user:
-
-  cd /opt/k8s-ansible
-  bash setup.sh
-
-The script will call sudo internally only when privileged system changes are required.
-
-If /opt/k8s-ansible is currently owned by root, fix it once with:
-
-  sudo chown -R "\$USER:\$USER" /opt/k8s-ansible
-
-EOF
-    exit 1
-  fi
-
-  command -v sudo >/dev/null 2>&1 || fatal "sudo is required. Install sudo or run from a user with sudo access."
-}
-
-ensure_repo_writable() {
-  if [ -w "$SCRIPT_DIR" ]; then
-    return 0
-  fi
-
-  warn "$SCRIPT_DIR is not writable by $(id -un). Attempting to repair ownership with sudo."
-  sudo chown -R "$(id -un):$(id -gn)" "$SCRIPT_DIR"
-
-  if [ ! -w "$SCRIPT_DIR" ]; then
-    fatal "$SCRIPT_DIR is still not writable after ownership repair."
-  fi
-
-  log "repaired repository ownership for $(id -un):$(id -gn)"
-}
-
 usage() {
   cat <<'USAGE'
 Usage:
@@ -94,13 +56,59 @@ Default behavior:
   worker VMs when required, and runs Ansible using this server as the K3s
   control-plane.
 
-Do not run this script with sudo. It uses sudo internally when needed.
-
 Current design:
   - server/real host = K3s control-plane + Ansible runner
   - worker1 VM + worker2 VM = K3s workers
   - NFS = external storage, not a Kubernetes node
 USAGE
+}
+
+bootstrap_operator_execution() {
+  if [ "$(id -u)" -eq 0 ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ]; then
+      local operator_user operator_group operator_home
+
+      operator_user="$SUDO_USER"
+      operator_group="$(id -gn "$operator_user")"
+      operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
+
+      [ -n "$operator_home" ] || fatal "could not determine home directory for $operator_user"
+
+      log "setup.sh was started with sudo"
+      log "repairing repo ownership: $SCRIPT_DIR -> $operator_user:$operator_group"
+      chown -R "$operator_user:$operator_group" "$SCRIPT_DIR"
+
+      log "re-running setup.sh as $operator_user"
+      exec sudo -H -u "$operator_user" env \
+        HOME="$operator_home" \
+        USER="$operator_user" \
+        LOGNAME="$operator_user" \
+        PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" \
+        NONINTERACTIVE="$NONINTERACTIVE" \
+        DEPLOY_OTP_RELAY="$DEPLOY_OTP_RELAY" \
+        VALIDATE_OTP_RELAY="$VALIDATE_OTP_RELAY" \
+        bash "$SCRIPT_DIR/setup.sh" "$@"
+    fi
+
+    fatal "setup.sh was run as root directly. Run it with sudo from the operator user, or run it as the operator user."
+  fi
+
+  command -v sudo >/dev/null 2>&1 || fatal "sudo is required. Install sudo or run from a user with sudo access."
+}
+
+ensure_repo_writable() {
+  if [ -w "$SCRIPT_DIR" ]; then
+    return 0
+  fi
+
+  warn "$SCRIPT_DIR is not writable by $(id -un). Attempting to repair ownership with sudo."
+  sudo chown -R "$(id -un):$(id -gn)" "$SCRIPT_DIR"
+
+  if [ ! -w "$SCRIPT_DIR" ]; then
+    fatal "$SCRIPT_DIR is still not writable after ownership repair."
+  fi
+
+  log "repaired repository ownership for $(id -un):$(id -gn)"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -157,7 +165,6 @@ run_as_original_user() {
 
 run_with_sudo_or_root() {
   local cmd=("$@")
-
   sudo "${cmd[@]}"
 }
 
@@ -746,7 +753,7 @@ print_final_status() {
 main() {
   local path
 
-  require_normal_operator_user
+  bootstrap_operator_execution "$@"
   ensure_repo_writable
 
   ensure_base_env
