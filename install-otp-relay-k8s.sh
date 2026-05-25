@@ -3,30 +3,56 @@ set -Eeuo pipefail
 
 # Thin launcher for the modular OTP Relay Kubernetes installer.
 # All site-specific input is loaded from .env through scripts/lib/env.sh.
+#
+# Current architecture:
+#   - This script runs on the server/control-plane.
+#   - Worker VMs are joined separately by Ansible.
+#   - NFS is external and is consumed through Kubernetes PV/PVC.
+#   - frontend/app.jsx is source.
+#   - frontend/app.js is generated during deployment and must exist before image build.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for installer_lib in \
-  common.sh \
-  env.sh \
-  os.sh \
-  github-runner.sh \
-  docker.sh \
-  deploy-mode.sh \
-  k3s.sh \
-  metallb.sh \
-  tls.sh \
-  manifests.sh \
-  observability.sh \
-  images.sh \
-  preflight.sh \
-  repo-sync.sh \
-  build-stage.sh \
-  apply-deploy.sh \
-  summary.sh; do
+INSTALLER_LIBS=(
+  common.sh
+  env.sh
+  os.sh
+  github-runner.sh
+  docker.sh
+  deploy-mode.sh
+  k3s.sh
+  metallb.sh
+  tls.sh
+  manifests.sh
+  observability.sh
+  images.sh
+  preflight.sh
+  repo-sync.sh
+  build-stage.sh
+  apply-deploy.sh
+  summary.sh
+)
+
+for installer_lib in "${INSTALLER_LIBS[@]}"; do
+  installer_lib_path="$SCRIPT_DIR/scripts/lib/$installer_lib"
+
+  if [ ! -f "$installer_lib_path" ]; then
+    printf '[otp-relay-k8s] ERROR: missing installer library: %s\n' "$installer_lib_path" >&2
+    exit 1
+  fi
+
   # shellcheck disable=SC1090
-  . "$SCRIPT_DIR/scripts/lib/$installer_lib"
+  . "$installer_lib_path"
 done
+
+on_error() {
+  local exit_code="$?"
+  local line_no="${1:-unknown}"
+  printf '[otp-relay-k8s] ERROR: installer failed at line %s with exit code %s\n' "$line_no" "$exit_code" >&2
+  exit "$exit_code"
+}
+
+trap 'on_error "$LINENO"' ERR
 
 run_phase() {
   local phase_name="$1"
@@ -39,11 +65,13 @@ run_phase() {
 
 main() {
   need_root
+
   export DEBIAN_FRONTEND=noninteractive
   export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
   log "starting OTP Relay Kubernetes installer"
   log "script directory: $SCRIPT_DIR"
+  log "control-plane mode: server/localhost"
   log "noninteractive mode: ${NONINTERACTIVE:-0}"
   log "env file: ${ENV_FILE:-$SCRIPT_DIR/.env}"
 
@@ -63,6 +91,7 @@ main() {
     full|app|monitor|manifests|none) ;;
     *) fatal "unsupported DEPLOY_MODE=$DEPLOY_MODE. Use full, app, monitor, manifests, or none." ;;
   esac
+
   log "deployment mode: $DEPLOY_MODE"
 
   if [ "$DEPLOY_MODE" = "none" ]; then
