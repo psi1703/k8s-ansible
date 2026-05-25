@@ -3,6 +3,10 @@ kind: IngressRoute
 metadata:
   name: grafana-https
   namespace: observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/part-of: otp-relay
 spec:
   entryPoints:
     - websecure
@@ -12,5 +16,9 @@ spec:
       services:
         - name: kube-prometheus-stack-grafana
           port: 80
-  # No per-IngressRoute TLS: uses Traefik websecure TLS/default certificate behavior.
-  # In SCH production this uses the cluster-wide wildcard cert from Traefik's default tlsStore.
+  # This IngressRoute assumes kube-prometheus-stack is already installed and
+  # exposes service observability/kube-prometheus-stack-grafana on port 80.
+  #
+  # No per-IngressRoute TLS is configured here. In SCH production this should
+  # use Traefik websecure TLS/default certificate behavior, normally through
+  # the cluster-wide wildcard certificate from Traefik's default tlsStore.
