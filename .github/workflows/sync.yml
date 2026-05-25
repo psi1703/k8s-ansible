@@ -48,6 +48,7 @@ jobs:
           echo "Commit: ${GITHUB_SHA}"
 
           if ! command -v rsync >/dev/null 2>&1; then
+            echo "rsync is missing; installing it now."
             sudo apt-get update
             sudo apt-get install -y rsync
           fi
@@ -57,12 +58,14 @@ jobs:
 
           # Sync GitHub's checked-out workspace into the active server repo.
           #
-          # Runtime/generated files are preserved:
+          # Server-local operator/generated files are preserved:
+          # - .env is the single source of operator-provided configuration.
           # - inventory.generated.ini is produced by the VM provisioner.
           # - automation/libvirt/build contains generated cloud-init seed files.
           #
           # No provisioning, Ansible playbooks, or deployment is run here.
           rsync -a --delete \
+            --exclude '.env' \
             --exclude 'automation/ansible/inventory.generated.ini' \
             --exclude 'automation/libvirt/build/' \
             "${GITHUB_WORKSPACE}/" \
@@ -76,6 +79,12 @@ jobs:
           cd "${DEPLOY_REPO_DIR}"
           git status --short || true
           git log --oneline -1 || true
+
+          echo
+          echo "Preserved server-local files:"
+          [ -f "${DEPLOY_REPO_DIR}/.env" ] && echo "- .env exists" || echo "- .env not present yet"
+          [ -f "${DEPLOY_REPO_DIR}/automation/ansible/inventory.generated.ini" ] && echo "- inventory.generated.ini exists" || echo "- inventory.generated.ini not present yet"
+          [ -d "${DEPLOY_REPO_DIR}/automation/libvirt/build" ] && echo "- automation/libvirt/build exists" || echo "- automation/libvirt/build not present yet"
 
           echo
           echo "Provisioner files:"
