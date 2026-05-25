@@ -29,6 +29,7 @@ apply_runtime_configmap() {
 
 render_manifests() {
   log "rendering runtime values into staged repository manifests"
+
   MANIFEST_DIR="$MANIFEST_DIR" \
   NAMESPACE="$NAMESPACE" \
   APP_IMAGE="$APP_IMAGE" \
@@ -101,10 +102,13 @@ def set_data_value(text: str, key: str, value: str) -> str:
     escaped = value.replace('"', '\\"')
     line = f'  {key}: "{escaped}"'
     pattern = rf"^  {re.escape(key)}: .*?$"
+
     if re.search(pattern, text, flags=re.MULTILINE):
         return re.sub(pattern, line, text, flags=re.MULTILINE)
+
     if not text.endswith("\n"):
         text += "\n"
+
     return text + line + "\n"
 
 
@@ -138,6 +142,7 @@ def set_recreate_strategy(text: str) -> str:
 def set_first_image(text: str, image: str) -> str:
     return re.sub(r"(\n\s*image: ).*", rf"\g<1>{image}", text, count=1)
 
+
 def set_volume_mount_path(text: str, mount_path: str) -> str:
     return re.sub(r"(\n\s*mountPath: ).*", rf"\g<1>{mount_path}", text)
 
@@ -148,14 +153,18 @@ def remove_nodesel(text: str) -> str:
 
 def add_nodesel(text: str, key: str, value: str) -> str:
     text = remove_nodesel(text)
+
     if not key:
         return text
+
     block = f"      nodeSelector:\n        {key}: \"{value}\"\n"
     return text.replace("    spec:\n", "    spec:\n" + block, 1)
+
 
 # Namespace
 if (manifest_dir / "namespace.yaml").exists():
     write("namespace.yaml", f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {namespace}\n")
+
 
 # ConfigMap
 if (manifest_dir / "configmap.yaml").exists():
@@ -182,6 +191,7 @@ if (manifest_dir / "configmap.yaml").exists():
         text = set_data_value(text, key, value)
     write("configmap.yaml", text)
 
+
 # App PVC and optional static NFS PV. This renderer does not delete or migrate storage.
 if (manifest_dir / "pvc.yaml").exists():
     text = replace_namespace(read("pvc.yaml"))
@@ -199,7 +209,9 @@ if (manifest_dir / "pvc.yaml").exists():
     storage_class = os.environ.get("PVC_STORAGE_CLASS", "")
     if storage_class:
         text = text.replace("  accessModes:\n", f"  storageClassName: {storage_class}\n  accessModes:\n", 1)
+
     write("pvc.yaml", text)
+
 
 if (manifest_dir / "pv-nfs.yaml").exists():
     if os.environ.get("NFS_ENABLED") == "1":
@@ -207,16 +219,19 @@ if (manifest_dir / "pv-nfs.yaml").exists():
         text = re.sub(r"^  name: .*$", f"  name: {os.environ['NFS_PV_NAME']}", text, flags=re.MULTILINE)
         text = re.sub(r"(\n    storage: ).*", rf"\g<1>{os.environ['PVC_SIZE']}", text)
         text = re.sub(r"(\n  storageClassName: ).*", rf"\g<1>{os.environ['NFS_STORAGE_CLASS']}", text)
+
         opts = [x.strip() for x in os.environ.get("NFS_MOUNT_OPTIONS", "").split(",") if x.strip()]
         mount_block = ""
         if opts:
             mount_block = "  mountOptions:\n" + "".join(f"    - {opt}\n" for opt in opts)
+
         text = re.sub(r"\n  mountOptions:\n(?:    - .*\n)+", "\n" + mount_block, text)
         text = re.sub(r"(\n    server: ).*", rf"\g<1>{os.environ['NFS_SERVER']}", text)
         text = re.sub(r"(\n    path: ).*", rf"\g<1>{os.environ['NFS_PATH']}", text)
         write("pv-nfs.yaml", text)
     else:
         (manifest_dir / "pv-nfs.yaml").unlink()
+
 
 # App deployment
 if (manifest_dir / "deployment.yaml").exists():
@@ -225,10 +240,15 @@ if (manifest_dir / "deployment.yaml").exists():
     text = set_app_strategy(text)
     text = set_first_image(text, os.environ["APP_IMAGE"])
     text = set_volume_mount_path(text, os.environ["OTP_RELAY_DATA_DIR"])
-    text = add_nodesel(text, os.environ.get("APP_NODE_SELECTOR_KEY", ""), os.environ.get("APP_NODE_SELECTOR_VALUE", ""))
+    text = add_nodesel(
+        text,
+        os.environ.get("APP_NODE_SELECTOR_KEY", ""),
+        os.environ.get("APP_NODE_SELECTOR_VALUE", ""),
+    )
 
     text = re.sub(r"\n            - name: REDIS_URL\n              value: .*", "", text)
     text = re.sub(r"\n            - name: REDIS_REQUIRED\n              value: .*", "", text)
+
     if os.environ.get("REDIS_ENABLED") == "1":
         redis_env = (
             f"            - name: REDIS_URL\n"
@@ -237,7 +257,9 @@ if (manifest_dir / "deployment.yaml").exists():
             f"              value: \"{os.environ['REDIS_REQUIRED']}\"\n"
         )
         text = text.replace("            - name: SMS_SECRET_TOKEN\n", redis_env + "            - name: SMS_SECRET_TOKEN\n", 1)
+
     write("deployment.yaml", text)
+
 
 # Monitor deployment: monitor remains required and single-replica.
 if (manifest_dir / "deployment-monitor.yaml").exists():
@@ -246,8 +268,13 @@ if (manifest_dir / "deployment-monitor.yaml").exists():
     text = set_recreate_strategy(text)
     text = set_first_image(text, os.environ["MONITOR_IMAGE"])
     text = set_volume_mount_path(text, os.environ["OTP_RELAY_DATA_DIR"])
-    text = add_nodesel(text, os.environ.get("MONITOR_NODE_SELECTOR_KEY", ""), os.environ.get("MONITOR_NODE_SELECTOR_VALUE", ""))
+    text = add_nodesel(
+        text,
+        os.environ.get("MONITOR_NODE_SELECTOR_KEY", ""),
+        os.environ.get("MONITOR_NODE_SELECTOR_VALUE", ""),
+    )
     write("deployment-monitor.yaml", text)
+
 
 # Monitor metrics Service. This is internal-only and is selected by
 # k8s/observability/servicemonitor-otp-monitor.yaml.
@@ -255,17 +282,30 @@ if (manifest_dir / "monitor-service.yaml").exists():
     text = replace_namespace(read("monitor-service.yaml"))
     write("monitor-service.yaml", text)
 
+
 # Service
 if (manifest_dir / "service.yaml").exists():
     text = replace_namespace(read("service.yaml"))
     text = re.sub(r"^  type: .*$", f"  type: {os.environ['SERVICE_TYPE']}", text, flags=re.MULTILINE)
     text = re.sub(r"\n  loadBalancerIP: .*", "", text)
     text = re.sub(r"\n      nodePort: .*", "", text)
+
     if os.environ["SERVICE_TYPE"] == "LoadBalancer" and os.environ.get("LOADBALANCER_IP"):
-        text = text.replace(f"  type: {os.environ['SERVICE_TYPE']}\n", f"  type: {os.environ['SERVICE_TYPE']}\n  loadBalancerIP: {os.environ['LOADBALANCER_IP']}\n", 1)
+        text = text.replace(
+            f"  type: {os.environ['SERVICE_TYPE']}\n",
+            f"  type: {os.environ['SERVICE_TYPE']}\n  loadBalancerIP: {os.environ['LOADBALANCER_IP']}\n",
+            1,
+        )
+
     if os.environ["SERVICE_TYPE"] == "NodePort":
-        text = text.replace("      targetPort: 8000\n", f"      targetPort: 8000\n      nodePort: {os.environ['SERVICE_NODE_PORT']}\n", 1)
+        text = text.replace(
+            "      targetPort: 8000\n",
+            f"      targetPort: 8000\n      nodePort: {os.environ['SERVICE_NODE_PORT']}\n",
+            1,
+        )
+
     write("service.yaml", text)
+
 
 # Redis HA manifests.
 redis_manifests = [
@@ -281,20 +321,33 @@ redis_manifests = [
     "redis-sentinel-pdb.yaml",
     "redis-haproxy-pdb.yaml",
 ]
+
 for name in redis_manifests:
     path = manifest_dir / name
     if path.exists():
         text = replace_namespace(read(name))
+
         if name == "redis-statefulset.yaml":
-            text = add_nodesel(text, os.environ.get("REDIS_NODE_SELECTOR_KEY", ""), os.environ.get("REDIS_NODE_SELECTOR_VALUE", ""))
+            text = add_nodesel(
+                text,
+                os.environ.get("REDIS_NODE_SELECTOR_KEY", ""),
+                os.environ.get("REDIS_NODE_SELECTOR_VALUE", ""),
+            )
             text = re.sub(r"\n        storageClassName: .*", "", text)
             redis_storage_class = os.environ.get("REDIS_STORAGE_CLASS", "")
             if redis_storage_class:
                 text = text.replace("        accessModes:\n", f"        storageClassName: {redis_storage_class}\n        accessModes:\n", 1)
             text = re.sub(r"(\n            storage: ).*", rf"\g<1>{os.environ['REDIS_SIZE']}", text)
+
         elif name in ["redis-sentinel-deployment.yaml", "redis-haproxy-deployment.yaml"]:
-            text = add_nodesel(text, os.environ.get("REDIS_NODE_SELECTOR_KEY", ""), os.environ.get("REDIS_NODE_SELECTOR_VALUE", ""))
+            text = add_nodesel(
+                text,
+                os.environ.get("REDIS_NODE_SELECTOR_KEY", ""),
+                os.environ.get("REDIS_NODE_SELECTOR_VALUE", ""),
+            )
+
         write(name, text)
+
 
 # Ingress
 if (manifest_dir / "ingress.yaml").exists():
@@ -312,10 +365,9 @@ if (manifest_dir / "ingress.yaml").exists():
             raise SystemExit("TLS_HOST is required when INGRESS_ENABLED=1")
 
         # Render ingress from scratch instead of patching a template.
-        # This avoids invalid YAML from partially-filled template fields such as:
-        #   - host:
-        #   - hosts:
-        #       -
+        # Important: Ingress backend port must reference the Kubernetes Service port.
+        # The otp-relay Service exposes port 80 and forwards targetPort 8000.
+        # Therefore the Ingress backend must use number: 80, not 8000.
         text = (
             "apiVersion: networking.k8s.io/v1\n"
             "kind: Ingress\n"
@@ -334,7 +386,7 @@ if (manifest_dir / "ingress.yaml").exists():
             "              service:\n"
             "                name: otp-relay\n"
             "                port:\n"
-            "                  number: 8000\n"
+            "                  number: 80\n"
         )
 
         if tls_enabled:
@@ -351,6 +403,7 @@ PY_RENDER_MANIFESTS
 
 apply_if_exists() {
   local file="$1"
+
   if [ -f "$file" ]; then
     k3s kubectl apply -f "$file"
   fi
