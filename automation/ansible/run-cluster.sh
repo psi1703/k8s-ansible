@@ -155,10 +155,16 @@ ensure_ansible_installed() {
   if ! command -v ansible >/dev/null 2>&1; then
     log "Installing Ansible on server/control-plane; this may take a few minutes"
     sudo apt-get update
-    sudo apt-get install -y ansible
+    sudo apt-get install -y ansible iptables dnsmasq
     ok "Ansible installed"
   else
     log "Ansible already installed: $(command -v ansible)"
+
+    if ! command -v iptables >/dev/null 2>&1 || ! command -v dnsmasq >/dev/null 2>&1; then
+      log "Installing missing server networking helpers: iptables/dnsmasq"
+      sudo apt-get update
+      sudo apt-get install -y iptables dnsmasq
+    fi
   fi
 }
 
@@ -260,7 +266,13 @@ ensure_vm_bridge_forwarding() {
   ensure_ipv4_forwarding
 
   if ! command -v iptables >/dev/null 2>&1; then
-    fatal "iptables is required to allow VM bridge forwarding"
+    log "iptables is missing; installing it for worker VM bridge forwarding/NAT"
+    sudo apt-get update
+    sudo apt-get install -y iptables
+  fi
+
+  if ! command -v iptables >/dev/null 2>&1; then
+    fatal "iptables is still not available after installation; cannot configure VM bridge forwarding"
   fi
 
   sudo iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null || \
