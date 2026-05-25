@@ -1,4 +1,8 @@
 ---
+- name: Show common baseline target
+  ansible.builtin.debug:
+    msg: "Preparing common Debian/Ubuntu baseline on {{ inventory_hostname }}"
+
 - name: Install common headless packages
   ansible.builtin.apt:
     name:
@@ -20,14 +24,23 @@
     update_cache: true
 
 - name: Disable swap for Kubernetes nodes when present
-  ansible.builtin.command: swapoff -a
+  ansible.builtin.command:
+    cmd: swapoff -a
   changed_when: false
   failed_when: false
-  when: inventory_hostname in groups['k3s_cluster']
+  when:
+    - groups['k3s_cluster'] is defined
+    - inventory_hostname in groups['k3s_cluster']
 
 - name: Remove active swap entries from fstab for Kubernetes nodes
   ansible.builtin.replace:
     path: /etc/fstab
     regexp: '^(?!#)(.*\sswap\s.*)$'
     replace: '# \1'
-  when: inventory_hostname in groups['k3s_cluster']
+  when:
+    - groups['k3s_cluster'] is defined
+    - inventory_hostname in groups['k3s_cluster']
+
+- name: Common baseline completed
+  ansible.builtin.debug:
+    msg: "Common baseline completed on {{ inventory_hostname }}"
