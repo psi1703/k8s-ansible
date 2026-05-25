@@ -162,6 +162,7 @@ install_packages() {
     bridge-utils \
     cloud-image-utils \
     genisoimage \
+    ovmf \
     curl \
     jq \
     openssh-client \
