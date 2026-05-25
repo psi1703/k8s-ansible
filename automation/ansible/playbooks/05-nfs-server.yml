@@ -1,6 +1,6 @@
 ---
 - name: Configure external shared NFS storage VM
-  hosts: nfs_storage
+  hosts: nfs_server
   become: true
   roles:
     - nfs_server
