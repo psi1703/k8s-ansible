@@ -650,11 +650,18 @@ read_k3s_node_token() {
     return 0
   fi
 
-  if [[ -f /var/lib/rancher/k3s/server/node-token ]]; then
+  if sudo test -f /var/lib/rancher/k3s/server/node-token; then
     token="$(sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || true)"
+  elif sudo test -f /var/lib/rancher/k3s/server/token; then
+    token="$(sudo cat /var/lib/rancher/k3s/server/token 2>/dev/null || true)"
   fi
 
-  [[ -n "$token" ]] || fatal "K3s node token was not found at /var/lib/rancher/k3s/server/node-token. Control-plane install did not complete correctly."
+  if [[ -z "$token" ]]; then
+    warn "K3s token file was not found/readable. Diagnostics:"
+    sudo systemctl status k3s --no-pager || true
+    sudo ls -la /var/lib/rancher/k3s/server 2>/dev/null || true
+    fatal "K3s node token was not found/readable. Control-plane install may not have completed correctly."
+  fi
 
   printf '%s\n' "$token"
 }
