@@ -1,24 +1,39 @@
 ---
-- name: Ensure rsync is installed on control-plane
+- name: Define OTP Relay deployment paths
+  ansible.builtin.set_fact:
+    otp_relay_install_dir: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
+    otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
+    otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
+
+- name: Check if control-plane is local
+  ansible.builtin.set_fact:
+    otp_relay_control_plane_is_local: >-
+      {{
+        inventory_hostname in ['localhost', '127.0.0.1']
+        or ansible_connection | default('ssh') == 'local'
+      }}
+
+- name: Ensure rsync is installed on control-plane when remote sync is needed
   ansible.builtin.apt:
     name: rsync
     state: present
     update_cache: true
   become: true
+  when: not otp_relay_control_plane_is_local | bool
 
 - name: Ensure OTP Relay install directory exists on control-plane
   ansible.builtin.file:
-    path: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
+    path: "{{ otp_relay_install_dir }}"
     state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
+    owner: "{{ ansible_user | default(ansible_env.SUDO_USER | default(ansible_env.USER | default('root'))) }}"
+    group: "{{ ansible_user | default(ansible_env.SUDO_USER | default(ansible_env.USER | default('root'))) }}"
     mode: "0755"
   become: true
 
-- name: Sync local k8s-ansible repo to control-plane
+- name: Sync local k8s-ansible repo to remote control-plane
   ansible.posix.synchronize:
     src: /opt/k8s-ansible/
-    dest: "{{ otp_install_dir | default('/opt/k8s-ansible') }}/"
+    dest: "{{ otp_relay_install_dir }}/"
     archive: true
     delete: true
     rsync_opts:
@@ -28,33 +43,37 @@
       - "--exclude=automation/libvirt/build/"
       - "--exclude=automation/ansible/inventory.generated.ini"
   delegate_to: localhost
+  when: not otp_relay_control_plane_is_local | bool
+
+- name: Skip repo sync for localhost control-plane
+  ansible.builtin.debug:
+    msg: "Control-plane is localhost; using existing repository at {{ otp_relay_install_dir }} without rsync."
+  when: otp_relay_control_plane_is_local | bool
 
 - name: Ensure required .env exists on control-plane
   ansible.builtin.stat:
-    path: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
+    path: "{{ otp_relay_env_file }}"
   register: otp_env_file_stat
 
 - name: Stop when .env is missing
   ansible.builtin.fail:
     msg: >-
-      Missing {{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}.
+      Missing {{ otp_relay_env_file }}.
       Create the installer .env first. It is the single source for runtime values.
   when: not otp_env_file_stat.stat.exists
 
-- name: Ensure synced installer scripts are executable
+- name: Ensure installer scripts are executable
   ansible.builtin.shell: |
     set -eu
-    chmod +x "{{ otp_install_dir | default('/opt/k8s-ansible') }}/install-otp-relay-k8s.sh"
-    find "{{ otp_install_dir | default('/opt/k8s-ansible') }}/scripts/lib" -type f -name '*.sh' -exec chmod +x {} \;
+
+    chmod +x "{{ otp_relay_install_dir }}/install-otp-relay-k8s.sh"
+
+    if [ -d "{{ otp_relay_install_dir }}/scripts/lib" ]; then
+      find "{{ otp_relay_install_dir }}/scripts/lib" -type f -name '*.sh' -exec chmod +x {} \;
+    fi
   args:
     executable: /bin/bash
   become: true
-
-- name: Define OTP Relay installer paths
-  ansible.builtin.set_fact:
-    otp_relay_install_dir: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
-    otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
-    otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
 
 - name: Clear previous OTP Relay installer log
   ansible.builtin.file:
@@ -62,20 +81,31 @@
     state: absent
   become: true
 
-- name: Start OTP Relay installer in background
+- name: Start OTP Relay installer asynchronously
   ansible.builtin.shell: |
+    set -euo pipefail
+
     LOG="{{ otp_relay_installer_log }}"
-    echo "[INFO] Starting OTP Relay installer on $(hostname)" > "$LOG"
-    echo "[INFO] Started at: $(date -Is)" >> "$LOG"
-    echo "[INFO] Install dir: {{ otp_relay_install_dir }}" >> "$LOG"
-    echo "[INFO] Env file: {{ otp_relay_env_file }}" >> "$LOG"
-    echo >> "$LOG"
-    cd "{{ otp_relay_install_dir }}"
-    export ENV_FILE="{{ otp_relay_env_file }}"
-    export NONINTERACTIVE=1
-    export SKIP_REPO_SYNC=1
-    export GIT_CLEAN=0
-    bash install-otp-relay-k8s.sh >> "$LOG" 2>&1
+    INSTALL_DIR="{{ otp_relay_install_dir }}"
+    ENV_SOURCE="{{ otp_relay_env_file }}"
+
+    {
+      echo "[INFO] Starting OTP Relay installer on $(hostname)"
+      echo "[INFO] Started at: $(date -Is)"
+      echo "[INFO] Install dir: ${INSTALL_DIR}"
+      echo "[INFO] Env file: ${ENV_SOURCE}"
+      echo "[INFO] Control-plane mode: localhost/server"
+      echo "[INFO] Long-running steps may include apt-get, Docker build, K3s checks, image import, kubectl apply, and rollout waits."
+      echo
+    } > "$LOG"
+
+    cd "$INSTALL_DIR"
+
+    ENV_FILE="$ENV_SOURCE" \
+    NONINTERACTIVE=1 \
+    SKIP_REPO_SYNC=1 \
+    GIT_CLEAN=0 \
+    stdbuf -oL -eL bash install-otp-relay-k8s.sh >> "$LOG" 2>&1
   args:
     executable: /bin/bash
   become: true
@@ -90,18 +120,20 @@
       - "Live log on control-plane:"
       - "sudo tail -f {{ otp_relay_installer_log }}"
 
-- name: Wait briefly then snapshot installer log
+- name: Wait briefly before first installer log snapshot
   ansible.builtin.pause:
     seconds: 15
 
 - name: Print recent installer log output
   ansible.builtin.shell: |
     set -eu
+
     echo "===== installer job id: {{ otp_relay_installer_job.ansible_job_id }} ====="
     echo
     echo "===== recent installer log ====="
+
     if [ -f "{{ otp_relay_installer_log }}" ]; then
-      tail -40 "{{ otp_relay_installer_log }}"
+      tail -60 "{{ otp_relay_installer_log }}"
     else
       echo "installer log not created yet: {{ otp_relay_installer_log }}"
     fi
@@ -123,8 +155,13 @@
 - name: Show final OTP Relay installer log
   ansible.builtin.shell: |
     set -eu
+
     echo "===== final installer log tail ====="
-    tail -160 "{{ otp_relay_installer_log }}" || true
+    if [ -f "{{ otp_relay_installer_log }}" ]; then
+      tail -180 "{{ otp_relay_installer_log }}"
+    else
+      echo "installer log missing: {{ otp_relay_installer_log }}"
+    fi
   args:
     executable: /bin/bash
   become: true
