@@ -64,6 +64,13 @@
       -- test -s /app/frontend/app.js
   changed_when: false
 
+- name: Verify frontend source app.jsx is not present in running pod
+  ansible.builtin.command:
+    cmd: >
+      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
+      -- sh -c 'test ! -e /app/frontend/app.jsx'
+  changed_when: false
+
 - name: Verify root-level stale app.js is not present in running pod
   ansible.builtin.command:
     cmd: >
@@ -76,6 +83,13 @@
     cmd: >
       k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
       -- sh -c 'grep -q "script src=\"app.js\"" /app/frontend/index.html'
+  changed_when: false
+
+- name: Verify frontend bundle does not contain RTA wizard contamination
+  ansible.builtin.command:
+    cmd: >
+      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
+      -- sh -c "! grep -E 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' /app/frontend/app.js"
   changed_when: false
 
 - name: Verify frontend app bundle is not empty
