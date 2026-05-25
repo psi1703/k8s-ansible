@@ -16,7 +16,26 @@ OBSERVABILITY_STACK_REPO_URL="${OBSERVABILITY_STACK_REPO_URL:-https://prometheus
 OBSERVABILITY_STACK_CHART="${OBSERVABILITY_STACK_CHART:-kube-prometheus-stack}"
 OBSERVABILITY_STACK_CHART_VERSION="${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}"
 OBSERVABILITY_HELM_TIMEOUT="${OBSERVABILITY_HELM_TIMEOUT:-15m}"
+HELM_KUBECONFIG="${HELM_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 GRAFANA_HOST="${GRAFANA_HOST:-grafana.init-db.lan}"
+
+ensure_helm_kubeconfig() {
+  if [ -f "$HELM_KUBECONFIG" ]; then
+    export KUBECONFIG="$HELM_KUBECONFIG"
+    return 0
+  fi
+
+  if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+    return 0
+  fi
+
+  fatal "Helm kubeconfig not found. Expected HELM_KUBECONFIG=$HELM_KUBECONFIG or a valid KUBECONFIG."
+}
+
+helm_k3s() {
+  ensure_helm_kubeconfig
+  helm "$@"
+}
 
 _observability_source_dir() {
   printf '%s\n' "${OBSERVABILITY_DIR:-}"
@@ -115,14 +134,15 @@ install_kube_prometheus_stack() {
   ensure_helm_available
 
   log "adding/updating Helm repo: $OBSERVABILITY_STACK_REPO_NAME -> $OBSERVABILITY_STACK_REPO_URL"
-  helm repo add "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL" >/dev/null 2>&1 || true
-  helm repo update
+  ensure_helm_kubeconfig
+  helm_k3s repo add "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL" >/dev/null 2>&1 || true
+  helm_k3s repo update
 
   log "installing/upgrading kube-prometheus-stack release $OBSERVABILITY_STACK_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
   log "Helm chart: $OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART version $OBSERVABILITY_STACK_CHART_VERSION"
   log "Values file: $values_file"
 
-  helm upgrade --install "$OBSERVABILITY_STACK_RELEASE" \
+  helm_k3s upgrade --install "$OBSERVABILITY_STACK_RELEASE" \
     "$OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
     --create-namespace \
