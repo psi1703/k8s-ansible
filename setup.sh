@@ -2,7 +2,10 @@
 set -Eeuo pipefail
 
 # Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
-# Normal use: ./setup.sh
+# Normal use: bash setup.sh
+#
+# Do not run this file with sudo. It must run as the normal operator user.
+# The script uses sudo internally only for privileged system operations.
 #
 # Current design:
 #   - This server is the K3s control-plane and Ansible runner.
@@ -33,10 +36,49 @@ log() { printf '[setup] %s\n' "$*"; }
 warn() { printf '[setup] WARNING: %s\n' "$*" >&2; }
 fatal() { printf '[setup] ERROR: %s\n' "$*" >&2; exit 1; }
 
+require_normal_operator_user() {
+  if [ "$(id -u)" -eq 0 ]; then
+    cat >&2 <<EOF
+
+[setup] ERROR: Do not run setup.sh with sudo.
+
+Run it as your normal operator user:
+
+  cd /opt/k8s-ansible
+  bash setup.sh
+
+The script will call sudo internally only when privileged system changes are required.
+
+If /opt/k8s-ansible is currently owned by root, fix it once with:
+
+  sudo chown -R "\$USER:\$USER" /opt/k8s-ansible
+
+EOF
+    exit 1
+  fi
+
+  command -v sudo >/dev/null 2>&1 || fatal "sudo is required. Install sudo or run from a user with sudo access."
+}
+
+ensure_repo_writable() {
+  if [ -w "$SCRIPT_DIR" ]; then
+    return 0
+  fi
+
+  warn "$SCRIPT_DIR is not writable by $(id -un). Attempting to repair ownership with sudo."
+  sudo chown -R "$(id -un):$(id -gn)" "$SCRIPT_DIR"
+
+  if [ ! -w "$SCRIPT_DIR" ]; then
+    fatal "$SCRIPT_DIR is still not writable after ownership repair."
+  fi
+
+  log "repaired repository ownership for $(id -un):$(id -gn)"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
-  ./setup.sh
+  bash setup.sh
 
 Optional overrides:
   --edit-env           Open the saved .env change menu before continuing.
@@ -48,9 +90,11 @@ Optional overrides:
   -h, --help           Show this help.
 
 Default behavior:
-  ./setup.sh creates or reuses .env, validates real runtime state, provisions
+  bash setup.sh creates or reuses .env, validates real runtime state, provisions
   worker VMs when required, and runs Ansible using this server as the K3s
   control-plane.
+
+Do not run this script with sudo. It uses sudo internally when needed.
 
 Current design:
   - server/real host = K3s control-plane + Ansible runner
@@ -93,8 +137,7 @@ source_installer_env_libs() {
 chown_env_to_original_user() {
   local file="${ENV_FILE:-$SCRIPT_DIR/.env}"
 
-  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ] && [ -f "$file" ]; then
-    chown "$SUDO_USER:$SUDO_USER" "$file" 2>/dev/null || chown "$SUDO_USER" "$file" 2>/dev/null || true
+  if [ -f "$file" ]; then
     chmod 0600 "$file" || true
   fi
 }
@@ -109,28 +152,13 @@ source_env_if_present() {
 }
 
 run_as_original_user() {
-  local cmd=("$@")
-
-  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ]; then
-    sudo -H -u "$SUDO_USER" env \
-      HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)" \
-      USER="$SUDO_USER" \
-      LOGNAME="$SUDO_USER" \
-      PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" \
-      "${cmd[@]}"
-  else
-    "${cmd[@]}"
-  fi
+  "$@"
 }
 
 run_with_sudo_or_root() {
   local cmd=("$@")
 
-  if [ "$(id -u)" -eq 0 ]; then
-    "${cmd[@]}"
-  else
-    sudo "${cmd[@]}"
-  fi
+  sudo "${cmd[@]}"
 }
 
 ensure_base_env() {
@@ -408,10 +436,11 @@ ssh_ready_for_inventory_host() {
   local host="$1"
   local ip="$2"
   local user="${VM_USER:-otp-relay}"
-  local real_user="${SUDO_USER:-$(id -un)}"
+  local real_user
   local real_home
   local key
 
+  real_user="$(id -un)"
   real_home="$(getent passwd "$real_user" | cut -d: -f6)"
   key="${SSH_KEY:-${real_home}/.ssh/otp-relay-cluster}"
 
@@ -473,7 +502,7 @@ EOF_INVENTORY_HOSTS
 
 local_kubectl() {
   if command -v k3s >/dev/null 2>&1; then
-    k3s kubectl "$@"
+    sudo k3s kubectl "$@"
   elif command -v kubectl >/dev/null 2>&1; then
     kubectl "$@"
   else
@@ -716,6 +745,9 @@ print_final_status() {
 
 main() {
   local path
+
+  require_normal_operator_user
+  ensure_repo_writable
 
   ensure_base_env
   print_detected_state
