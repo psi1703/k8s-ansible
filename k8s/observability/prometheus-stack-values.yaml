@@ -1,5 +1,16 @@
 # Helm values for kube-prometheus-stack
 #
+# This file is NOT a raw Kubernetes manifest.
+# Install it with Helm, for example:
+#
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     --namespace observability \
+#     --create-namespace \
+#     --version 85.0.1 \
+#     -f k8s/observability/prometheus-stack-values.yaml
+#
 # Installs:
 # - Prometheus
 # - Alertmanager
@@ -11,9 +22,9 @@
 # Chart: prometheus-community/kube-prometheus-stack
 # Version used with SCH setup: 85.0.1
 #
-# Target cluster:
-# - observability/role=ui   -> otp-worker-1
-# - observability/role=data -> otp-worker-2
+# Target node placement:
+# - observability/role=ui   -> worker intended for Grafana/Alertmanager
+# - observability/role=data -> worker intended for Prometheus data
 
 prometheus:
   prometheusSpec:
@@ -35,7 +46,8 @@ prometheus:
       volumeClaimTemplate:
         spec:
           storageClassName: local-path
-          accessModes: ["ReadWriteOnce"]
+          accessModes:
+            - ReadWriteOnce
           resources:
             requests:
               storage: 10Gi
@@ -67,6 +79,10 @@ grafana:
   ingress:
     enabled: false
 
+  # Dashboard is exposed by k8s/observability/grafana-ingressroute.yaml
+  # after Grafana exists. The installer must not treat this values file as
+  # enough to create Grafana by itself.
+
   resources:
     requests:
       memory: 256Mi
@@ -92,8 +108,23 @@ grafana:
   persistence:
     enabled: true
     storageClassName: local-path
-    accessModes: ["ReadWriteOnce"]
+    accessModes:
+      - ReadWriteOnce
     size: 1Gi
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: observability
+      folder: /tmp/dashboards/OTP Relay
+      provider:
+        allowUiUpdates: true
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
 
 kube-state-metrics:
   resources:
@@ -127,9 +158,12 @@ prometheusOperator:
 # Keeping them enabled causes noisy false ScrapeFailure alerts.
 kubeControllerManager:
   enabled: false
+
 kubeScheduler:
   enabled: false
+
 kubeProxy:
   enabled: false
+
 kubeEtcd:
   enabled: false
