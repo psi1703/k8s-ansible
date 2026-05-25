@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Environment source-of-truth helpers for install-otp-relay-k8s.sh.
 # This file is sourced by the installer; do not execute it directly.
+#
+# Current architecture:
+#   - This server/real host is the K3s control-plane and Ansible runner.
+#   - The VM provisioner creates only worker1 and worker2.
+#   - NFS is external and is not joined to Kubernetes.
+#   - frontend/app.jsx is source; frontend/app.js is generated during deployment.
 
 ENV_FILE_LOADED=0
 ENV_FILE_CREATED=0
@@ -91,11 +97,17 @@ _write_env_file() {
   cat > "$tmp" <<EOF_ENV
 # OTP Relay Kubernetes runtime configuration.
 # This file is the single input source for the installer, rendered Kubernetes
-# manifests, Ansible deployment handoff, and monitor/app runtime settings.
+# manifests, Ansible deployment handoff, monitor/app runtime settings, and
+# worker VM provisioning settings.
+#
+# Current architecture:
+#   - This server/real host is the K3s control-plane and Ansible runner.
+#   - The VM provisioner creates only worker1 and worker2.
+#   - NFS is external and is not joined to Kubernetes.
+#
 # Keep secrets in this file only. Do not commit populated .env files.
 
 # Internal repository / install location.
-# These are written for transparency, but they are not first-run prompts.
 REPO_URL=$(_env_quote "${REPO_URL:-}")
 REPO_REF=$(_env_quote "${REPO_REF:-main}")
 INSTALL_DIR=$(_env_quote "${INSTALL_DIR:-${SCRIPT_DIR}}")
@@ -105,20 +117,22 @@ NAMESPACE=$(_env_quote "${NAMESPACE:-otp-relay}")
 APP_IMAGE=$(_env_quote "${APP_IMAGE:-otp-relay:latest}")
 MONITOR_IMAGE=$(_env_quote "${MONITOR_IMAGE:-otp-monitor:latest}")
 DEPLOY_MODE=$(_env_quote "${DEPLOY_MODE:-full}")
+
+# Service / Ingress
 SERVICE_TYPE=$(_env_quote "${SERVICE_TYPE:-ClusterIP}")
 SERVICE_NODE_PORT=$(_env_quote "${SERVICE_NODE_PORT:-30080}")
 LOADBALANCER_IP=$(_env_quote "${LOADBALANCER_IP:-}")
 INGRESS_ENABLED=$(_env_quote "${INGRESS_ENABLED:-1}")
 TLS_ENABLED=$(_env_quote "${TLS_ENABLED:-0}")
-TLS_HOST=$(_env_quote "${TLS_HOST:-}")
+TLS_HOST=$(_env_quote "${TLS_HOST:-otp-relay.local}")
 TLS_SECRET_NAME=$(_env_quote "${TLS_SECRET_NAME:-otp-relay-tls}")
 TLS_SELF_SIGNED=$(_env_quote "${TLS_SELF_SIGNED:-1}")
 PORTAL_URL=$(_env_quote "${PORTAL_URL:-}")
 
 # Storage
-PVC_STORAGE_CLASS=$(_env_quote "${PVC_STORAGE_CLASS:-}")
+PVC_STORAGE_CLASS=$(_env_quote "${PVC_STORAGE_CLASS:-otp-relay-nfs}")
 PVC_SIZE=$(_env_quote "${PVC_SIZE:-1Gi}")
-NFS_ENABLED=$(_env_quote "${NFS_ENABLED:-0}")
+NFS_ENABLED=$(_env_quote "${NFS_ENABLED:-1}")
 NFS_SERVER=$(_env_quote "${NFS_SERVER:-}")
 NFS_PATH=$(_env_quote "${NFS_PATH:-}")
 NFS_STORAGE_CLASS=$(_env_quote "${NFS_STORAGE_CLASS:-otp-relay-nfs}")
@@ -126,13 +140,13 @@ NFS_PV_NAME=$(_env_quote "${NFS_PV_NAME:-otp-relay-data-nfs-pv}")
 NFS_MOUNT_OPTIONS=$(_env_quote "${NFS_MOUNT_OPTIONS:-nfsvers=4.1}")
 
 # Replicas / placement
-REPLICA_COUNT=$(_env_quote "${REPLICA_COUNT:-1}")
-APP_NODE_SELECTOR_KEY=$(_env_quote "${APP_NODE_SELECTOR_KEY:-}")
-APP_NODE_SELECTOR_VALUE=$(_env_quote "${APP_NODE_SELECTOR_VALUE:-}")
-MONITOR_NODE_SELECTOR_KEY=$(_env_quote "${MONITOR_NODE_SELECTOR_KEY:-}")
-MONITOR_NODE_SELECTOR_VALUE=$(_env_quote "${MONITOR_NODE_SELECTOR_VALUE:-}")
-REDIS_NODE_SELECTOR_KEY=$(_env_quote "${REDIS_NODE_SELECTOR_KEY:-}")
-REDIS_NODE_SELECTOR_VALUE=$(_env_quote "${REDIS_NODE_SELECTOR_VALUE:-}")
+REPLICA_COUNT=$(_env_quote "${REPLICA_COUNT:-2}")
+APP_NODE_SELECTOR_KEY=$(_env_quote "${APP_NODE_SELECTOR_KEY:-otp-relay/app-node}")
+APP_NODE_SELECTOR_VALUE=$(_env_quote "${APP_NODE_SELECTOR_VALUE:-true}")
+MONITOR_NODE_SELECTOR_KEY=$(_env_quote "${MONITOR_NODE_SELECTOR_KEY:-otp-relay/monitor-node}")
+MONITOR_NODE_SELECTOR_VALUE=$(_env_quote "${MONITOR_NODE_SELECTOR_VALUE:-true}")
+REDIS_NODE_SELECTOR_KEY=$(_env_quote "${REDIS_NODE_SELECTOR_KEY:-otp-relay/redis-node}")
+REDIS_NODE_SELECTOR_VALUE=$(_env_quote "${REDIS_NODE_SELECTOR_VALUE:-true}")
 
 # MetalLB
 REQUIRE_METALLB=$(_env_quote "${REQUIRE_METALLB:-0}")
@@ -185,6 +199,33 @@ DOCKER_BIN=$(_env_quote "${DOCKER_BIN:-}")
 DISTRIBUTE_IMAGES_TO_NODES=$(_env_quote "${DISTRIBUTE_IMAGES_TO_NODES:-1}")
 IMAGE_DISTRIBUTION_PORT=$(_env_quote "${IMAGE_DISTRIBUTION_PORT:-18080}")
 IMAGE_IMPORTER_IMAGE=$(_env_quote "${IMAGE_IMPORTER_IMAGE:-redis:7-alpine}")
+
+# Worker VM provisioner inputs.
+# No CP_IP exists in this design. This server is the control-plane.
+BRIDGE_NAME=$(_env_quote "${BRIDGE_NAME:-br0}")
+HOST_IFACE=$(_env_quote "${HOST_IFACE:-}")
+HOST_IP_CIDR=$(_env_quote "${HOST_IP_CIDR:-}")
+GATEWAY=$(_env_quote "${GATEWAY:-}")
+DNS=$(_env_quote "${DNS:-}")
+PREFIX=$(_env_quote "${PREFIX:-24}")
+IP_SCAN_PREFIX=$(_env_quote "${IP_SCAN_PREFIX:-}")
+IP_SCAN_START=$(_env_quote "${IP_SCAN_START:-150}")
+IP_SCAN_END=$(_env_quote "${IP_SCAN_END:-199}")
+AUTO_ASSIGN_IPS=$(_env_quote "${AUTO_ASSIGN_IPS:-1}")
+WORKER1_IP=$(_env_quote "${WORKER1_IP:-}")
+WORKER2_IP=$(_env_quote "${WORKER2_IP:-}")
+VM_USER=$(_env_quote "${VM_USER:-otp-relay}")
+VM_PASSWORD=$(_env_quote "${VM_PASSWORD:-otp-relay}")
+VM_RAM_MB=$(_env_quote "${VM_RAM_MB:-3072}")
+VM_VCPUS=$(_env_quote "${VM_VCPUS:-2}")
+VM_DISK_GB=$(_env_quote "${VM_DISK_GB:-20}")
+WORKER1_NAME=$(_env_quote "${WORKER1_NAME:-otp-worker1}")
+WORKER2_NAME=$(_env_quote "${WORKER2_NAME:-otp-worker2}")
+
+# Observability
+# Existing k8s/observability/*values.yaml files are Helm values.
+# This installer currently applies raw YAML only.
+OBSERVABILITY_NAMESPACE=$(_env_quote "${OBSERVABILITY_NAMESPACE:-observability}")
 EOF_ENV
 
   mv "$tmp" "$target"
@@ -220,14 +261,28 @@ create_env_interactive() {
   _env_set_default SERVICE_TYPE "ClusterIP"
   _env_set_default INGRESS_ENABLED "1"
   _env_set_default TLS_ENABLED "0"
-  _env_set_default NFS_ENABLED "0"
+  _env_set_default TLS_HOST "otp-relay.local"
+
+  _env_set_default NFS_ENABLED "1"
+  _env_set_default PVC_STORAGE_CLASS "otp-relay-nfs"
+  _env_set_default NFS_STORAGE_CLASS "otp-relay-nfs"
+
   _env_set_default INSTALL_METALLB "0"
   _env_set_default REDIS_ENABLED "1"
   _env_set_default REDIS_REQUIRED "1"
   _env_set_default REDIS_URL "redis://otp-redis-haproxy:6379/0"
-  _env_set_default REPLICA_COUNT "1"
+  _env_set_default REPLICA_COUNT "2"
+
+  _env_set_default APP_NODE_SELECTOR_KEY "otp-relay/app-node"
+  _env_set_default APP_NODE_SELECTOR_VALUE "true"
+  _env_set_default MONITOR_NODE_SELECTOR_KEY "otp-relay/monitor-node"
+  _env_set_default MONITOR_NODE_SELECTOR_VALUE "true"
+  _env_set_default REDIS_NODE_SELECTOR_KEY "otp-relay/redis-node"
+  _env_set_default REDIS_NODE_SELECTOR_VALUE "true"
+
   _env_set_default PHONE_PING_INTERVAL "10"
   _env_set_default PHONE_OFFLINE_THRESHOLD "30"
+  _env_set_default OBSERVABILITY_NAMESPACE "observability"
 
   _env_prompt NAMESPACE "Kubernetes namespace" 1 0
   _env_prompt SERVICE_TYPE "Service type: ClusterIP, NodePort, or LoadBalancer" 1 0
@@ -238,10 +293,10 @@ create_env_interactive() {
     _env_prompt TLS_HOST "Ingress/TLS hostname" 1 0
   fi
 
-  _env_prompt NFS_ENABLED "Use NFS-backed app PVC? 1=yes, 0=no" 1 0
+  _env_prompt NFS_ENABLED "Use external NFS-backed app PVC? 1=yes, 0=no" 1 0
   if [ "${NFS_ENABLED:-0}" = "1" ]; then
-    _env_prompt NFS_SERVER "NFS server IP/DNS" 1 0
-    _env_prompt NFS_PATH "NFS export path" 1 0
+    _env_prompt NFS_SERVER "External NFS server IP/DNS" 1 0
+    _env_prompt NFS_PATH "External NFS export path" 1 0
     PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-${NFS_STORAGE_CLASS:-otp-relay-nfs}}"
     export PVC_STORAGE_CLASS
   fi
@@ -260,7 +315,7 @@ create_env_interactive() {
 
   _env_prompt PHONE_INTERFACE "Host network interface for ARP checks" 1 0
   _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
-  _env_prompt PHONE_OFFLINE_THRESHOLD "Phone offline threshold" 1 0
+  _env_prompt PHONE_OFFLINE_THRESHOLD "Phone offline threshold seconds" 1 0
 
   _env_prompt REDIS_ENABLED "Enable Redis? 1=yes, 0=no" 1 0
   if [ "${REDIS_ENABLED:-0}" = "1" ]; then
@@ -304,11 +359,12 @@ Environment file: $ENV_FILE
 5) Redis: REDIS_ENABLED, REDIS_URL, REDIS_REQUIRED, REDIS_STORAGE_CLASS
 6) Placement/replicas: REPLICA_COUNT, node selectors
 7) Installer behavior: DEPLOY_MODE, RUNNER_ONLY, SKIP_REPO_SYNC
-8) Save and continue
+8) Worker VM provisioning: bridge, worker IPs, VM sizing
+9) Save and continue
 EOF_MENU
 
-    read -r -p "Choose what to change [8]: " choice
-    choice="${choice:-8}"
+    read -r -p "Choose what to change [9]: " choice
+    choice="${choice:-9}"
 
     case "$choice" in
       1)
@@ -320,15 +376,15 @@ EOF_MENU
         ;;
       2)
         _env_prompt PVC_STORAGE_CLASS "PVC storage class" 0 0
-        _env_prompt NFS_ENABLED "Use NFS? 1/0" 1 0
-        _env_prompt NFS_SERVER "NFS server IP/DNS" 0 0
-        _env_prompt NFS_PATH "NFS export path" 0 0
+        _env_prompt NFS_ENABLED "Use external NFS? 1/0" 1 0
+        _env_prompt NFS_SERVER "External NFS server IP/DNS" 0 0
+        _env_prompt NFS_PATH "External NFS export path" 0 0
         ;;
       3)
         _env_prompt PHONE_IP "Monitored phone IP" 1 0
         _env_prompt PHONE_INTERFACE "Host network interface" 1 0
         _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
-        _env_prompt PHONE_OFFLINE_THRESHOLD "Offline threshold" 1 0
+        _env_prompt PHONE_OFFLINE_THRESHOLD "Offline threshold seconds" 1 0
         ;;
       4)
         _env_prompt TELEGRAM_BOT_TOKEN "Telegram bot token" 0 1
@@ -356,6 +412,27 @@ EOF_MENU
         _env_prompt SKIP_REPO_SYNC "Skip repo sync? auto, 1, or 0" 1 0
         ;;
       8)
+        _env_prompt BRIDGE_NAME "Libvirt bridge name" 1 0
+        _env_prompt HOST_IFACE "Host interface to bridge for worker VMs" 1 0
+        _env_prompt HOST_IP_CIDR "Host bridge IP/CIDR" 1 0
+        _env_prompt GATEWAY "Network gateway" 1 0
+        _env_prompt DNS "DNS server for worker VMs" 1 0
+        _env_prompt PREFIX "Network prefix length" 1 0
+        _env_prompt IP_SCAN_PREFIX "IP scan prefix, for example 172.31.11" 1 0
+        _env_prompt IP_SCAN_START "IP scan start octet" 1 0
+        _env_prompt IP_SCAN_END "IP scan end octet" 1 0
+        _env_prompt AUTO_ASSIGN_IPS "Auto assign worker VM IPs? 1/0" 1 0
+        if [ "${AUTO_ASSIGN_IPS:-1}" != "1" ]; then
+          _env_prompt WORKER1_IP "Worker 1 VM IP" 1 0
+          _env_prompt WORKER2_IP "Worker 2 VM IP" 1 0
+        fi
+        _env_prompt VM_USER "Worker VM login user" 1 0
+        _env_prompt VM_PASSWORD "Worker VM login password" 1 1
+        _env_prompt VM_RAM_MB "Worker VM RAM MB" 1 0
+        _env_prompt VM_VCPUS "Worker VM vCPUs" 1 0
+        _env_prompt VM_DISK_GB "Worker VM disk GB" 1 0
+        ;;
+      9)
         normalize_loaded_env
         _write_env_file "$ENV_FILE"
         return 0
@@ -507,26 +584,26 @@ normalize_loaded_env() {
   LOADBALANCER_IP="${LOADBALANCER_IP:-}"
   INGRESS_ENABLED="${INGRESS_ENABLED:-1}"
   TLS_ENABLED="${TLS_ENABLED:-0}"
-  TLS_HOST="${TLS_HOST:-}"
+  TLS_HOST="${TLS_HOST:-otp-relay.local}"
   TLS_SECRET_NAME="${TLS_SECRET_NAME:-otp-relay-tls}"
   TLS_SELF_SIGNED="${TLS_SELF_SIGNED:-1}"
 
-  PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-}"
+  PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-otp-relay-nfs}"
   PVC_SIZE="${PVC_SIZE:-1Gi}"
-  NFS_ENABLED="${NFS_ENABLED:-0}"
+  NFS_ENABLED="${NFS_ENABLED:-1}"
   NFS_SERVER="${NFS_SERVER:-}"
   NFS_PATH="${NFS_PATH:-}"
   NFS_STORAGE_CLASS="${NFS_STORAGE_CLASS:-otp-relay-nfs}"
   NFS_PV_NAME="${NFS_PV_NAME:-otp-relay-data-nfs-pv}"
   NFS_MOUNT_OPTIONS="${NFS_MOUNT_OPTIONS:-nfsvers=4.1}"
 
-  REPLICA_COUNT="${REPLICA_COUNT:-1}"
-  APP_NODE_SELECTOR_KEY="${APP_NODE_SELECTOR_KEY:-}"
-  APP_NODE_SELECTOR_VALUE="${APP_NODE_SELECTOR_VALUE:-}"
-  MONITOR_NODE_SELECTOR_KEY="${MONITOR_NODE_SELECTOR_KEY:-}"
-  MONITOR_NODE_SELECTOR_VALUE="${MONITOR_NODE_SELECTOR_VALUE:-}"
-  REDIS_NODE_SELECTOR_KEY="${REDIS_NODE_SELECTOR_KEY:-}"
-  REDIS_NODE_SELECTOR_VALUE="${REDIS_NODE_SELECTOR_VALUE:-}"
+  REPLICA_COUNT="${REPLICA_COUNT:-2}"
+  APP_NODE_SELECTOR_KEY="${APP_NODE_SELECTOR_KEY:-otp-relay/app-node}"
+  APP_NODE_SELECTOR_VALUE="${APP_NODE_SELECTOR_VALUE:-true}"
+  MONITOR_NODE_SELECTOR_KEY="${MONITOR_NODE_SELECTOR_KEY:-otp-relay/monitor-node}"
+  MONITOR_NODE_SELECTOR_VALUE="${MONITOR_NODE_SELECTOR_VALUE:-true}"
+  REDIS_NODE_SELECTOR_KEY="${REDIS_NODE_SELECTOR_KEY:-otp-relay/redis-node}"
+  REDIS_NODE_SELECTOR_VALUE="${REDIS_NODE_SELECTOR_VALUE:-true}"
 
   REQUIRE_METALLB="${REQUIRE_METALLB:-0}"
   INSTALL_METALLB="${INSTALL_METALLB:-0}"
@@ -599,6 +676,28 @@ normalize_loaded_env() {
   IMAGE_IMPORTER_IMAGE="${IMAGE_IMPORTER_IMAGE:-redis:7-alpine}"
   SMS_SECRET_TOKEN="${SMS_SECRET_TOKEN:-$(make_secret)}"
 
+  BRIDGE_NAME="${BRIDGE_NAME:-br0}"
+  HOST_IFACE="${HOST_IFACE:-}"
+  HOST_IP_CIDR="${HOST_IP_CIDR:-}"
+  GATEWAY="${GATEWAY:-}"
+  DNS="${DNS:-}"
+  PREFIX="${PREFIX:-24}"
+  IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-}"
+  IP_SCAN_START="${IP_SCAN_START:-150}"
+  IP_SCAN_END="${IP_SCAN_END:-199}"
+  AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
+  WORKER1_IP="${WORKER1_IP:-}"
+  WORKER2_IP="${WORKER2_IP:-}"
+  VM_USER="${VM_USER:-otp-relay}"
+  VM_PASSWORD="${VM_PASSWORD:-otp-relay}"
+  VM_RAM_MB="${VM_RAM_MB:-3072}"
+  VM_VCPUS="${VM_VCPUS:-2}"
+  VM_DISK_GB="${VM_DISK_GB:-20}"
+  WORKER1_NAME="${WORKER1_NAME:-otp-worker1}"
+  WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
+
+  OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
+
   RESTART_APP_REQUIRED=0
   RESTART_MONITOR_REQUIRED=0
 
@@ -610,6 +709,8 @@ normalize_loaded_env() {
   export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD GIT_CLEAN SKIP_REPO_SYNC NONINTERACTIVE INSTALL_GITHUB_RUNNER GITHUB_RUNNER_URL GITHUB_RUNNER_TOKEN
   export GITHUB_RUNNER_DIR GITHUB_RUNNER_USER RUNNER_ONLY DEPLOY_MODE DOCKER_BIN REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS
   export DISTRIBUTE_IMAGES_TO_NODES IMAGE_DISTRIBUTION_PORT IMAGE_IMPORTER_IMAGE SMS_SECRET_TOKEN RESTART_APP_REQUIRED RESTART_MONITOR_REQUIRED
+  export BRIDGE_NAME HOST_IFACE HOST_IP_CIDR GATEWAY DNS PREFIX IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END AUTO_ASSIGN_IPS WORKER1_IP WORKER2_IP VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB WORKER1_NAME WORKER2_NAME
+  export OBSERVABILITY_NAMESPACE
 
   log "installer environment normalization completed"
 }
