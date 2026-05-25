@@ -7,9 +7,6 @@ INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
 ANSIBLE_CONFIG="${ANSIBLE_CONFIG:-${ANSIBLE_DIR}/ansible.cfg}"
 export ANSIBLE_CONFIG
 
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
-SSH_USER="${VM_USER:-otp-relay}"
-
 DEPLOY_OTP_RELAY="${DEPLOY_OTP_RELAY:-1}"
 VALIDATE_OTP_RELAY="${VALIDATE_OTP_RELAY:-0}"
 
@@ -32,31 +29,39 @@ else
   warn "No ${REPO_ROOT}/.env found; continuing with exported/default variables only"
 fi
 
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
+SSH_USER="${VM_USER:-otp-relay}"
 BRIDGE_NAME="${BRIDGE_NAME:-br0}"
 PREFIX="${PREFIX:-24}"
 
 fix_local_ssh_permissions() {
-  local ssh_dir="$HOME/.ssh"
-  local known_hosts="$ssh_dir/known_hosts"
+  local real_user="${SUDO_USER:-${USER:-$(id -un)}}"
+  local real_home
+  local ssh_dir
+  local known_hosts
 
-  log "Ensuring local SSH directory/key permissions are safe"
+  real_home="$(getent passwd "$real_user" | cut -d: -f6)"
+  ssh_dir="$real_home/.ssh"
+  known_hosts="$ssh_dir/known_hosts"
 
-  mkdir -p "$ssh_dir"
-  chmod 700 "$ssh_dir" || true
+  log "Ensuring local SSH directory/key permissions are safe for ${real_user}"
 
-  if [[ -n "${USER:-}" ]]; then
-    sudo chown -R "$USER:$USER" "$ssh_dir" 2>/dev/null || true
-  fi
+  sudo mkdir -p "$ssh_dir"
+  sudo chmod 700 "$ssh_dir" || true
+  sudo chown "$real_user:$real_user" "$ssh_dir" 2>/dev/null || sudo chown "$real_user" "$ssh_dir" 2>/dev/null || true
 
-  touch "$known_hosts"
-  chmod 644 "$known_hosts" || true
+  sudo touch "$known_hosts"
+  sudo chmod 644 "$known_hosts" || true
+  sudo chown "$real_user:$real_user" "$known_hosts" 2>/dev/null || sudo chown "$real_user" "$known_hosts" 2>/dev/null || true
 
   if [[ -f "$SSH_KEY" ]]; then
-    chmod 600 "$SSH_KEY" || true
+    sudo chmod 600 "$SSH_KEY" || true
+    sudo chown "$real_user:$real_user" "$SSH_KEY" 2>/dev/null || sudo chown "$real_user" "$SSH_KEY" 2>/dev/null || true
   fi
 
   if [[ -f "${SSH_KEY}.pub" ]]; then
-    chmod 644 "${SSH_KEY}.pub" || true
+    sudo chmod 644 "${SSH_KEY}.pub" || true
+    sudo chown "$real_user:$real_user" "${SSH_KEY}.pub" 2>/dev/null || sudo chown "$real_user" "${SSH_KEY}.pub" 2>/dev/null || true
   fi
 }
 
@@ -123,6 +128,8 @@ raw_ssh_check_workers() {
   if ! have_workers; then
     fatal "No [workers] entries found in inventory. Provision worker VMs first."
   fi
+
+  [[ -f "$SSH_KEY" ]] || fatal "Missing SSH key: $SSH_KEY"
 
   worker_inventory_hosts | while read -r host ip; do
     log "checking SSH: ${host} (${ip})"
@@ -310,7 +317,7 @@ configure_host_dns_forwarder() {
       fatal "Host dnsmasq is not resolving deb.debian.org on ${host_ip}"
   else
     timeout 5 getent hosts deb.debian.org >/dev/null ||
-      warn "Host can not validate deb.debian.org with getent; VM validation will be authoritative"
+      warn "Host cannot validate deb.debian.org with getent; VM validation will be authoritative"
   fi
 
   VM_DNS_SERVER="$host_ip"
@@ -579,10 +586,10 @@ main() {
   run_playbook_if_present "Installing K3s workers" "playbooks/20-k3s-workers.yml"
   run_playbook_if_present "Applying node labels" "playbooks/30-node-labels.yml"
 
-  if [[ -n "${NFS_SERVER:-}" || -n "${NFS_PATH:-}" ]]; then
+  if [[ -n "${NFS_SERVER:-}" && -n "${NFS_PATH:-}" ]]; then
     run_playbook_if_present "Validating external NFS storage" "playbooks/40-storage-validate.yml"
   else
-    log "Skipping storage validation because NFS_SERVER/NFS_PATH are not configured"
+    log "Skipping storage validation because NFS_SERVER/NFS_PATH are not fully configured"
   fi
 
   if [[ "${DEPLOY_OTP_RELAY:-0}" == "1" ]]; then
