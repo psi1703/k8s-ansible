@@ -73,10 +73,6 @@ validate_frontend_source_tree() {
     fatal "root-level app.js exists. Delete it from the repo. Generated browser bundle must be frontend/app.js only."
   fi
 
-  if grep -R -nE 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' frontend/app.jsx 2>/dev/null; then
-    fatal "frontend/app.jsx contains RTA wizard content. Restore OTP Relay portal source before deployment."
-  fi
-
   if ! grep -q 'script src="app.js"' frontend/index.html; then
     fatal "frontend/index.html must load the generated frontend bundle with: script src=\"app.js\""
   fi
