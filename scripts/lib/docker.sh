@@ -30,7 +30,7 @@ ensure_docker() {
     apt-get update
 
     log "installing docker.io with apt-get"
-    apt-get install -y --no-install-recommends docker.io
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io
     log "docker.io package installation completed"
   fi
 
@@ -39,6 +39,8 @@ ensure_docker() {
   fi
 
   log "using Docker CLI: $DOCKER_BIN"
+
+  command -v systemctl >/dev/null 2>&1 || fatal "systemctl is required to manage the Docker service on this host."
 
   if ! systemctl is-active --quiet docker; then
     log "starting/enabling Docker service because local image builds require it"
@@ -50,7 +52,7 @@ ensure_docker() {
 
   log "validating Docker daemon connectivity"
   if ! "$DOCKER_BIN" info >/dev/null 2>&1; then
-    fatal "Docker CLI is available at $DOCKER_BIN, but Docker daemon is not responding"
+    fatal "Docker CLI is available at $DOCKER_BIN, but Docker daemon is not responding."
   fi
 
   log "Docker is ready for local image builds"
