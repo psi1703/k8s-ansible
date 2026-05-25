@@ -27,11 +27,18 @@ print_deployment_summary() {
     TLS_READYZ_COMMAND="curl -k --resolve ${TLS_HOST}:443:<TRAEFIK_LB_IP> https://${TLS_HOST}/readyz"
   fi
 
+  GRAFANA_URL_SUMMARY="disabled"
+  if [ "${OBSERVABILITY_INSTALL_STACK:-1}" = "1" ]; then
+    GRAFANA_URL_SUMMARY="https://${GRAFANA_HOST:-grafana.init-db.lan}/"
+  fi
+
   cat <<EOF_DONE
 
 OTP Relay Kubernetes deployment complete.
 
 Portal URL:   ${PORTAL_URL:-not-set}/
+Guide pop-out: opened from the portal as /guide.html?step=<step>&page=<page>
+Grafana URL:  $GRAFANA_URL_SUMMARY
 NodePort URL: $NODEPORT_SUMMARY
 Service type: ${SERVICE_TYPE:-not-set}
 LoadBalancer: ${ASSIGNED_LOADBALANCER_ADDRESS:-${LOADBALANCER_IP:-auto/none}}
@@ -53,7 +60,7 @@ PVC storage:           ${PVC_STORAGE_CLASS:-default} / ${PVC_SIZE:-unknown}
 NFS app storage:       enabled=${NFS_ENABLED:-0} server=${NFS_SERVER:-none} path=${NFS_PATH:-none} class=${NFS_STORAGE_CLASS:-nfs-client} pv=${NFS_PV_NAME:-otp-relay-nfs-pv}
 Redis:                 enabled=${REDIS_ENABLED:-0} required=${REDIS_REQUIRED:-0} url=${REDIS_URL:-none} storage=${REDIS_STORAGE_CLASS:-default}/${REDIS_SIZE:-unknown} spread_recreate_pvcs=${REDIS_SPREAD_RECREATE_PVCS:-0}
 Image distribution:    enabled=${DISTRIBUTE_IMAGES_TO_NODES:-0} importer=${IMAGE_IMPORTER_IMAGE:-none} port=${IMAGE_DISTRIBUTION_PORT:-none}
-Observability YAMLs:   applied from k8s/observability when present
+Observability:         namespace=${OBSERVABILITY_NAMESPACE:-observability} install_stack=${OBSERVABILITY_INSTALL_STACK:-1} grafana_host=${GRAFANA_HOST:-grafana.init-db.lan} chart=${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}
 
 Useful commands:
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -64,6 +71,8 @@ Useful commands:
   k3s kubectl get pods -n ${NAMESPACE:-otp-relay} -l app=otp-redis -o wide
   k3s kubectl get pods -n ${NAMESPACE:-otp-relay} -l app=otp-redis-sentinel -o wide
   k3s kubectl get pods -n ${NAMESPACE:-otp-relay} -l app=otp-redis-haproxy -o wide
+  k3s kubectl get pods,svc,ingressroute,servicemonitor -n ${OBSERVABILITY_NAMESPACE:-observability}
+  k3s kubectl get secret kube-prometheus-stack-grafana -n ${OBSERVABILITY_NAMESPACE:-observability} -o jsonpath='{.data.admin-password}' | base64 -d; echo
   k3s kubectl -n kube-system get svc traefik -o wide
   $TLS_READYZ_COMMAND
   curl -i http://127.0.0.1/
