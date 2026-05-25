@@ -16,6 +16,7 @@ spec:
     metadata:
       labels:
         app: otp-monitor
+        metrics: enabled
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -45,6 +46,11 @@ spec:
                 secretKeyRef:
                   name: otp-relay-secrets
                   key: TELEGRAM_CHAT_ID
+
+          ports:
+            - name: metrics
+              containerPort: 9101
+              protocol: TCP
 
           securityContext:
             allowPrivilegeEscalation: true
