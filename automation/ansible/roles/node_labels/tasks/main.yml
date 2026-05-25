@@ -1,13 +1,13 @@
 ---
 - name: Get Kubernetes node names
   ansible.builtin.command:
-    cmd: kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+    cmd: k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
   register: k8s_node_names
   changed_when: false
 
 - name: Get Kubernetes nodes with internal IPs
   ansible.builtin.command:
-    cmd: kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}'
+    cmd: k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}'
   register: k8s_node_ip_rows
   changed_when: false
 
@@ -18,7 +18,7 @@
     short_hostname="$(hostname -s)"
     fqdn="$(hostname -f 2>/dev/null || hostname)"
 
-    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+    k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
       awk -v short="$short_hostname" -v fqdn="$fqdn" '
         $0 == short { print; found=1; exit }
         $0 == fqdn { print; found=1; exit }
@@ -43,7 +43,12 @@
 
 - name: Build worker IP list from inventory
   ansible.builtin.set_fact:
-    worker_ips: "{{ groups['workers'] | map('extract', hostvars, 'ansible_host') | list }}"
+    worker_ips: "{{ groups['workers'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Fail if no workers are defined
+  ansible.builtin.fail:
+    msg: "No workers are defined in inventory. The current design expects worker1 and worker2."
+  when: worker_ips | length == 0
 
 - name: Resolve worker Kubernetes node names by InternalIP
   ansible.builtin.shell: |
@@ -51,7 +56,7 @@
 
     worker_ips="{{ worker_ips | join(' ') }}"
 
-    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}' |
+    k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}' |
       awk -v ips="$worker_ips" '
         BEGIN {
           n=split(ips, iplist, " ")
@@ -90,48 +95,55 @@
 
 - name: Label control-plane for monitor eligibility
   ansible.builtin.command:
-    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/monitor-node=true --overwrite
+    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/monitor-node=true --overwrite
   changed_when: true
 
 - name: Remove app eligibility from control-plane
   ansible.builtin.command:
-    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/app-node- --overwrite
+    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/app-node- --overwrite
   changed_when: true
   failed_when: false
 
 - name: Remove Redis eligibility from control-plane
   ansible.builtin.command:
-    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node- --overwrite
+    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node- --overwrite
   changed_when: true
   failed_when: false
 
 - name: Remove storage eligibility from control-plane
   ansible.builtin.command:
-    cmd: kubectl label node {{ control_plane_k8s_node }} otp-relay/storage-node- --overwrite
+    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/storage-node- --overwrite
   changed_when: true
   failed_when: false
 
 - name: Label workers for app eligibility
   ansible.builtin.command:
-    cmd: kubectl label node {{ item }} otp-relay/app-node=true --overwrite
+    cmd: k3s kubectl label node {{ item }} otp-relay/app-node=true --overwrite
   loop: "{{ worker_k8s_nodes }}"
   changed_when: true
 
 - name: Label workers for Redis eligibility
   ansible.builtin.command:
-    cmd: kubectl label node {{ item }} otp-relay/redis-node=true --overwrite
+    cmd: k3s kubectl label node {{ item }} otp-relay/redis-node=true --overwrite
   loop: "{{ worker_k8s_nodes }}"
   changed_when: true
 
 - name: Label workers for storage eligibility
   ansible.builtin.command:
-    cmd: kubectl label node {{ item }} otp-relay/storage-node=true --overwrite
+    cmd: k3s kubectl label node {{ item }} otp-relay/storage-node=true --overwrite
   loop: "{{ worker_k8s_nodes }}"
   changed_when: true
 
+- name: Remove monitor eligibility from workers
+  ansible.builtin.command:
+    cmd: k3s kubectl label node {{ item }} otp-relay/monitor-node- --overwrite
+  loop: "{{ worker_k8s_nodes }}"
+  changed_when: true
+  failed_when: false
+
 - name: Show final node labels
   ansible.builtin.command:
-    cmd: kubectl get nodes -L otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node
+    cmd: k3s kubectl get nodes -L otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node
   register: final_node_labels
   changed_when: false
 
