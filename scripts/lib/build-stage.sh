@@ -23,6 +23,16 @@ build_app_assets_if_required() {
 
     [ -f package.json ] || fatal "package.json is missing in repo root"
     [ -f package-lock.json ] || fatal "package-lock.json is missing in repo root"
+    [ -f frontend/app.jsx ] || fatal "frontend/app.jsx is missing"
+    [ -f frontend/index.html ] || fatal "frontend/index.html is missing"
+    [ -f frontend/style.css ] || fatal "frontend/style.css is missing"
+
+    if [ -f app.js ]; then
+      fatal "root-level app.js exists. This is not allowed. Generated frontend bundle must be frontend/app.js only."
+    fi
+
+    log "removing stale generated frontend bundle before rebuild"
+    rm -f frontend/app.js frontend/app.raw.js
 
     log "installing frontend build dependencies from committed package-lock.json; npm ci may take a few minutes"
     npm ci
@@ -30,8 +40,23 @@ build_app_assets_if_required() {
 
     log "building production frontend bundle frontend/app.js"
     npm run build:frontend
+
     [ -f frontend/app.js ] || fatal "frontend/app.js was not produced by npm run build:frontend"
-    log "frontend production bundle generated: frontend/app.js"
+    [ -s frontend/app.js ] || fatal "frontend/app.js was produced but is empty"
+
+    if [ -f app.js ]; then
+      fatal "npm build produced root-level app.js. Fix package.json so build:frontend outputs only frontend/app.js"
+    fi
+
+    log "validating frontend bundle path and portal index"
+    grep -q 'script src="app.js"' frontend/index.html || \
+      fatal "frontend/index.html must load generated bundle with: script src=\"app.js\""
+
+    if grep -R -nE 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' frontend/app.jsx frontend/app.js 2>/dev/null; then
+      fatal "frontend source/bundle contains RTA wizard content. Restore OTP Relay portal source before deployment."
+    fi
+
+    log "frontend production bundle generated and validated: frontend/app.js"
   else
     log "DEPLOY_MODE=$DEPLOY_MODE does not require app help-doc/frontend build; skipping installer venv and npm build"
   fi
@@ -52,10 +77,19 @@ validate_dockerfile_packaging() {
   [ -f "$MONITOR_DOCKERFILE" ] || fatal "monitor Dockerfile is missing: $MONITOR_DOCKERFILE"
 
   if requires_app_image; then
-    log "validating app Dockerfile includes otp_relay package"
+    log "validating app Dockerfile includes otp_relay package and generated frontend"
     [ -d otp_relay ] || fatal "otp_relay package directory is missing from repo root"
+    [ -f frontend/app.js ] || fatal "frontend/app.js must exist before Docker image build"
+
     grep -Eq 'COPY[[:space:]].*otp_relay' "$APP_DOCKERFILE" || \
       fatal "$APP_DOCKERFILE must copy otp_relay/ into the image because main.py imports otp_relay.routes"
+
+    grep -Eq 'COPY[[:space:]].*frontend' "$APP_DOCKERFILE" || \
+      fatal "$APP_DOCKERFILE must copy frontend/ into the image"
+
+    if grep -Eq 'COPY[[:space:]].*app\.js' "$APP_DOCKERFILE"; then
+      fatal "$APP_DOCKERFILE must not copy root-level app.js. It must copy frontend/ after frontend/app.js is built."
+    fi
   fi
 
   if requires_monitor_image; then
