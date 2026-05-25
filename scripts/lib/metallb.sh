@@ -7,7 +7,10 @@ install_metallb_if_requested() {
     return 0
   fi
 
-  [ -n "${METALLB_IP_RANGE:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example <first-ip>-<last-ip>"
+  [ -n "${METALLB_VERSION:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_VERSION to be set."
+  [ -n "${METALLB_MANIFEST_URL:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_MANIFEST_URL to be set."
+  [ -n "${METALLB_POOL_NAME:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_POOL_NAME to be set."
+  [ -n "${METALLB_IP_RANGE:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example <first-ip>-<last-ip>."
 
   # Installing MetalLB is allowed even when the OTP Relay Service remains
   # ClusterIP behind Ingress. Do not force SERVICE_TYPE=LoadBalancer here.
@@ -97,7 +100,7 @@ check_loadbalancer_prereqs() {
     log "MetalLB namespace found"
     k3s kubectl get pods -n metallb-system --no-headers 2>/dev/null || true
   elif [ "${REQUIRE_METALLB:-0}" = "1" ]; then
-    fatal "SERVICE_TYPE=LoadBalancer requires MetalLB, but namespace metallb-system was not found and INSTALL_METALLB is not enabled"
+    fatal "SERVICE_TYPE=LoadBalancer requires MetalLB, but namespace metallb-system was not found and INSTALL_METALLB is not enabled."
   else
     warn "MetalLB namespace was not found. LoadBalancer service may stay pending unless another load balancer is installed."
   fi
