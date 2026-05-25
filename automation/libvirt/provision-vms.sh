@@ -14,6 +14,7 @@ set -Eeuo pipefail
 #   - Must be run as a normal user, not with sudo bash.
 #   - Uses sudo internally only where required.
 #   - Creates/uses SSH key: ~/.ssh/otp-relay-cluster
+#   - Repairs SSH key ownership/permissions if earlier sudo/root runs broke them.
 #   - Creates VM login user: otp-relay
 #   - Auto-assigns free LAN IPs by scanning IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END
 #   - Writes Ansible inventory: automation/ansible/inventory.generated.ini
@@ -184,23 +185,6 @@ enable_libvirt() {
   fi
 }
 
-ensure_ssh_key() {
-  local ssh_dir
-  ssh_dir="$(dirname "$SSH_KEY")"
-
-  mkdir -p "$ssh_dir"
-  chmod 700 "$ssh_dir"
-
-  if [[ ! -f "$SSH_KEY" ]]; then
-    log "Creating SSH key: $SSH_KEY"
-    ssh-keygen -t ed25519 -f "$SSH_KEY" -C "otp-relay-cluster" -N ""
-  fi
-
-  [[ -f "$SSH_PUB_KEY" ]] || fatal "Missing SSH public key: $SSH_PUB_KEY"
-
-  repair_ssh_key_permissions
-}
-
 repair_ssh_key_permissions() {
   local ssh_dir operator_user operator_group known_hosts
 
@@ -210,6 +194,8 @@ repair_ssh_key_permissions() {
   operator_group="$(id -gn)"
 
   log "repairing SSH key ownership/permissions for $operator_user"
+
+  mkdir -p "$ssh_dir"
 
   sudo chown "$operator_user:$operator_group" "$ssh_dir" 2>/dev/null || true
   chmod 700 "$ssh_dir" || true
@@ -229,7 +215,25 @@ repair_ssh_key_permissions() {
     chmod 644 "$known_hosts" || true
   fi
 
+  [[ -f "$SSH_KEY" ]] || fatal "SSH private key does not exist: $SSH_KEY"
   [[ -r "$SSH_KEY" ]] || fatal "SSH private key exists but is not readable by $operator_user: $SSH_KEY"
+}
+
+ensure_ssh_key() {
+  local ssh_dir
+  ssh_dir="$(dirname "$SSH_KEY")"
+
+  mkdir -p "$ssh_dir"
+  chmod 700 "$ssh_dir"
+
+  if [[ ! -f "$SSH_KEY" ]]; then
+    log "Creating SSH key: $SSH_KEY"
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -C "otp-relay-cluster" -N ""
+  fi
+
+  [[ -f "$SSH_PUB_KEY" ]] || fatal "Missing SSH public key: $SSH_PUB_KEY"
+
+  repair_ssh_key_permissions
 }
 
 check_host() {
@@ -505,6 +509,8 @@ download_base_image() {
 ssh_ready_for_expected_identity() {
   local ip="$1"
 
+  repair_ssh_key_permissions
+
   ssh \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=no \
@@ -520,6 +526,8 @@ existing_vm_matches_expected_identity() {
   local attempt
 
   log "Checking existing VM compatibility: $name ($ip) as ${VM_USER}"
+
+  repair_ssh_key_permissions
 
   for attempt in $(seq 1 "$EXISTING_VM_SSH_CHECK_ATTEMPTS"); do
     if ssh_ready_for_expected_identity "$ip"; then
@@ -660,6 +668,8 @@ create_vm() {
   rm -f "$user_data" "$meta_data" "$network_config"
   sudo rm -f "$seed"
 
+  repair_ssh_key_permissions
+
   if sudo virsh list --all --name 2>/dev/null | grep -qx "$name"; then
     fatal "refusing to create disk while libvirt domain still exists: $name"
   fi
@@ -763,6 +773,8 @@ wait_for_ssh() {
 
   log "Waiting for SSH on $name ($ip)..."
 
+  repair_ssh_key_permissions
+
   for _ in $(seq 1 90); do
     if ssh_ready_for_expected_identity "$ip"; then
       ok "SSH ready: $name ($ip)"
@@ -790,6 +802,8 @@ repair_guest_dns_and_validate() {
 
   log "Repairing and validating DNS inside $name ($ip)..."
   log "Host DNS servers for $name: ${DNS_SERVERS}"
+
+  repair_ssh_key_permissions
 
   for attempt in $(seq 1 12); do
     if ssh \
@@ -840,6 +854,7 @@ DNS_REMOTE
   done
 
   warn "DNS validation failed for $name ($ip). Diagnostics:"
+  repair_ssh_key_permissions
   ssh \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=no \
@@ -854,6 +869,8 @@ DNS_REMOTE
 
 write_ansible_inventory() {
   mkdir -p "$(dirname "$ANSIBLE_INVENTORY")"
+
+  repair_ssh_key_permissions
 
   cat > "$ANSIBLE_INVENTORY" <<INVEOF
 [control_plane]
@@ -927,6 +944,7 @@ main() {
   install_packages
   enable_libvirt
   ensure_ssh_key
+  repair_ssh_key_permissions
 
   log "Host DNS servers for worker VMs: ${DNS_SERVERS}"
 
@@ -940,13 +958,22 @@ main() {
   mkdir -p "$BUILD_DIR"
   download_base_image
 
+  repair_ssh_key_permissions
   create_vm "$WORKER1_NAME" "$WORKER1_IP"
+
+  repair_ssh_key_permissions
   create_vm "$WORKER2_NAME" "$WORKER2_IP"
 
+  repair_ssh_key_permissions
   wait_for_ssh "$WORKER1_IP" "$WORKER1_NAME"
+
+  repair_ssh_key_permissions
   wait_for_ssh "$WORKER2_IP" "$WORKER2_NAME"
 
+  repair_ssh_key_permissions
   repair_guest_dns_and_validate "$WORKER1_IP" "$WORKER1_NAME"
+
+  repair_ssh_key_permissions
   repair_guest_dns_and_validate "$WORKER2_IP" "$WORKER2_NAME"
 
   write_ansible_inventory
