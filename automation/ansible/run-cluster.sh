@@ -612,9 +612,58 @@ apt-get \
   ok "Worker apt/dpkg repair and required package install completed"
 }
 
+detect_k3s_server_url() {
+  local host_ip=""
+
+  if [[ -n "${K3S_SERVER_URL:-}" ]]; then
+    printf '%s\n' "$K3S_SERVER_URL"
+    return 0
+  fi
+
+  if [[ -n "${HOST_IP_CIDR:-}" ]]; then
+    host_ip="${HOST_IP_CIDR%%/*}"
+  fi
+
+  if [[ -z "$host_ip" && -n "${BRIDGE_NAME:-}" ]]; then
+    host_ip="$(ip -o -4 addr show dev "$BRIDGE_NAME" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1 || true)"
+  fi
+
+  if [[ -z "$host_ip" ]]; then
+    host_ip="$(ip route get "$(worker_inventory_ips | head -1)" 2>/dev/null | awk '/src/ {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+  fi
+
+  [[ -n "$host_ip" ]] || fatal "Could not determine K3s server URL for worker join."
+
+  printf 'https://%s:6443\n' "$host_ip"
+}
+
+read_k3s_node_token() {
+  local token=""
+
+  if [[ -n "${K3S_NODE_TOKEN:-}" ]]; then
+    printf '%s\n' "$K3S_NODE_TOKEN"
+    return 0
+  fi
+
+  if [[ -n "${K3S_TOKEN:-}" ]]; then
+    printf '%s\n' "$K3S_TOKEN"
+    return 0
+  fi
+
+  if [[ -f /var/lib/rancher/k3s/server/node-token ]]; then
+    token="$(sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || true)"
+  fi
+
+  [[ -n "$token" ]] || fatal "K3s node token was not found at /var/lib/rancher/k3s/server/node-token. Control-plane install did not complete correctly."
+
+  printf '%s\n' "$token"
+}
+
 run_playbook_if_present() {
   local label="$1"
   local playbook="$2"
+  local k3s_server_url=""
+  local k3s_node_token=""
 
   if [[ ! -f "$playbook" ]]; then
     warn "Skipping missing playbook: $playbook"
@@ -622,7 +671,25 @@ run_playbook_if_present() {
   fi
 
   log "$label"
-  ansible-playbook -i "$INVENTORY" "$playbook"
+
+  case "$playbook" in
+    playbooks/20-k3s-workers.yml)
+      k3s_server_url="$(detect_k3s_server_url)"
+      k3s_node_token="$(read_k3s_node_token)"
+
+      log "Passing K3s worker join values to worker playbook"
+      log "K3s server URL: ${k3s_server_url}"
+
+      ansible-playbook -i "$INVENTORY" "$playbook" \
+        -e "k3s_server_url=${k3s_server_url}" \
+        -e "k3s_node_token=${k3s_node_token}" \
+        -e "k3s_token=${k3s_node_token}"
+      ;;
+    *)
+      ansible-playbook -i "$INVENTORY" "$playbook"
+      ;;
+  esac
+
   ok "$label completed"
 }
 
