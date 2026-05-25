@@ -61,6 +61,29 @@ sync_deployment_repo() {
   log "deployment repository preparation completed"
 }
 
+validate_frontend_source_tree() {
+  log "validating frontend source tree and generated artifact policy"
+
+  [ -d frontend ] || fatal "frontend/ directory is missing"
+  [ -f frontend/index.html ] || fatal "frontend/index.html is missing"
+  [ -f frontend/app.jsx ] || fatal "frontend/app.jsx source is missing"
+  [ -f frontend/style.css ] || fatal "frontend/style.css is missing"
+
+  if [ -f app.js ]; then
+    fatal "root-level app.js exists. Delete it from the repo. Generated browser bundle must be frontend/app.js only."
+  fi
+
+  if grep -R -nE 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' frontend/app.jsx 2>/dev/null; then
+    fatal "frontend/app.jsx contains RTA wizard content. Restore OTP Relay portal source before deployment."
+  fi
+
+  if ! grep -q 'script src="app.js"' frontend/index.html; then
+    fatal "frontend/index.html must load the generated frontend bundle with: script src=\"app.js\""
+  fi
+
+  log "frontend source tree validation completed"
+}
+
 validate_source_tree() {
   log "checking required source files"
 
@@ -69,10 +92,11 @@ validate_source_tree() {
   [ -d otp_relay ] || fatal "otp_relay/ package is missing"
   [ -d otp_monitor ] || fatal "otp_monitor/ package is missing"
   [ -f requirements.txt ] || fatal "requirements.txt is missing in repo root"
-  [ -d frontend ] || fatal "frontend/ directory is missing"
-  [ -f frontend/index.html ] || fatal "frontend/index.html is missing"
-  [ -f frontend/app.jsx ] || fatal "frontend/app.jsx source is missing"
-  [ -f frontend/style.css ] || fatal "frontend/style.css is missing"
+
+  validate_frontend_source_tree
+
+  [ -f package.json ] || fatal "package.json is missing in repo root"
+  [ -f package-lock.json ] || fatal "package-lock.json is missing in repo root"
   [ -f k8s/Dockerfile ] || fatal "k8s/Dockerfile is missing"
   [ -f k8s/Dockerfile.monitor ] || fatal "k8s/Dockerfile.monitor is missing"
   [ -d k8s/manifests ] || fatal "k8s/manifests directory is missing"
@@ -81,6 +105,14 @@ validate_source_tree() {
   for required_manifest in namespace.yaml pvc.yaml deployment.yaml service.yaml deployment-monitor.yaml monitor-service.yaml; do
     [ -f "k8s/manifests/$required_manifest" ] || fatal "k8s/manifests/$required_manifest is missing"
   done
+
+  if [ "$INGRESS_ENABLED" = "1" ]; then
+    [ -f "k8s/manifests/ingress.yaml" ] || fatal "INGRESS_ENABLED=1 but k8s/manifests/ingress.yaml is missing"
+  fi
+
+  if [ "$NFS_ENABLED" = "1" ]; then
+    [ -f "k8s/manifests/pv-nfs.yaml" ] || fatal "NFS_ENABLED=1 but k8s/manifests/pv-nfs.yaml is missing"
+  fi
 
   if [ "$REDIS_ENABLED" = "1" ]; then
     log "REDIS_ENABLED=1; checking required Redis manifests"
