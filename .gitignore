@@ -37,9 +37,6 @@ temp/
 *.swp
 .DS_Store
 
-# Logs
-*.log
-
 # Ansible local retry files
 *.retry
 
@@ -52,6 +49,6 @@ dist/
 .vscode/
 .idea/
 
-# Automation
+# Automation generated files
 automation/ansible/inventory.generated.ini
 automation/libvirt/build/
