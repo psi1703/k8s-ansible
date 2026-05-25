@@ -175,10 +175,12 @@
   ansible.builtin.async_status:
     jid: "{{ otp_relay_installer_job.ansible_job_id }}"
   register: otp_relay_installer_status
-  until: otp_relay_installer_status.finished
+  until: otp_relay_installer_status.finished | default(false)
   retries: 720
   delay: 10
   become: true
+  changed_when: false
+  failed_when: false
 
 - name: Read OTP Relay installer status file
   ansible.builtin.shell: |
@@ -208,7 +210,7 @@
     echo "===== final installer log tail ====="
 
     if [ -f "{{ otp_relay_installer_log }}" ]; then
-      tail -220 "{{ otp_relay_installer_log }}"
+      tail -260 "{{ otp_relay_installer_log }}"
     else
       echo "installer log missing: {{ otp_relay_installer_log }}"
     fi
@@ -216,6 +218,7 @@
     executable: /bin/bash
   become: true
   changed_when: false
+  failed_when: false
 
 - name: Fail when OTP Relay installer failed
   ansible.builtin.fail:
@@ -223,4 +226,11 @@
       OTP Relay installer failed with rc={{ otp_relay_installer_status.rc | default(otp_relay_installer_status_file_result.stdout | default('unknown')) }}.
       Review the control-plane log: {{ otp_relay_installer_log }}
       Live command: sudo tail -f {{ otp_relay_installer_log }}
-  when: otp_relay_installer_status.rc | default(0) != 0
+  when: >
+    (otp_relay_installer_status.rc | default(0) | int) != 0
+    or
+    (
+      otp_relay_installer_status_file_result.stdout is defined
+      and otp_relay_installer_status_file_result.stdout not in ['0', 'missing']
+      and (otp_relay_installer_status_file_result.stdout | int) != 0
+    )
