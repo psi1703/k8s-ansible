@@ -14,16 +14,6 @@ validate_k8s_topology_settings() {
     *) fatal "unsupported INGRESS_ENABLED=$INGRESS_ENABLED. Use 0 or 1." ;;
   esac
 
-  case "$REDIS_ENABLED" in
-    0|1) ;;
-    *) fatal "unsupported REDIS_ENABLED=$REDIS_ENABLED. Use 0 or 1." ;;
-  esac
-
-  case "$REDIS_REQUIRED" in
-    0|1) ;;
-    *) fatal "unsupported REDIS_REQUIRED=$REDIS_REQUIRED. Use 0 or 1." ;;
-  esac
-
   case "$TLS_ENABLED" in
     0|1) ;;
     *) fatal "unsupported TLS_ENABLED=$TLS_ENABLED. Use 0 or 1." ;;
@@ -39,6 +29,16 @@ validate_k8s_topology_settings() {
     *) fatal "NFS_ENABLED must be 0 or 1" ;;
   esac
 
+  case "$REDIS_ENABLED" in
+    0|1) ;;
+    *) fatal "unsupported REDIS_ENABLED=$REDIS_ENABLED. Use 0 or 1." ;;
+  esac
+
+  case "$REDIS_REQUIRED" in
+    0|1) ;;
+    *) fatal "unsupported REDIS_REQUIRED=$REDIS_REQUIRED. Use 0 or 1." ;;
+  esac
+
   case "$REDIS_SPREAD_RECREATE_PVCS" in
     auto|0|1) ;;
     *) fatal "REDIS_SPREAD_RECREATE_PVCS must be auto, 0, or 1" ;;
@@ -47,6 +47,16 @@ validate_k8s_topology_settings() {
   case "$DISTRIBUTE_IMAGES_TO_NODES" in
     0|1) ;;
     *) fatal "DISTRIBUTE_IMAGES_TO_NODES must be 0 or 1" ;;
+  esac
+
+  case "${K3S_DISABLE_SERVICELB:-1}" in
+    0|1) ;;
+    *) fatal "K3S_DISABLE_SERVICELB must be 0 or 1" ;;
+  esac
+
+  case "${K3S_DISABLE_TRAEFIK:-0}" in
+    0|1) ;;
+    *) fatal "K3S_DISABLE_TRAEFIK must be 0 or 1" ;;
   esac
 
   case "$IMAGE_DISTRIBUTION_PORT" in
@@ -58,12 +68,13 @@ validate_k8s_topology_settings() {
   fi
 
   if [ "$NFS_ENABLED" = "1" ]; then
-    log "validating NFS storage settings"
+    log "validating external NFS storage settings"
     [ -n "$NFS_SERVER" ] || fatal "NFS_ENABLED=1 requires NFS_SERVER"
     [ -n "$NFS_PATH" ] || fatal "NFS_ENABLED=1 requires NFS_PATH"
 
     if [ -z "$PVC_STORAGE_CLASS" ]; then
       PVC_STORAGE_CLASS="$NFS_STORAGE_CLASS"
+      export PVC_STORAGE_CLASS
     fi
 
     if [ "$PVC_STORAGE_CLASS" != "$NFS_STORAGE_CLASS" ]; then
@@ -78,8 +89,13 @@ validate_k8s_topology_settings() {
     [ -n "$TLS_SECRET_NAME" ] || fatal "TLS_ENABLED=1 requires TLS_SECRET_NAME"
   fi
 
+  if [ "$INGRESS_ENABLED" = "1" ] && [ "${K3S_DISABLE_TRAEFIK:-0}" = "1" ]; then
+    warn "INGRESS_ENABLED=1 but K3S_DISABLE_TRAEFIK=1. Ensure another Ingress controller is installed."
+  fi
+
   if [ "$SERVICE_TYPE" = "NodePort" ]; then
     log "validating NodePort service settings"
+
     case "$SERVICE_NODE_PORT" in
       ''|*[!0-9]*) fatal "SERVICE_NODE_PORT must be numeric for SERVICE_TYPE=NodePort" ;;
     esac
@@ -91,6 +107,10 @@ validate_k8s_topology_settings() {
 
   if [ "$SERVICE_TYPE" = "LoadBalancer" ] && [ "$INGRESS_ENABLED" = "1" ]; then
     warn "SERVICE_TYPE=LoadBalancer and INGRESS_ENABLED=1 are both enabled. Usually one exposure path is enough. Official design uses SERVICE_TYPE=ClusterIP with Ingress enabled."
+  fi
+
+  if [ "$SERVICE_TYPE" = "LoadBalancer" ] && [ "${K3S_DISABLE_SERVICELB:-1}" = "1" ] && [ "${INSTALL_METALLB:-0}" != "1" ] && [ "${REQUIRE_METALLB:-0}" = "1" ]; then
+    fatal "SERVICE_TYPE=LoadBalancer with servicelb disabled requires INSTALL_METALLB=1 or an existing load balancer"
   fi
 
   case "$REPLICA_COUNT" in
@@ -179,6 +199,7 @@ perform_pending_rollout_restarts() {
     log "app deployment rollout completed"
 
     RESTART_APP_REQUIRED=0
+    export RESTART_APP_REQUIRED
   fi
 
   if [ "$RESTART_MONITOR_REQUIRED" = "1" ]; then
@@ -190,6 +211,7 @@ perform_pending_rollout_restarts() {
     log "monitor deployment rollout completed"
 
     RESTART_MONITOR_REQUIRED=0
+    export RESTART_MONITOR_REQUIRED
   fi
 }
 
@@ -210,6 +232,7 @@ resolve_portal_url_from_service() {
     log "using requested LoadBalancer IP for PORTAL_URL: $PORTAL_URL"
     apply_runtime_configmap
     PORTAL_URL_CONFIG_REFRESHED=1
+    export ASSIGNED_LOADBALANCER_ADDRESS PORTAL_URL SERVER_IP PORTAL_URL_CONFIG_REFRESHED
     return 0
   fi
 
@@ -245,6 +268,7 @@ resolve_portal_url_from_service() {
       log "using assigned LoadBalancer address for PORTAL_URL: $PORTAL_URL"
       apply_runtime_configmap
       PORTAL_URL_CONFIG_REFRESHED=1
+      export ASSIGNED_LOADBALANCER_ADDRESS PORTAL_URL SERVER_IP PORTAL_URL_CONFIG_REFRESHED
       return 0
     fi
 
