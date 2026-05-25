@@ -16,12 +16,47 @@ apply_secret_if_required() {
   fi
 }
 
+verify_app_image_contents() {
+  if ! requires_app_image; then
+    return 0
+  fi
+
+  log "verifying built app image contains generated frontend bundle"
+
+  tmp_container="$("$DOCKER_BIN" create "$APP_IMAGE")"
+  cleanup_tmp_container() {
+    "$DOCKER_BIN" rm -f "$tmp_container" >/dev/null 2>&1 || true
+  }
+  trap cleanup_tmp_container RETURN
+
+  "$DOCKER_BIN" cp "$tmp_container:/app/frontend/app.js" "$GENERATED_DIR/app-image-frontend-app.js" >/dev/null
+
+  [ -s "$GENERATED_DIR/app-image-frontend-app.js" ] || \
+    fatal "app image contains /app/frontend/app.js, but it is empty"
+
+  if "$DOCKER_BIN" cp "$tmp_container:/app/app.js" "$GENERATED_DIR/app-image-root-app.js" >/dev/null 2>&1; then
+    fatal "app image contains forbidden root-level /app/app.js"
+  fi
+
+  if "$DOCKER_BIN" cp "$tmp_container:/app/frontend/app.jsx" "$GENERATED_DIR/app-image-frontend-app.jsx" >/dev/null 2>&1; then
+    fatal "app image contains frontend source /app/frontend/app.jsx; runtime image should contain generated app.js only"
+  fi
+
+  if grep -nE 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' "$GENERATED_DIR/app-image-frontend-app.js" >/dev/null 2>&1; then
+    fatal "app image frontend bundle contains RTA wizard content; restore OTP Relay portal source before deployment"
+  fi
+
+  log "app image frontend bundle validation passed"
+}
+
 build_and_import_images_if_required() {
   if requires_app_image; then
     log "building app image with Docker: $APP_IMAGE"
     log "Docker build can take several minutes on a fresh host"
     "$DOCKER_BIN" build -t "$APP_IMAGE" -f "$APP_DOCKERFILE" .
     log "app image build completed: $APP_IMAGE"
+
+    verify_app_image_contents
 
     log "saving app image for K3s import/distribution"
     tmp_app_tar="$(mktemp -p "$GENERATED_DIR" otp-relay-app-image.XXXXXX.tar)"
@@ -144,6 +179,41 @@ apply_app_storage_resources() {
   log "app storage resource check completed"
 }
 
+validate_running_app_frontend() {
+  if ! requires_app_image; then
+    return 0
+  fi
+
+  log "validating generated frontend bundle inside running OTP Relay pod"
+
+  k3s kubectl rollout status deployment/otp-relay -n "$NAMESPACE" --timeout=240s
+
+  app_pod="$(k3s kubectl get pod -n "$NAMESPACE" -l app=otp-relay -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$app_pod" ] || fatal "could not find running otp-relay pod for frontend validation"
+
+  log "validating frontend files in pod $NAMESPACE/$app_pod"
+
+  k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- test -s /app/frontend/app.js || \
+    fatal "running app pod does not contain generated /app/frontend/app.js"
+
+  if k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- test -e /app/app.js; then
+    fatal "running app pod contains forbidden root-level /app/app.js"
+  fi
+
+  if k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- test -e /app/frontend/app.jsx; then
+    fatal "running app pod contains /app/frontend/app.jsx; runtime should serve generated app.js only"
+  fi
+
+  if k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- sh -c "grep -E 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' /app/frontend/app.js" >/dev/null 2>&1; then
+    fatal "running app pod frontend bundle contains RTA wizard content"
+  fi
+
+  k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- sh -c 'grep -q "script src=\"app.js\"" /app/frontend/index.html' || \
+    fatal "running app pod index.html does not reference app.js"
+
+  log "running OTP Relay pod frontend validation passed"
+}
+
 apply_kubernetes_resources_if_required() {
   if requires_manifests_apply; then
     log "applying Kubernetes resources for DEPLOY_MODE=$DEPLOY_MODE"
@@ -237,6 +307,10 @@ apply_kubernetes_resources_if_required() {
   fi
 
   perform_pending_rollout_restarts
+
+  if [ "$DEPLOY_MODE" = "full" ] || [ "$DEPLOY_MODE" = "app" ] || [ "$DEPLOY_MODE" = "manifests" ]; then
+    validate_running_app_frontend
+  fi
 
   if [ "$DEPLOY_MODE" = "manifests" ]; then
     log "manifest-only apply complete; checking rollout status for existing deployments"
