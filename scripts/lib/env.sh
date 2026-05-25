@@ -223,9 +223,11 @@ WORKER1_NAME=$(_env_quote "${WORKER1_NAME:-otp-worker1}")
 WORKER2_NAME=$(_env_quote "${WORKER2_NAME:-otp-worker2}")
 
 # Observability
-# Existing k8s/observability/*values.yaml files are Helm values.
-# This installer currently applies raw YAML only.
+# kube-prometheus-stack is installed by the installer when OBSERVABILITY_INSTALL_STACK=1.
 OBSERVABILITY_NAMESPACE=$(_env_quote "${OBSERVABILITY_NAMESPACE:-observability}")
+OBSERVABILITY_INSTALL_STACK=$(_env_quote "${OBSERVABILITY_INSTALL_STACK:-1}")
+OBSERVABILITY_STACK_CHART_VERSION=$(_env_quote "${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}")
+GRAFANA_HOST=$(_env_quote "${GRAFANA_HOST:-grafana.init-db.lan}")
 EOF_ENV
 
   mv "$tmp" "$target"
@@ -283,6 +285,9 @@ create_env_interactive() {
   _env_set_default PHONE_PING_INTERVAL "10"
   _env_set_default PHONE_OFFLINE_THRESHOLD "30"
   _env_set_default OBSERVABILITY_NAMESPACE "observability"
+  _env_set_default OBSERVABILITY_INSTALL_STACK "1"
+  _env_set_default OBSERVABILITY_STACK_CHART_VERSION "85.0.1"
+  _env_set_default GRAFANA_HOST "grafana.init-db.lan"
 
   _env_prompt NAMESPACE "Kubernetes namespace" 1 0
   _env_prompt SERVICE_TYPE "Service type: ClusterIP, NodePort, or LoadBalancer" 1 0
@@ -360,11 +365,12 @@ Environment file: $ENV_FILE
 6) Placement/replicas: REPLICA_COUNT, node selectors
 7) Installer behavior: DEPLOY_MODE, RUNNER_ONLY, SKIP_REPO_SYNC
 8) Worker VM provisioning: bridge, worker IPs, VM sizing
-9) Save and continue
+9) Observability: Grafana/Prometheus install and Grafana host
+10) Save and continue
 EOF_MENU
 
-    read -r -p "Choose what to change [9]: " choice
-    choice="${choice:-9}"
+    read -r -p "Choose what to change [10]: " choice
+    choice="${choice:-10}"
 
     case "$choice" in
       1)
@@ -433,6 +439,12 @@ EOF_MENU
         _env_prompt VM_DISK_GB "Worker VM disk GB" 1 0
         ;;
       9)
+        _env_prompt OBSERVABILITY_NAMESPACE "Observability namespace" 1 0
+        _env_prompt OBSERVABILITY_INSTALL_STACK "Install Grafana/Prometheus with kube-prometheus-stack? 1/0" 1 0
+        _env_prompt OBSERVABILITY_STACK_CHART_VERSION "kube-prometheus-stack chart version" 1 0
+        _env_prompt GRAFANA_HOST "Grafana hostname" 1 0
+        ;;
+      10)
         normalize_loaded_env
         _write_env_file "$ENV_FILE"
         return 0
@@ -697,6 +709,9 @@ normalize_loaded_env() {
   WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 
   OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
+  OBSERVABILITY_INSTALL_STACK="${OBSERVABILITY_INSTALL_STACK:-1}"
+  OBSERVABILITY_STACK_CHART_VERSION="${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}"
+  GRAFANA_HOST="${GRAFANA_HOST:-grafana.init-db.lan}"
 
   RESTART_APP_REQUIRED=0
   RESTART_MONITOR_REQUIRED=0
@@ -710,7 +725,7 @@ normalize_loaded_env() {
   export GITHUB_RUNNER_DIR GITHUB_RUNNER_USER RUNNER_ONLY DEPLOY_MODE DOCKER_BIN REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS
   export DISTRIBUTE_IMAGES_TO_NODES IMAGE_DISTRIBUTION_PORT IMAGE_IMPORTER_IMAGE SMS_SECRET_TOKEN RESTART_APP_REQUIRED RESTART_MONITOR_REQUIRED
   export BRIDGE_NAME HOST_IFACE HOST_IP_CIDR GATEWAY DNS PREFIX IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END AUTO_ASSIGN_IPS WORKER1_IP WORKER2_IP VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB WORKER1_NAME WORKER2_NAME
-  export OBSERVABILITY_NAMESPACE
+  export OBSERVABILITY_NAMESPACE OBSERVABILITY_INSTALL_STACK OBSERVABILITY_STACK_CHART_VERSION GRAFANA_HOST
 
   log "installer environment normalization completed"
 }
