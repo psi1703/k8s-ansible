@@ -141,9 +141,40 @@
   changed_when: true
   failed_when: false
 
+
+- name: Set observability UI Kubernetes node fact
+  ansible.builtin.set_fact:
+    observability_ui_node: "{{ worker_k8s_nodes[0] }}"
+
+- name: Set observability data Kubernetes node fact
+  ansible.builtin.set_fact:
+    observability_data_node: "{{ worker_k8s_nodes[1] if (worker_k8s_nodes | length) > 1 else worker_k8s_nodes[0] }}"
+
+- name: Label observability UI node for Grafana and Alertmanager
+  ansible.builtin.command:
+    cmd: k3s kubectl label node {{ observability_ui_node }} observability/role=ui --overwrite
+  changed_when: true
+
+- name: Label observability data node for Prometheus
+  ansible.builtin.command:
+    cmd: k3s kubectl label node {{ observability_data_node }} observability/role=data --overwrite
+  changed_when: true
+
+- name: Remove observability eligibility from control-plane
+  ansible.builtin.command:
+    cmd: k3s kubectl label node {{ control_plane_k8s_node }} observability/role- --overwrite
+  changed_when: true
+  failed_when: false
+
+- name: Show resolved observability placement
+  ansible.builtin.debug:
+    msg:
+      - "Grafana/Alertmanager observability UI node: {{ observability_ui_node }}"
+      - "Prometheus observability data node: {{ observability_data_node }}"
+
 - name: Show final node labels
   ansible.builtin.command:
-    cmd: k3s kubectl get nodes -L otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node
+    cmd: k3s kubectl get nodes -L otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node,observability/role
   register: final_node_labels
   changed_when: false
 
