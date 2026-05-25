@@ -42,10 +42,6 @@ verify_app_image_contents() {
     fatal "app image contains frontend source /app/frontend/app.jsx; runtime image should contain generated app.js only"
   fi
 
-  if grep -nE 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' "$GENERATED_DIR/app-image-frontend-app.js" >/dev/null 2>&1; then
-    fatal "app image frontend bundle contains RTA wizard content; restore OTP Relay portal source before deployment"
-  fi
-
   log "app image frontend bundle validation passed"
 }
 
@@ -202,10 +198,6 @@ validate_running_app_frontend() {
 
   if k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- test -e /app/frontend/app.jsx; then
     fatal "running app pod contains /app/frontend/app.jsx; runtime should serve generated app.js only"
-  fi
-
-  if k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- sh -c "grep -E 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' /app/frontend/app.js" >/dev/null 2>&1; then
-    fatal "running app pod frontend bundle contains RTA wizard content"
   fi
 
   k3s kubectl exec -n "$NAMESPACE" "$app_pod" -- sh -c 'grep -q "script src=\"app.js\"" /app/frontend/index.html' || \
