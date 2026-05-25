@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 ANSIBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${ANSIBLE_DIR}/../.." && pwd)"
 INVENTORY="${INVENTORY:-${ANSIBLE_DIR}/inventory.generated.ini}"
@@ -34,12 +36,71 @@ SSH_USER="${VM_USER:-otp-relay}"
 BRIDGE_NAME="${BRIDGE_NAME:-br0}"
 PREFIX="${PREFIX:-24}"
 
+resolve_iptables_bin() {
+  if command -v iptables >/dev/null 2>&1; then
+    command -v iptables
+    return 0
+  fi
+
+  for candidate in /usr/sbin/iptables /sbin/iptables /usr/bin/iptables /bin/iptables; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resolve_dnsmasq_bin() {
+  if command -v dnsmasq >/dev/null 2>&1; then
+    command -v dnsmasq
+    return 0
+  fi
+
+  for candidate in /usr/sbin/dnsmasq /sbin/dnsmasq /usr/bin/dnsmasq /bin/dnsmasq; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_server_networking_helpers() {
+  local missing=0
+
+  if ! resolve_iptables_bin >/dev/null 2>&1; then
+    missing=1
+  fi
+
+  if ! resolve_dnsmasq_bin >/dev/null 2>&1; then
+    missing=1
+  fi
+
+  if ! command -v dig >/dev/null 2>&1; then
+    missing=1
+  fi
+
+  if [[ "$missing" = "1" ]]; then
+    log "Installing missing server networking helpers: iptables dnsmasq dnsutils"
+    sudo apt-get update
+    sudo apt-get install -y iptables dnsmasq dnsutils
+  fi
+
+  resolve_iptables_bin >/dev/null 2>&1 || fatal "iptables binary was not found after installation. Checked PATH, /usr/sbin, /sbin, /usr/bin, and /bin."
+  resolve_dnsmasq_bin >/dev/null 2>&1 || fatal "dnsmasq binary was not found after installation. Checked PATH, /usr/sbin, /sbin, /usr/bin, and /bin."
+}
+
 fix_local_ssh_permissions() {
   local real_user="${SUDO_USER:-${USER:-$(id -un)}}"
+  local real_group
   local real_home
   local ssh_dir
   local known_hosts
 
+  real_group="$(id -gn "$real_user" 2>/dev/null || printf '%s' "$real_user")"
   real_home="$(getent passwd "$real_user" | cut -d: -f6)"
   ssh_dir="$real_home/.ssh"
   known_hosts="$ssh_dir/known_hosts"
@@ -48,21 +109,23 @@ fix_local_ssh_permissions() {
 
   sudo mkdir -p "$ssh_dir"
   sudo chmod 700 "$ssh_dir" || true
-  sudo chown "$real_user:$real_user" "$ssh_dir" 2>/dev/null || sudo chown "$real_user" "$ssh_dir" 2>/dev/null || true
+  sudo chown "$real_user:$real_group" "$ssh_dir" 2>/dev/null || sudo chown "$real_user" "$ssh_dir" 2>/dev/null || true
 
   sudo touch "$known_hosts"
   sudo chmod 644 "$known_hosts" || true
-  sudo chown "$real_user:$real_user" "$known_hosts" 2>/dev/null || sudo chown "$real_user" "$known_hosts" 2>/dev/null || true
+  sudo chown "$real_user:$real_group" "$known_hosts" 2>/dev/null || sudo chown "$real_user" "$known_hosts" 2>/dev/null || true
 
   if [[ -f "$SSH_KEY" ]]; then
+    sudo chown "$real_user:$real_group" "$SSH_KEY" 2>/dev/null || sudo chown "$real_user" "$SSH_KEY" 2>/dev/null || true
     sudo chmod 600 "$SSH_KEY" || true
-    sudo chown "$real_user:$real_user" "$SSH_KEY" 2>/dev/null || sudo chown "$real_user" "$SSH_KEY" 2>/dev/null || true
   fi
 
   if [[ -f "${SSH_KEY}.pub" ]]; then
+    sudo chown "$real_user:$real_group" "${SSH_KEY}.pub" 2>/dev/null || sudo chown "$real_user" "${SSH_KEY}.pub" 2>/dev/null || true
     sudo chmod 644 "${SSH_KEY}.pub" || true
-    sudo chown "$real_user:$real_user" "${SSH_KEY}.pub" 2>/dev/null || sudo chown "$real_user" "${SSH_KEY}.pub" 2>/dev/null || true
   fi
+
+  [[ ! -f "$SSH_KEY" || -r "$SSH_KEY" ]] || fatal "SSH key exists but is not readable by ${real_user}: $SSH_KEY"
 }
 
 worker_inventory_hosts() {
@@ -106,6 +169,11 @@ cleanup_known_hosts() {
     return 0
   fi
 
+  mkdir -p "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh" || true
+  touch "$HOME/.ssh/known_hosts"
+  chmod 644 "$HOME/.ssh/known_hosts" || true
+
   worker_inventory_ips | while read -r host; do
     [[ -n "$host" ]] || continue
     ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$host" >/dev/null 2>&1 || true
@@ -129,6 +197,7 @@ raw_ssh_check_workers() {
     fatal "No [workers] entries found in inventory. Provision worker VMs first."
   fi
 
+  fix_local_ssh_permissions
   [[ -f "$SSH_KEY" ]] || fatal "Missing SSH key: $SSH_KEY"
 
   worker_inventory_hosts | while read -r host ip; do
@@ -155,17 +224,13 @@ ensure_ansible_installed() {
   if ! command -v ansible >/dev/null 2>&1; then
     log "Installing Ansible on server/control-plane; this may take a few minutes"
     sudo apt-get update
-    sudo apt-get install -y ansible iptables dnsmasq
+    sudo apt-get install -y ansible iptables dnsmasq dnsutils
     ok "Ansible installed"
   else
     log "Ansible already installed: $(command -v ansible)"
-
-    if ! command -v iptables >/dev/null 2>&1 || ! command -v dnsmasq >/dev/null 2>&1; then
-      log "Installing missing server networking helpers: iptables/dnsmasq"
-      sudo apt-get update
-      sudo apt-get install -y iptables dnsmasq
-    fi
   fi
+
+  ensure_server_networking_helpers
 }
 
 detect_host_bridge_ip() {
@@ -244,6 +309,7 @@ ensure_vm_bridge_forwarding() {
   local bridge="${BRIDGE_NAME:-br0}"
   local uplink
   local vm_cidr
+  local iptables_bin
 
   uplink="$(detect_host_uplink_iface)"
   vm_cidr="${IP_SCAN_PREFIX:-}"
@@ -264,25 +330,22 @@ ensure_vm_bridge_forwarding() {
   log "VM CIDR: ${vm_cidr}"
 
   ensure_ipv4_forwarding
+  ensure_server_networking_helpers
 
-  if ! command -v iptables >/dev/null 2>&1; then
-    log "iptables is missing; installing it for worker VM bridge forwarding/NAT"
-    sudo apt-get update
-    sudo apt-get install -y iptables
+  if ! iptables_bin="$(resolve_iptables_bin)"; then
+    fatal "iptables binary was not found. Checked PATH, /usr/sbin/iptables, /sbin/iptables, /usr/bin/iptables, and /bin/iptables."
   fi
 
-  if ! command -v iptables >/dev/null 2>&1; then
-    fatal "iptables is still not available after installation; cannot configure VM bridge forwarding"
-  fi
+  log "Using iptables binary: ${iptables_bin}"
 
-  sudo iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null || \
-    sudo iptables -I FORWARD 1 -i "$bridge" -j ACCEPT
+  sudo "$iptables_bin" -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null || \
+    sudo "$iptables_bin" -I FORWARD 1 -i "$bridge" -j ACCEPT
 
-  sudo iptables -C FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-    sudo iptables -I FORWARD 1 -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  sudo "$iptables_bin" -C FORWARD -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    sudo "$iptables_bin" -I FORWARD 1 -o "$bridge" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
-  sudo iptables -t nat -C POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE 2>/dev/null || \
-    sudo iptables -t nat -A POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE
+  sudo "$iptables_bin" -t nat -C POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE 2>/dev/null || \
+    sudo "$iptables_bin" -t nat -A POSTROUTING -s "$vm_cidr" -o "$uplink" -j MASQUERADE
 
   ok "Worker VM bridge forwarding/NAT rules are present"
 }
@@ -301,11 +364,7 @@ configure_host_dns_forwarder() {
   log "VM DNS listen address: ${host_ip}"
   log "Upstream DNS servers: ${dns_servers}"
 
-  if ! command -v dnsmasq >/dev/null 2>&1; then
-    log "Installing dnsmasq on server; this may take a few minutes"
-    sudo apt-get update
-    sudo apt-get install -y dnsmasq
-  fi
+  ensure_server_networking_helpers
 
   {
     echo "# Managed by k8s-ansible automation/ansible/run-cluster.sh"
@@ -360,6 +419,8 @@ timeout 10 getent hosts deb.debian.org
 }
 
 validate_worker_outbound_https() {
+  local iptables_bin=""
+
   log "Validating outbound HTTPS from worker VMs"
 
   ansible -i "$INVENTORY" workers -b -m shell -a '
@@ -371,8 +432,15 @@ timeout 15 bash -c "cat < /dev/null > /dev/tcp/deb.debian.org/443"
 ' || {
     warn "Worker DNS resolves, but outbound HTTPS to deb.debian.org:443 failed"
     warn "Server forwarding/firewall/NAT rules are below for diagnostics"
-    sudo iptables -S FORWARD || true
-    sudo iptables -t nat -S || true
+
+    iptables_bin="$(resolve_iptables_bin || true)"
+    if [[ -n "$iptables_bin" ]]; then
+      sudo "$iptables_bin" -S FORWARD || true
+      sudo "$iptables_bin" -t nat -S || true
+    else
+      warn "iptables binary not found for diagnostics"
+    fi
+
     fatal "Worker outbound HTTPS failed; refusing to run apt until forwarding is fixed"
   }
 
@@ -566,6 +634,7 @@ main() {
   log "SSH key: $SSH_KEY"
   log "Worker SSH user: $SSH_USER"
   log "Control-plane: localhost / this server"
+  log "PATH: $PATH"
 
   ensure_ansible_installed
   fix_local_ssh_permissions
