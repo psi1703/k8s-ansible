@@ -4,6 +4,7 @@
     otp_relay_install_dir: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
     otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
     otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
+    otp_relay_installer_status_file: "/tmp/otp-relay-installer-current.status"
 
 - name: Check if control-plane is local
   ansible.builtin.set_fact:
@@ -42,6 +43,7 @@
       - "--exclude=node_modules/"
       - "--exclude=automation/libvirt/build/"
       - "--exclude=automation/ansible/inventory.generated.ini"
+      - "--exclude=.env"
   delegate_to: localhost
   when: not otp_relay_control_plane_is_local | bool
 
@@ -74,20 +76,27 @@
   args:
     executable: /bin/bash
   become: true
+  changed_when: false
 
-- name: Clear previous OTP Relay installer log
+- name: Clear previous OTP Relay installer log and status
   ansible.builtin.file:
-    path: "{{ otp_relay_installer_log }}"
+    path: "{{ item }}"
     state: absent
   become: true
+  loop:
+    - "{{ otp_relay_installer_log }}"
+    - "{{ otp_relay_installer_status_file }}"
 
 - name: Start OTP Relay installer asynchronously
   ansible.builtin.shell: |
     set -euo pipefail
 
     LOG="{{ otp_relay_installer_log }}"
+    STATUS_FILE="{{ otp_relay_installer_status_file }}"
     INSTALL_DIR="{{ otp_relay_install_dir }}"
     ENV_SOURCE="{{ otp_relay_env_file }}"
+
+    rm -f "$STATUS_FILE"
 
     {
       echo "[INFO] Starting OTP Relay installer on $(hostname)"
@@ -96,16 +105,29 @@
       echo "[INFO] Env file: ${ENV_SOURCE}"
       echo "[INFO] Control-plane mode: localhost/server"
       echo "[INFO] Long-running steps may include apt-get, Docker build, K3s checks, image import, kubectl apply, and rollout waits."
+      echo "[INFO] Live log command: sudo tail -f ${LOG}"
       echo
     } > "$LOG"
 
     cd "$INSTALL_DIR"
 
+    set +e
     ENV_FILE="$ENV_SOURCE" \
     NONINTERACTIVE=1 \
     SKIP_REPO_SYNC=1 \
     GIT_CLEAN=0 \
     stdbuf -oL -eL bash install-otp-relay-k8s.sh >> "$LOG" 2>&1
+    rc="$?"
+    set -e
+
+    {
+      echo
+      echo "[INFO] OTP Relay installer finished at: $(date -Is)"
+      echo "[INFO] OTP Relay installer rc=${rc}"
+    } >> "$LOG"
+
+    printf '%s\n' "$rc" > "$STATUS_FILE"
+    exit "$rc"
   args:
     executable: /bin/bash
   become: true
@@ -117,23 +139,29 @@
   ansible.builtin.debug:
     msg:
       - "OTP Relay installer started asynchronously."
+      - "Installer job id: {{ otp_relay_installer_job.ansible_job_id }}"
       - "Live log on control-plane:"
       - "sudo tail -f {{ otp_relay_installer_log }}"
+      - "Status file:"
+      - "{{ otp_relay_installer_status_file }}"
 
 - name: Wait briefly before first installer log snapshot
   ansible.builtin.pause:
     seconds: 15
 
-- name: Print recent installer log output
+- name: Print initial installer log snapshot
   ansible.builtin.shell: |
     set -eu
 
     echo "===== installer job id: {{ otp_relay_installer_job.ansible_job_id }} ====="
     echo
+    echo "===== live log command ====="
+    echo "sudo tail -f {{ otp_relay_installer_log }}"
+    echo
     echo "===== recent installer log ====="
 
     if [ -f "{{ otp_relay_installer_log }}" ]; then
-      tail -60 "{{ otp_relay_installer_log }}"
+      tail -100 "{{ otp_relay_installer_log }}"
     else
       echo "installer log not created yet: {{ otp_relay_installer_log }}"
     fi
@@ -152,13 +180,35 @@
   delay: 10
   become: true
 
+- name: Read OTP Relay installer status file
+  ansible.builtin.shell: |
+    set -eu
+
+    if [ -f "{{ otp_relay_installer_status_file }}" ]; then
+      cat "{{ otp_relay_installer_status_file }}"
+    else
+      echo "missing"
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  register: otp_relay_installer_status_file_result
+  changed_when: false
+  failed_when: false
+
 - name: Show final OTP Relay installer log
   ansible.builtin.shell: |
     set -eu
 
+    echo "===== installer status ====="
+    echo "async finished={{ otp_relay_installer_status.finished | default('unknown') }}"
+    echo "async rc={{ otp_relay_installer_status.rc | default('unknown') }}"
+    echo "status file rc={{ otp_relay_installer_status_file_result.stdout | default('unknown') }}"
+    echo
     echo "===== final installer log tail ====="
+
     if [ -f "{{ otp_relay_installer_log }}" ]; then
-      tail -180 "{{ otp_relay_installer_log }}"
+      tail -220 "{{ otp_relay_installer_log }}"
     else
       echo "installer log missing: {{ otp_relay_installer_log }}"
     fi
@@ -170,6 +220,7 @@
 - name: Fail when OTP Relay installer failed
   ansible.builtin.fail:
     msg: >-
-      OTP Relay installer failed with rc={{ otp_relay_installer_status.rc | default('unknown') }}.
+      OTP Relay installer failed with rc={{ otp_relay_installer_status.rc | default(otp_relay_installer_status_file_result.stdout | default('unknown')) }}.
       Review the control-plane log: {{ otp_relay_installer_log }}
+      Live command: sudo tail -f {{ otp_relay_installer_log }}
   when: otp_relay_installer_status.rc | default(0) != 0
