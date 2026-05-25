@@ -185,8 +185,11 @@ enable_libvirt() {
 }
 
 ensure_ssh_key() {
-  mkdir -p "$(dirname "$SSH_KEY")"
-  chmod 700 "$(dirname "$SSH_KEY")"
+  local ssh_dir
+  ssh_dir="$(dirname "$SSH_KEY")"
+
+  mkdir -p "$ssh_dir"
+  chmod 700 "$ssh_dir"
 
   if [[ ! -f "$SSH_KEY" ]]; then
     log "Creating SSH key: $SSH_KEY"
@@ -195,8 +198,38 @@ ensure_ssh_key() {
 
   [[ -f "$SSH_PUB_KEY" ]] || fatal "Missing SSH public key: $SSH_PUB_KEY"
 
-  chmod 600 "$SSH_KEY"
-  chmod 644 "$SSH_PUB_KEY"
+  repair_ssh_key_permissions
+}
+
+repair_ssh_key_permissions() {
+  local ssh_dir operator_user operator_group known_hosts
+
+  ssh_dir="$(dirname "$SSH_KEY")"
+  known_hosts="${ssh_dir}/known_hosts"
+  operator_user="$(id -un)"
+  operator_group="$(id -gn)"
+
+  log "repairing SSH key ownership/permissions for $operator_user"
+
+  sudo chown "$operator_user:$operator_group" "$ssh_dir" 2>/dev/null || true
+  chmod 700 "$ssh_dir" || true
+
+  if [[ -f "$SSH_KEY" ]]; then
+    sudo chown "$operator_user:$operator_group" "$SSH_KEY" 2>/dev/null || true
+    chmod 600 "$SSH_KEY" || fatal "failed to set private key permissions on $SSH_KEY"
+  fi
+
+  if [[ -f "$SSH_PUB_KEY" ]]; then
+    sudo chown "$operator_user:$operator_group" "$SSH_PUB_KEY" 2>/dev/null || true
+    chmod 644 "$SSH_PUB_KEY" || true
+  fi
+
+  if [[ -f "$known_hosts" ]]; then
+    sudo chown "$operator_user:$operator_group" "$known_hosts" 2>/dev/null || true
+    chmod 644 "$known_hosts" || true
+  fi
+
+  [[ -r "$SSH_KEY" ]] || fatal "SSH private key exists but is not readable by $operator_user: $SSH_KEY"
 }
 
 check_host() {
