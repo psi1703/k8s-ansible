@@ -4,10 +4,17 @@ set -Eeuo pipefail
 # Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
 # Normal use: ./setup.sh
 #
-# This version does not select Ansible merely because an inventory file exists.
-# It verifies that inventory hosts are SSH reachable first. If not, it runs the
-# VM provisioner in repair/recreate mode so stale shut-off domains, missing seed
-# ISOs, stale inventories, and broken VM identities do not trap the installer.
+# Current design:
+#   - This server is the K3s control-plane and Ansible runner.
+#   - The libvirt provisioner creates only worker1 and worker2 VMs.
+#   - External NFS is managed separately and is not joined to Kubernetes.
+#
+# This script:
+#   - creates/reuses .env
+#   - prompts for VM/network values when needed
+#   - provisions/repairs worker VMs when needed
+#   - runs Ansible cluster setup using localhost as control-plane
+#   - can still run local-only installer path with --local for development
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -32,18 +39,23 @@ Usage:
   ./setup.sh
 
 Optional overrides:
-  --edit-env          Open the saved .env change menu before continuing.
-  --dry-run           Detect state and print planned action without changing the system.
-  --local             Force local K3s/app installer path for this run.
-  --reprovision-vms   Force VM recreation/repair even if inventory/VMs already exist.
-  --no-ansible        Provision/update VMs only; skip Ansible cluster setup.
-  --noninteractive    Do not prompt where supported; requires complete .env/exported env.
-  -h, --help          Show this help.
+  --edit-env           Open the saved .env change menu before continuing.
+  --dry-run            Detect state and print planned action without changing the system.
+  --local              Force local-only K3s/app installer path for this run.
+  --reprovision-vms    Force worker VM recreation/repair even if inventory/VMs already exist.
+  --no-ansible         Provision/update worker VMs only; skip Ansible cluster setup.
+  --noninteractive     Do not prompt where supported; requires complete .env/exported env.
+  -h, --help           Show this help.
 
 Default behavior:
-  ./setup.sh creates or reuses .env, validates real runtime state, and chooses
-  the correct setup path automatically. .env stores configuration values only;
-  it does not decide workflow mode.
+  ./setup.sh creates or reuses .env, validates real runtime state, provisions
+  worker VMs when required, and runs Ansible using this server as the K3s
+  control-plane.
+
+Current design:
+  - server/real host = K3s control-plane + Ansible runner
+  - worker1 VM + worker2 VM = K3s workers
+  - NFS = external storage, not a Kubernetes node
 USAGE
 }
 
@@ -80,6 +92,7 @@ source_installer_env_libs() {
 
 chown_env_to_original_user() {
   local file="${ENV_FILE:-$SCRIPT_DIR/.env}"
+
   if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ] && [ -f "$file" ]; then
     chown "$SUDO_USER:$SUDO_USER" "$file" 2>/dev/null || chown "$SUDO_USER" "$file" 2>/dev/null || true
     chmod 0600 "$file" || true
@@ -97,6 +110,7 @@ source_env_if_present() {
 
 run_as_original_user() {
   local cmd=("$@")
+
   if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ]; then
     sudo -H -u "$SUDO_USER" env \
       HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)" \
@@ -111,6 +125,7 @@ run_as_original_user() {
 
 run_with_sudo_or_root() {
   local cmd=("$@")
+
   if [ "$(id -u)" -eq 0 ]; then
     "${cmd[@]}"
   else
@@ -203,10 +218,12 @@ prompt_value() {
     fi
 
     input="${input:-$default}"
+
     if [ -n "$input" ] || [ "$required" != "1" ]; then
       set_env_key "$key" "$input"
       return 0
     fi
+
     warn "$key is required"
   done
 }
@@ -259,14 +276,17 @@ sanitize_dns_value() {
 
 default_host_cidr() {
   local iface="${HOST_IFACE:-}"
+
   [ -n "$iface" ] || iface="$(default_iface)"
   [ -n "$iface" ] || return 0
+
   ip -o -4 addr show dev "$iface" 2>/dev/null | awk '{print $4; exit}'
 }
 
 default_scan_prefix() {
   local cidr="${HOST_IP_CIDR:-}"
   local ip="${cidr%%/*}"
+
   if printf '%s' "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
     printf '%s.%s.%s' \
       "$(printf '%s' "$ip" | cut -d. -f1)" \
@@ -298,24 +318,24 @@ ensure_vm_env() {
 
 VM provisioning settings
 EOF_VM_INFO
+
   prompt_value BRIDGE_NAME "Libvirt bridge name" 1 0
-  prompt_value HOST_IFACE "Host interface to bridge for VMs" 1 0
+  prompt_value HOST_IFACE "Host interface to bridge for worker VMs" 1 0
   prompt_value HOST_IP_CIDR "Host bridge IP/CIDR" 1 0
   prompt_value GATEWAY "Network gateway" 1 0
-  prompt_value DNS "DNS server for VMs" 1 0
+  prompt_value DNS "DNS server for worker VMs" 1 0
   prompt_value PREFIX "Network prefix length" 1 0
-  prompt_value IP_SCAN_PREFIX "IP scan prefix for VM auto assignment, for example 172.31.11" 1 0
+  prompt_value IP_SCAN_PREFIX "IP scan prefix for worker VM auto assignment, for example 172.31.11" 1 0
   prompt_value IP_SCAN_START "IP scan start octet" 1 0
   prompt_value IP_SCAN_END "IP scan end octet" 1 0
-  prompt_value VM_USER "VM login user" 1 0
-  prompt_value VM_PASSWORD "VM login password" 1 1
-  prompt_value VM_RAM_MB "VM RAM MB" 1 0
-  prompt_value VM_VCPUS "VM vCPUs" 1 0
-  prompt_value VM_DISK_GB "VM disk GB" 1 0
-  prompt_value AUTO_ASSIGN_IPS "Auto assign free VM IPs? 1=yes, 0=no" 1 0
+  prompt_value VM_USER "Worker VM login user" 1 0
+  prompt_value VM_PASSWORD "Worker VM login password" 1 1
+  prompt_value VM_RAM_MB "Worker VM RAM MB" 1 0
+  prompt_value VM_VCPUS "Worker VM vCPUs" 1 0
+  prompt_value VM_DISK_GB "Worker VM disk GB" 1 0
+  prompt_value AUTO_ASSIGN_IPS "Auto assign free worker VM IPs? 1=yes, 0=no" 1 0
 
   if [ "${AUTO_ASSIGN_IPS:-1}" != "1" ]; then
-    prompt_value CP_IP "Control-plane VM IP" 1 0
     prompt_value WORKER1_IP "Worker 1 VM IP" 1 0
     prompt_value WORKER2_IP "Worker 2 VM IP" 1 0
   fi
@@ -330,39 +350,45 @@ provisioner_path() {
 
 ansible_runner_path() {
   local candidate
+
   for candidate in \
     "$SCRIPT_DIR/automation/ansible/run-cluster" \
-    "$SCRIPT_DIR/automation/ansible/run-cluster.sh" \
     "$SCRIPT_DIR/automation/ansible/run-cluster.sh"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
+
   return 1
 }
 
 ansible_inventory_path() {
   local candidate
+
   for candidate in \
-    "$SCRIPT_DIR/automation/ansible/inventory.generated.ini" \
     "$SCRIPT_DIR/automation/ansible/inventory.generated.ini"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
+
   return 1
 }
 
-inventory_hosts() {
+inventory_worker_hosts() {
   local inventory="$1"
 
   awk '
+    BEGIN { in_workers=0 }
     /^[[:space:]]*$/ { next }
     /^[[:space:]]*#/ { next }
-    /^\[/ { next }
-    {
+    /^\[/ {
+      in_workers = ($0 == "[workers]")
+      next
+    }
+    in_workers {
       host=$1
       ip=""
       for (i = 1; i <= NF; i++) {
@@ -382,27 +408,30 @@ ssh_ready_for_inventory_host() {
   local host="$1"
   local ip="$2"
   local user="${VM_USER:-otp-relay}"
-  local _real_home
-  _real_home="$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)"
-  local key="${SSH_KEY:-${_real_home}/.ssh/otp-relay-cluster}"
+  local real_user="${SUDO_USER:-$(id -un)}"
+  local real_home
+  local key
+
+  real_home="$(getent passwd "$real_user" | cut -d: -f6)"
+  key="${SSH_KEY:-${real_home}/.ssh/otp-relay-cluster}"
 
   [ -n "$host" ] || return 1
   [ -n "$ip" ] || return 1
   [ -f "$key" ] || return 1
 
-  ssh-keygen -f "${_real_home}/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+  ssh-keygen -f "${real_home}/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
 
   ssh \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="${_real_home}/.ssh/known_hosts" \
+    -o UserKnownHostsFile="${real_home}/.ssh/known_hosts" \
     -o ConnectTimeout=5 \
     -i "$key" \
     "${user}@${ip}" \
     'hostname >/dev/null 2>&1' >/dev/null 2>&1
 }
 
-inventory_ssh_ready() {
+inventory_workers_ssh_ready() {
   local inventory="$1"
   local host ip
   local count=0
@@ -412,11 +441,12 @@ inventory_ssh_ready() {
   while read -r host ip; do
     [ -n "$host" ] || continue
     count=$((count + 1))
+
     if ! ssh_ready_for_inventory_host "$host" "$ip"; then
       return 1
     fi
   done <<EOF_INVENTORY_HOSTS
-$(inventory_hosts "$inventory")
+$(inventory_worker_hosts "$inventory")
 EOF_INVENTORY_HOSTS
 
   [ "$count" -gt 0 ]
@@ -430,13 +460,14 @@ print_inventory_reachability() {
 
   while read -r host ip; do
     [ -n "$host" ] || continue
+
     if ssh_ready_for_inventory_host "$host" "$ip"; then
-      log "  inventory host ${host} (${ip}): ssh reachable"
+      log "  worker ${host} (${ip}): ssh reachable"
     else
-      log "  inventory host ${host} (${ip}): ssh unreachable"
+      log "  worker ${host} (${ip}): ssh unreachable"
     fi
   done <<EOF_INVENTORY_HOSTS
-$(inventory_hosts "$inventory")
+$(inventory_worker_hosts "$inventory")
 EOF_INVENTORY_HOSTS
 }
 
@@ -488,13 +519,13 @@ virsh_cmd() {
   fi
 }
 
-libvirt_vm_exists() {
+libvirt_worker_vm_exists() {
   command -v virsh >/dev/null 2>&1 || return 1
-  local cp_name="${CP_NAME:-otp-master}"
+
   local w1_name="${WORKER1_NAME:-otp-worker1}"
   local w2_name="${WORKER2_NAME:-otp-worker2}"
 
-  virsh_cmd list --all --name 2>/dev/null | grep -Eq "^(${cp_name}|${w1_name}|${w2_name})$"
+  virsh_cmd list --all --name 2>/dev/null | grep -Eq "^(${w1_name}|${w2_name})$"
 }
 
 detect_setup_path() {
@@ -519,18 +550,24 @@ detect_setup_path() {
   fi
 
   if [ -n "$inventory" ] && [ -n "$runner" ]; then
-    if inventory_ssh_ready "$inventory"; then
+    if inventory_workers_ssh_ready "$inventory"; then
       printf '%s\n' "ansible-existing"
       return 0
     fi
 
-    warn "generated inventory exists, but one or more inventory hosts are not SSH reachable"
+    warn "generated inventory exists, but one or more worker VMs are not SSH reachable"
+
     if [ -n "$provisioner" ]; then
       printf '%s\n' "vm-provision"
       return 0
     fi
 
-    fatal "inventory hosts are unreachable and VM provisioner is missing"
+    fatal "worker inventory is unreachable and VM provisioner is missing"
+  fi
+
+  if [ -n "$provisioner" ] && [ -n "$runner" ]; then
+    printf '%s\n' "vm-provision"
+    return 0
   fi
 
   if local_k3s_reachable; then
@@ -538,32 +575,29 @@ detect_setup_path() {
     return 0
   fi
 
-  if libvirt_vm_exists && [ -n "$provisioner" ] && [ -n "$runner" ]; then
-    printf '%s\n' "vm-provision"
-    return 0
-  fi
-
-  if [ -n "$provisioner" ] && [ -n "$runner" ] && ! local_k3s_installed; then
-    printf '%s\n' "vm-provision"
-    return 0
-  fi
-
   printf '%s\n' "local-fresh"
 }
 
 print_detected_state() {
-  local provisioner="$(provisioner_path || true)"
-  local runner="$(ansible_runner_path || true)"
-  local inventory="$(ansible_inventory_path || true)"
+  local provisioner
+  local runner
+  local inventory
+
+  provisioner="$(provisioner_path || true)"
+  runner="$(ansible_runner_path || true)"
+  inventory="$(ansible_inventory_path || true)"
 
   log "detected state:"
   log "  .env: $([ -f "$SCRIPT_DIR/.env" ] && echo present || echo missing)"
   log "  provisioner: ${provisioner:-missing}"
   log "  ansible runner: ${runner:-missing}"
   log "  ansible inventory: ${inventory:-missing}"
+  log "  control-plane: localhost / this server"
+
   if [ -n "$inventory" ]; then
     print_inventory_reachability "$inventory"
   fi
+
   if local_k3s_reachable; then
     log "  local cluster: reachable"
   elif local_k3s_installed; then
@@ -571,21 +605,25 @@ print_detected_state() {
   else
     log "  local cluster: missing"
   fi
-  if libvirt_vm_exists; then
-    log "  libvirt OTP Relay VMs: present"
+
+  if libvirt_worker_vm_exists; then
+    log "  libvirt worker VMs: present"
   else
-    log "  libvirt OTP Relay VMs: missing or virsh unavailable"
+    log "  libvirt worker VMs: missing or virsh unavailable"
   fi
+
   if local_k3s_reachable && namespace_exists; then
     log "  namespace ${NAMESPACE:-otp-relay}: present"
   else
     log "  namespace ${NAMESPACE:-otp-relay}: not detected locally"
   fi
+
   if local_k3s_reachable && app_deployed; then
     log "  app deployment: present locally"
   else
     log "  app deployment: not detected locally"
   fi
+
   if local_k3s_reachable && redis_deployed; then
     log "  redis: present locally"
   else
@@ -595,12 +633,15 @@ print_detected_state() {
 
 run_local_install() {
   [ -f "$SCRIPT_DIR/install-otp-relay-k8s.sh" ] || fatal "install-otp-relay-k8s.sh is missing"
-  log "running local installer: install-otp-relay-k8s.sh"
+
+  log "running local-only installer: install-otp-relay-k8s.sh"
+  warn "local-only mode bypasses worker VM provisioning and Ansible cluster setup"
   run_with_sudo_or_root bash "$SCRIPT_DIR/install-otp-relay-k8s.sh"
 }
 
 run_vm_provisioner() {
   local provisioner inventory
+
   provisioner="$(provisioner_path || true)"
   [ -n "$provisioner" ] || fatal "missing VM provisioner: automation/libvirt/provision-vms.sh"
 
@@ -608,38 +649,41 @@ run_vm_provisioner() {
   chown_env_to_original_user
 
   inventory="$(ansible_inventory_path || true)"
+
   if [ "$FORCE_REPROVISION_VMS" = "1" ]; then
     export RECREATE_VMS="1"
-  elif [ -n "$inventory" ] && ! inventory_ssh_ready "$inventory"; then
-    warn "existing inventory is not reachable; forcing VM recreation/repair"
+  elif [ -n "$inventory" ] && ! inventory_workers_ssh_ready "$inventory"; then
+    warn "existing worker inventory is not reachable; forcing worker VM recreation/repair"
     export RECREATE_VMS="1"
   fi
 
-  log "running VM provisioner: automation/libvirt/provision-vms.sh"
+  log "running worker VM provisioner: automation/libvirt/provision-vms.sh"
   run_as_original_user env RECREATE_VMS="${RECREATE_VMS:-0}" bash "$provisioner"
 }
 
 run_ansible_cluster() {
   local runner inventory
+  local elapsed=0
+
   runner="$(ansible_runner_path || true)"
   inventory="$(ansible_inventory_path || true)"
 
   [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-cluster.sh"
-  [ -n "$inventory" ] || fatal "missing generated inventory; run VM provisioning first"
+  [ -n "$inventory" ] || fatal "missing generated inventory; run worker VM provisioning first"
 
-  # VMs may still be running cloud-init after provisioning. Wait up to 3 minutes
-  # for all inventory hosts to become SSH-reachable before handing off to Ansible.
-  log "waiting for all inventory hosts to become SSH reachable (up to 180s)..."
-  local elapsed=0
-  until inventory_ssh_ready "$inventory"; do
+  log "waiting for worker VMs to become SSH reachable (up to 180s)..."
+
+  until inventory_workers_ssh_ready "$inventory"; do
     if [ "$elapsed" -ge 180 ]; then
-      fatal "inventory hosts are not SSH reachable after ${elapsed}s; check VM console or rerun setup"
+      fatal "worker VMs are not SSH reachable after ${elapsed}s; check VM console or rerun setup"
     fi
-    log "  not yet reachable, retrying in 10s (${elapsed}s elapsed)..."
+
+    log "  worker VMs not yet reachable, retrying in 10s (${elapsed}s elapsed)..."
     sleep 10
     elapsed=$((elapsed + 10))
   done
-  log "all inventory hosts are SSH reachable"
+
+  log "worker VMs are SSH reachable"
 
   if [ "$SKIP_ANSIBLE" = "1" ]; then
     log "Ansible cluster setup skipped by --no-ansible"
@@ -647,6 +691,7 @@ run_ansible_cluster() {
   fi
 
   log "running Ansible cluster setup with inventory: $inventory"
+
   run_as_original_user env \
     INVENTORY="$inventory" \
     DEPLOY_OTP_RELAY="$DEPLOY_OTP_RELAY" \
@@ -656,6 +701,7 @@ run_ansible_cluster() {
 
 print_final_status() {
   log "final local status, if available"
+
   if local_k3s_reachable; then
     local_kubectl get nodes -o wide || true
     local_kubectl get pods -n "${NAMESPACE:-otp-relay}" -o wide || true
