@@ -17,11 +17,14 @@ set -Eeuo pipefail
 #   - creates/reuses .env
 #   - prompts for VM/network values when needed
 #   - provisions/repairs worker VMs when needed
+#   - repairs repo/.ssh/key ownership problems caused by accidental sudo runs
 #   - runs Ansible cluster setup using localhost as control-plane
 #   - can still run local-only installer path with --local for development
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+ORIGINAL_ARGS=("$@")
 
 FORCE_ENV_MENU="0"
 NONINTERACTIVE="${NONINTERACTIVE:-0}"
@@ -78,6 +81,11 @@ bootstrap_operator_execution() {
       log "repairing repo ownership: $SCRIPT_DIR -> $operator_user:$operator_group"
       chown -R "$operator_user:$operator_group" "$SCRIPT_DIR"
 
+      if [ -d "$operator_home/.ssh" ]; then
+        log "repairing SSH directory ownership: $operator_home/.ssh -> $operator_user:$operator_group"
+        chown -R "$operator_user:$operator_group" "$operator_home/.ssh" || true
+      fi
+
       log "re-running setup.sh as $operator_user"
       exec sudo -H -u "$operator_user" env \
         HOME="$operator_home" \
@@ -87,7 +95,7 @@ bootstrap_operator_execution() {
         NONINTERACTIVE="$NONINTERACTIVE" \
         DEPLOY_OTP_RELAY="$DEPLOY_OTP_RELAY" \
         VALIDATE_OTP_RELAY="$VALIDATE_OTP_RELAY" \
-        bash "$SCRIPT_DIR/setup.sh" "$@"
+        bash "$SCRIPT_DIR/setup.sh" "${ORIGINAL_ARGS[@]}"
     fi
 
     fatal "setup.sh was run as root directly. Run it with sudo from the operator user, or run it as the operator user."
@@ -109,6 +117,48 @@ ensure_repo_writable() {
   fi
 
   log "repaired repository ownership for $(id -un):$(id -gn)"
+}
+
+ensure_operator_ssh_key_permissions() {
+  local operator_user operator_group operator_home ssh_dir key pub known_hosts
+
+  operator_user="$(id -un)"
+  operator_group="$(id -gn)"
+  operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
+  [ -n "$operator_home" ] || fatal "could not determine home directory for $operator_user"
+
+  ssh_dir="$operator_home/.ssh"
+  key="${SSH_KEY:-$ssh_dir/otp-relay-cluster}"
+  pub="${key}.pub"
+  known_hosts="$ssh_dir/known_hosts"
+
+  if [ -d "$ssh_dir" ]; then
+    log "repairing SSH directory ownership/permissions: $ssh_dir"
+    sudo chown -R "$operator_user:$operator_group" "$ssh_dir"
+  else
+    log "creating SSH directory: $ssh_dir"
+    mkdir -p "$ssh_dir"
+  fi
+
+  chmod 700 "$ssh_dir" || true
+
+  if [ -f "$key" ]; then
+    log "repairing SSH private key ownership/permissions: $key"
+    sudo chown "$operator_user:$operator_group" "$key"
+    chmod 600 "$key"
+  fi
+
+  if [ -f "$pub" ]; then
+    log "repairing SSH public key ownership/permissions: $pub"
+    sudo chown "$operator_user:$operator_group" "$pub"
+    chmod 644 "$pub"
+  fi
+
+  if [ -f "$known_hosts" ]; then
+    log "repairing known_hosts ownership/permissions: $known_hosts"
+    sudo chown "$operator_user:$operator_group" "$known_hosts"
+    chmod 644 "$known_hosts" || true
+  fi
 }
 
 while [ "$#" -gt 0 ]; do
@@ -443,24 +493,27 @@ ssh_ready_for_inventory_host() {
   local host="$1"
   local ip="$2"
   local user="${VM_USER:-otp-relay}"
-  local real_user
-  local real_home
+  local operator_user
+  local operator_home
   local key
+  local known_hosts
 
-  real_user="$(id -un)"
-  real_home="$(getent passwd "$real_user" | cut -d: -f6)"
-  key="${SSH_KEY:-${real_home}/.ssh/otp-relay-cluster}"
+  operator_user="$(id -un)"
+  operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
+  key="${SSH_KEY:-${operator_home}/.ssh/otp-relay-cluster}"
+  known_hosts="${operator_home}/.ssh/known_hosts"
 
   [ -n "$host" ] || return 1
   [ -n "$ip" ] || return 1
   [ -f "$key" ] || return 1
+  [ -r "$key" ] || return 1
 
-  ssh-keygen -f "${real_home}/.ssh/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+  ssh-keygen -f "$known_hosts" -R "$ip" >/dev/null 2>&1 || true
 
   ssh \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="${real_home}/.ssh/known_hosts" \
+    -o UserKnownHostsFile="$known_hosts" \
     -o ConnectTimeout=5 \
     -i "$key" \
     "${user}@${ip}" \
@@ -685,6 +738,7 @@ run_vm_provisioner() {
 
   ensure_vm_env
   chown_env_to_original_user
+  ensure_operator_ssh_key_permissions
 
   inventory="$(ansible_inventory_path || true)"
 
@@ -697,6 +751,8 @@ run_vm_provisioner() {
 
   log "running worker VM provisioner: automation/libvirt/provision-vms.sh"
   run_as_original_user env RECREATE_VMS="${RECREATE_VMS:-0}" bash "$provisioner"
+
+  ensure_operator_ssh_key_permissions
 }
 
 run_ansible_cluster() {
@@ -709,6 +765,8 @@ run_ansible_cluster() {
   [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-cluster.sh"
   [ -n "$inventory" ] || fatal "missing generated inventory; run worker VM provisioning first"
 
+  ensure_operator_ssh_key_permissions
+
   log "waiting for worker VMs to become SSH reachable (up to 180s)..."
 
   until inventory_workers_ssh_ready "$inventory"; do
@@ -716,6 +774,7 @@ run_ansible_cluster() {
       fatal "worker VMs are not SSH reachable after ${elapsed}s; check VM console or rerun setup"
     fi
 
+    ensure_operator_ssh_key_permissions
     log "  worker VMs not yet reachable, retrying in 10s (${elapsed}s elapsed)..."
     sleep 10
     elapsed=$((elapsed + 10))
@@ -753,10 +812,11 @@ print_final_status() {
 main() {
   local path
 
-  bootstrap_operator_execution "$@"
+  bootstrap_operator_execution
   ensure_repo_writable
 
   ensure_base_env
+  ensure_operator_ssh_key_permissions
   print_detected_state
   path="$(detect_setup_path)"
   log "selected setup path: $path"
