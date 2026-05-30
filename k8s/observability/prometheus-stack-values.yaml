@@ -39,9 +39,6 @@ prometheus:
         memory: 1Gi
         cpu: 500m
 
-    # Resource controls for Prometheus config-reloader containers.
-    # This covers the config-reloader sidecar and init config-reloader
-    # rendered by the Prometheus Operator.
     configReloaderResources:
       requests:
         memory: 32Mi
@@ -66,14 +63,14 @@ prometheus:
     scrapeInterval: 15s
     evaluationInterval: 15s
 
-    # Allow ServiceMonitors outside the Helm release labels,
-    # including otp-relay and otp-monitor ServiceMonitors.
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
     probeSelectorNilUsesHelmValues: false
 
 alertmanager:
+  forceDeployDashboards: true
+
   alertmanagerSpec:
     resources:
       requests:
@@ -83,9 +80,6 @@ alertmanager:
         memory: 128Mi
         cpu: 100m
 
-    # Resource controls for Alertmanager config-reloader containers.
-    # This covers the config-reloader sidecar and init config-reloader
-    # rendered by the Prometheus Operator.
     configReloaderResources:
       requests:
         memory: 32Mi
@@ -98,24 +92,29 @@ alertmanager:
       observability/role: ui
 
 grafana:
+  enabled: true
+
+  # Force the kube-prometheus-stack default Kubernetes dashboards and
+  # datasource ConfigMaps to be rendered even during chart changes.
+  forceDeployDashboards: true
+  forceDeployDatasources: true
+  defaultDashboardsEnabled: true
+  defaultDashboardsEditable: true
+  defaultDashboardsTimezone: browser
+
+  # Do not store the admin password in this repo.
+  # Create this Secret once before Helm upgrade:
+  # kubectl -n observability create secret generic grafana-admin \
+  #   --from-literal=admin-user=admin \
+  #   --from-literal=admin-password='YOUR_PASSWORD' \
+  #   --dry-run=client -o yaml | kubectl apply -f -
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
   ingress:
     enabled: false
-
-  # Keep Grafana admin credentials stable across Helm upgrades.
-  # This prevents new pods from failing because admin-password is missing
-  # from the generated Grafana Secret.
-  #
-  # IMPORTANT:
-  # - Change this password before final production handoff.
-  # - If Grafana already has a persisted DB password, changing this value
-  #   fixes the Kubernetes Secret for pod startup, but may not update the
-  #   existing Grafana database password until reset once inside Grafana.
-  adminUser: admin
-  adminPassword: "ChangeMe-Grafana-Admin-2026!"
-
-  # Dashboard is exposed by k8s/observability/grafana-ingressroute.yaml
-  # after Grafana exists. The installer must not treat this values file as
-  # enough to create Grafana by itself.
 
   resources:
     requests:
@@ -147,7 +146,6 @@ grafana:
     size: 1Gi
 
   sidecar:
-    # Resource controls for Grafana dashboard/datasource sidecar containers.
     resources:
       requests:
         memory: 32Mi
@@ -161,13 +159,23 @@ grafana:
       label: grafana_dashboard
       labelValue: "1"
       searchNamespace: observability
-      folder: /tmp/dashboards/OTP Relay
+      folder: /tmp/dashboards
       provider:
         allowUiUpdates: true
         foldersFromFilesStructure: true
+
     datasources:
       enabled: true
       defaultDatasourceEnabled: true
+
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.observability.svc.cluster.local:3100
+      editable: true
+      isDefault: false
 
 kube-state-metrics:
   resources:
