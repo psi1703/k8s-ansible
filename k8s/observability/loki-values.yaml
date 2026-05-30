@@ -1,83 +1,18 @@
 # Helm values for Loki
 #
-# Chart: grafana-community/loki
-# Version used with SCH setup: 13.7.2
+# Chart: grafana/loki
+# Version used with SCH setup: 6.27.0
 #
 # Purpose:
 # - Store logs shipped by Grafana Alloy.
-# - Run in single-binary mode for this small K3s cluster.
+# - Run in SingleBinary mode for this small K3s cluster.
 # - Keep logs for 7 days.
 # - Use local-path PVC on the observability data worker.
 #
 # Target cluster:
-# - observability/role=data should be assigned to otp-worker-2.
+# - observability/role=data should be assigned to otp-worker2.
 
-deploymentMode: Monolithic
-
-singleBinary:
-  replicas: 1
-
-  # Pin Loki to the data worker.
-  nodeSelector:
-    observability/role: data
-
-  resources:
-    requests:
-      memory: 256Mi
-      cpu: 100m
-    limits:
-      memory: 512Mi
-      cpu: 300m
-
-  persistence:
-    enabled: true
-    storageClass: local-path
-    accessModes:
-      - ReadWriteOnce
-    size: 5Gi
-
-# Disable microservices-mode components.
-backend:
-  replicas: 0
-read:
-  replicas: 0
-write:
-  replicas: 0
-ingester:
-  replicas: 0
-querier:
-  replicas: 0
-queryFrontend:
-  replicas: 0
-queryScheduler:
-  replicas: 0
-distributor:
-  replicas: 0
-compactor:
-  replicas: 0
-indexGateway:
-  replicas: 0
-bloomCompactor:
-  replicas: 0
-bloomGateway:
-  replicas: 0
-
-# Disable cache subcharts.
-chunksCache:
-  enabled: false
-resultsCache:
-  enabled: false
-
-test:
-  enabled: false
-
-# Grafana will talk to Loki directly inside the cluster.
-gateway:
-  enabled: false
-
-# Disable synthetic Loki traffic generator.
-lokiCanary:
-  enabled: false
+deploymentMode: SingleBinary
 
 loki:
   auth_enabled: false
@@ -117,3 +52,90 @@ loki:
 
   analytics:
     reporting_enabled: false
+
+singleBinary:
+  replicas: 1
+
+  nodeSelector:
+    observability/role: data
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 300m
+
+  persistence:
+    enabled: true
+    storageClass: local-path
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+
+# Disable distributed/simple-scalable components.
+backend:
+  replicas: 0
+
+read:
+  replicas: 0
+
+write:
+  replicas: 0
+
+ingester:
+  replicas: 0
+
+querier:
+  replicas: 0
+
+queryFrontend:
+  replicas: 0
+
+queryScheduler:
+  replicas: 0
+
+distributor:
+  replicas: 0
+
+compactor:
+  replicas: 0
+
+indexGateway:
+  replicas: 0
+
+bloomCompactor:
+  replicas: 0
+
+bloomGateway:
+  replicas: 0
+
+# Keep gateway enabled so Grafana has a stable HTTP URL.
+gateway:
+  enabled: true
+
+  nodeSelector:
+    observability/role: data
+
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 20m
+    limits:
+      memory: 128Mi
+      cpu: 100m
+
+# Disable cache subcharts for this small cluster.
+chunksCache:
+  enabled: false
+
+resultsCache:
+  enabled: false
+
+# Disable synthetic Loki traffic generator.
+lokiCanary:
+  enabled: false
+
+test:
+  enabled: false
