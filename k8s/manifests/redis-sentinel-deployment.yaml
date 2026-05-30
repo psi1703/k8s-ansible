@@ -53,20 +53,20 @@ spec:
                 - sh
                 - -c
                 - redis-cli -p 26379 ping | grep -q PONG
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             exec:
               command:
                 - sh
                 - -c
                 - redis-cli -p 26379 ping | grep -q PONG
-            initialDelaySeconds: 20
+            initialDelaySeconds: 30
             periodSeconds: 20
-            timeoutSeconds: 3
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests:
               cpu: 25m
