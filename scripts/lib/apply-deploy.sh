@@ -226,6 +226,7 @@ apply_kubernetes_resources_if_required() {
       apply_if_exists "$MANIFEST_DIR/redis-sentinel-deployment.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-haproxy-configmap.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-haproxy-deployment.yaml"
+      apply_if_exists "$MANIFEST_DIR/otp-relay-pdb.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-pdb.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-sentinel-pdb.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-haproxy-pdb.yaml"
