@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: otp-relay-pdb
+  namespace: otp-relay
+  labels:
+    app: otp-relay
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: otp-relay
