@@ -26,6 +26,14 @@
 # - observability/role=ui   -> worker intended for Grafana/Alertmanager
 # - observability/role=data -> worker intended for Prometheus data
 
+# kube-prometheus-stack default Grafana dashboards.
+# These are top-level chart values, not grafana: subchart values.
+defaultDashboardsEnabled: true
+defaultDashboardsEditable: true
+defaultDashboardsTimezone: browser
+forceDeployDashboards: true
+forceDeployDatasources: true
+
 prometheus:
   prometheusSpec:
     retention: 15d
@@ -63,14 +71,14 @@ prometheus:
     scrapeInterval: 15s
     evaluationInterval: 15s
 
+    # Allow ServiceMonitors outside the Helm release labels,
+    # including otp-relay and otp-monitor ServiceMonitors.
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
     probeSelectorNilUsesHelmValues: false
 
 alertmanager:
-  forceDeployDashboards: true
-
   alertmanagerSpec:
     resources:
       requests:
@@ -94,16 +102,8 @@ alertmanager:
 grafana:
   enabled: true
 
-  # Force the kube-prometheus-stack default Kubernetes dashboards and
-  # datasource ConfigMaps to be rendered even during chart changes.
-  forceDeployDashboards: true
-  forceDeployDatasources: true
-  defaultDashboardsEnabled: true
-  defaultDashboardsEditable: true
-  defaultDashboardsTimezone: browser
-
-  # Do not store the admin password in this repo.
-  # Create this Secret once before Helm upgrade:
+  # Use stable admin credentials from an operator-owned Secret.
+  # Create/update it with:
   # kubectl -n observability create secret generic grafana-admin \
   #   --from-literal=admin-user=admin \
   #   --from-literal=admin-password='YOUR_PASSWORD' \
@@ -168,6 +168,7 @@ grafana:
       enabled: true
       defaultDatasourceEnabled: true
 
+  # Loki datasource will only work after Loki is actually installed.
   additionalDataSources:
     - name: Loki
       uid: loki
