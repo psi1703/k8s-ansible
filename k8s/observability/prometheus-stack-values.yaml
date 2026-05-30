@@ -101,6 +101,18 @@ grafana:
   ingress:
     enabled: false
 
+  # Keep Grafana admin credentials stable across Helm upgrades.
+  # This prevents new pods from failing because admin-password is missing
+  # from the generated Grafana Secret.
+  #
+  # IMPORTANT:
+  # - Change this password before final production handoff.
+  # - If Grafana already has a persisted DB password, changing this value
+  #   fixes the Kubernetes Secret for pod startup, but may not update the
+  #   existing Grafana database password until reset once inside Grafana.
+  adminUser: admin
+  adminPassword: "ChangeMe-Grafana-Admin-2026!"
+
   # Dashboard is exposed by k8s/observability/grafana-ingressroute.yaml
   # after Grafana exists. The installer must not treat this values file as
   # enough to create Grafana by itself.
