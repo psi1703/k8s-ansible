@@ -146,13 +146,17 @@ grafana:
     size: 1Gi
 
   sidecar:
+    # These sidecars load Grafana dashboard and datasource ConfigMaps.
+    # Keep the limit above 64Mi; the previous 64Mi limit caused OOMKilled
+    # restarts and prevented the default Kubernetes/Alertmanager dashboards
+    # from being reliably imported.
     resources:
       requests:
-        memory: 32Mi
+        memory: 64Mi
         cpu: 10m
       limits:
-        memory: 64Mi
-        cpu: 50m
+        memory: 256Mi
+        cpu: 100m
 
     dashboards:
       enabled: true
@@ -167,6 +171,9 @@ grafana:
     datasources:
       enabled: true
       defaultDatasourceEnabled: true
+      label: grafana_datasource
+      labelValue: "1"
+      searchNamespace: observability
 
   # Loki datasource will only work after Loki is actually installed.
   additionalDataSources:
