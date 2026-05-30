@@ -121,6 +121,7 @@ validate_source_tree() {
       redis-sentinel-service.yaml \
       redis-haproxy-configmap.yaml \
       redis-haproxy-deployment.yaml \
+      otp-relay-pdb.yaml \
       redis-pdb.yaml; do
       [ -f "k8s/manifests/$required_manifest" ] || fatal "k8s/manifests/$required_manifest is missing"
     done
