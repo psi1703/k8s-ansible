@@ -39,6 +39,17 @@ prometheus:
         memory: 1Gi
         cpu: 500m
 
+    # Resource controls for Prometheus config-reloader containers.
+    # This covers the config-reloader sidecar and init config-reloader
+    # rendered by the Prometheus Operator.
+    configReloaderResources:
+      requests:
+        memory: 32Mi
+        cpu: 10m
+      limits:
+        memory: 64Mi
+        cpu: 50m
+
     nodeSelector:
       observability/role: data
 
@@ -71,6 +82,17 @@ alertmanager:
       limits:
         memory: 128Mi
         cpu: 100m
+
+    # Resource controls for Alertmanager config-reloader containers.
+    # This covers the config-reloader sidecar and init config-reloader
+    # rendered by the Prometheus Operator.
+    configReloaderResources:
+      requests:
+        memory: 32Mi
+        cpu: 10m
+      limits:
+        memory: 64Mi
+        cpu: 50m
 
     nodeSelector:
       observability/role: ui
@@ -113,6 +135,15 @@ grafana:
     size: 1Gi
 
   sidecar:
+    # Resource controls for Grafana dashboard/datasource sidecar containers.
+    resources:
+      requests:
+        memory: 32Mi
+        cpu: 10m
+      limits:
+        memory: 64Mi
+        cpu: 50m
+
     dashboards:
       enabled: true
       label: grafana_dashboard
