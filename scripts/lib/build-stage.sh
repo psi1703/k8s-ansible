@@ -206,6 +206,7 @@ stage_and_validate_manifests() {
       redis-sentinel-service.yaml \
       redis-haproxy-configmap.yaml \
       redis-haproxy-deployment.yaml \
+      otp-relay-pdb.yaml \
       redis-pdb.yaml \
       redis-sentinel-pdb.yaml \
       redis-haproxy-pdb.yaml; do
