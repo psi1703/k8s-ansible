@@ -227,7 +227,7 @@ WORKER2_NAME=$(_env_quote "${WORKER2_NAME:-otp-worker2}")
 OBSERVABILITY_NAMESPACE=$(_env_quote "${OBSERVABILITY_NAMESPACE:-observability}")
 OBSERVABILITY_INSTALL_STACK=$(_env_quote "${OBSERVABILITY_INSTALL_STACK:-1}")
 OBSERVABILITY_STACK_CHART_VERSION=$(_env_quote "${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}")
-GRAFANA_HOST=$(_env_quote "${GRAFANA_HOST:-grafana.init-db.lan}")
+GRAFANA_HOST=$(_env_quote "${GRAFANA_HOST:-grafana-test.lan}")
 EOF_ENV
 
   mv "$tmp" "$target"
@@ -287,7 +287,7 @@ create_env_interactive() {
   _env_set_default OBSERVABILITY_NAMESPACE "observability"
   _env_set_default OBSERVABILITY_INSTALL_STACK "1"
   _env_set_default OBSERVABILITY_STACK_CHART_VERSION "85.0.1"
-  _env_set_default GRAFANA_HOST "grafana.init-db.lan"
+  _env_set_default GRAFANA_HOST "grafana-test.lan"
 
   _env_prompt NAMESPACE "Kubernetes namespace" 1 0
   _env_prompt SERVICE_TYPE "Service type: ClusterIP, NodePort, or LoadBalancer" 1 0
@@ -711,7 +711,7 @@ normalize_loaded_env() {
   OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
   OBSERVABILITY_INSTALL_STACK="${OBSERVABILITY_INSTALL_STACK:-1}"
   OBSERVABILITY_STACK_CHART_VERSION="${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}"
-  GRAFANA_HOST="${GRAFANA_HOST:-grafana.init-db.lan}"
+  GRAFANA_HOST="${GRAFANA_HOST:-grafana-test.lan}"
 
   RESTART_APP_REQUIRED=0
   RESTART_MONITOR_REQUIRED=0
