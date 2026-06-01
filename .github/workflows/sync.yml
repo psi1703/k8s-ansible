@@ -218,7 +218,8 @@ jobs:
             NONINTERACTIVE=1 \
             SKIP_REPO_SYNC=1 \
             GIT_CLEAN=0 \
-            DEPLOY_MODE="${DEPLOY_MODE}" \
+            INSTALLER_DEPLOY_MODE="${DEPLOY_MODE}" \
+            IMAGE_DISTRIBUTION_PORT="${IMAGE_DISTRIBUTION_PORT:-18080}" \
             bash install-otp-relay-k8s.sh
 
           echo "Deployment completed for DEPLOY_MODE=${DEPLOY_MODE}"
