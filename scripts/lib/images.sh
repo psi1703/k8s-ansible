@@ -131,6 +131,36 @@ distribute_image_tar_to_all_nodes() {
   app_label="otp-relay-image-importer-${label_suffix}"
   http_log="$GENERATED_DIR/${ds_name}-http.log"
 
+  local selected_port
+
+  selected_port="$(
+    python3 - "$IMAGE_DISTRIBUTION_PORT" <<'PY'
+import socket
+import sys
+
+start = int(sys.argv[1])
+end = start + 50
+
+for port in range(start, end):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+        print(port)
+        sys.exit(0)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+sys.exit(1)
+PY
+  )" || fatal "could not find a free image distribution port starting at $IMAGE_DISTRIBUTION_PORT"
+
+  if [ "$selected_port" != "$IMAGE_DISTRIBUTION_PORT" ]; then
+    log "IMAGE_DISTRIBUTION_PORT=$IMAGE_DISTRIBUTION_PORT is busy; using free port $selected_port"
+    IMAGE_DISTRIBUTION_PORT="$selected_port"
+  fi
+  
   log "distributing image $image_name to $node_count ready K3s node(s) without a registry"
   log "image tar path: $tar_path"
   log "temporary image tar URL: http://${serve_ip}:${IMAGE_DISTRIBUTION_PORT}/${tar_name}"
