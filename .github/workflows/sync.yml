@@ -87,22 +87,29 @@ jobs:
           MANIFESTS_CHANGED=0
           OBSERVABILITY_CHANGED=0
 
+          # requirements.txt affects both app and monitor runtime images.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^requirements\.txt$'; then
             FULL_CHANGED=1
           fi
 
+          # App/backend/frontend files require app image rebuild and rollout.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_relay/|main\.py$|frontend/|docs/help/|scripts/build_help_docs\.py$|k8s/Dockerfile$|package\.json$|package-lock\.json$)'; then
             APP_CHANGED=1
           fi
 
+          # Monitor files require monitor image rebuild and rollout.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_monitor/|monitor\.py$|k8s/Dockerfile\.monitor$)'; then
             MONITOR_CHANGED=1
           fi
 
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/manifests/|scripts/lib/(manifests|tls|metallb|apply-deploy|images|build-stage|deploy-mode)\.sh$|install-otp-relay-k8s\.sh$)'; then
+          # Raw Kubernetes manifest changes can be applied without rebuilding images.
+          # Installer/control scripts are intentionally excluded here. They sync to
+          # /opt/k8s-ansible and are used by the next manual or app/monitor deploy.
+          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/manifests/)'; then
             MANIFESTS_CHANGED=1
           fi
 
+          # Observability manifests/dashboard source can be applied as manifest-only.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/observability/|scripts/build_grafana_dashboard_configmap\.py$)'; then
             OBSERVABILITY_CHANGED=1
           fi
