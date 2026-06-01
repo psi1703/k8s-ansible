@@ -56,15 +56,36 @@ def _init_redis_client() -> None:
         redis_client.ping()
         logger.info("Redis connected: %s", REDIS_URL)
     except Exception as exc:
-        redis_client = None
-        if REDIS_REQUIRED:
-            raise RuntimeError(f"Redis is required but not reachable: {exc}") from exc
-        logger.warning("Redis not reachable; continuing with in-memory runtime state: %s", exc)
+        # Do not crash the app process when Redis is temporarily unavailable.
+        #
+        # During node drain, Redis/HAProxy can briefly close connections while
+        # pods are evicted, backends change, or Sentinel promotes/refreshes the
+        # master. The app must stay alive so readiness can report degraded state
+        # and recover automatically once Redis is reachable again.
+        #
+        # REDIS_REQUIRED remains strict through /readyz: health.py returns
+        # non-200 when Redis is required and _redis_status() is not "ok".
+        logger.warning(
+            "Redis not reachable during startup; app will remain NotReady until Redis recovers: %s",
+            exc,
+        )
 
 
 def _redis_status() -> str:
+    global redis_client
+
     if not REDIS_URL:
         return "disabled"
+
+    if redis is None:
+        return "unavailable"
+
+    if redis_client is None:
+        try:
+            _init_redis_client()
+        except Exception as exc:
+            logger.warning("Could not initialize Redis client during health check: %s", exc)
+            return "error"
 
     if redis_client is None:
         return "unavailable"
@@ -72,7 +93,8 @@ def _redis_status() -> str:
     try:
         redis_client.ping()
         return "ok"
-    except Exception:
+    except Exception as exc:
+        logger.warning("Redis health check failed: %s", exc)
         return "error"
 
 
