@@ -12,6 +12,17 @@ async def healthz():
     return {"status": "ok"}
 
 
+@router.get("/livez")
+async def livez():
+    """Process liveness check.
+
+    This endpoint intentionally does not depend on Redis. Redis availability is
+    checked by /readyz so Kubernetes can remove the pod from service endpoints
+    without killing and restarting the process during Redis/HAProxy failover.
+    """
+    return {"status": "ok"}
+
+
 @router.get("/readyz")
 async def readyz():
     redis_status = _redis_status()
@@ -23,6 +34,7 @@ async def readyz():
                 "status": "not_ready",
                 "users_loaded": len(users),
                 "redis": redis_status,
+                "redis_required": REDIS_REQUIRED,
             },
         )
 
