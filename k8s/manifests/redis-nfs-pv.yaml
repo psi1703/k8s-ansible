@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: otp-redis-0-nfs-pv
+  labels:
+    app: otp-redis
+    redis-pod: otp-redis-0
+    storage-role: redis-data
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: otp-redis-nfs
+  mountOptions:
+    - nfsvers=4.1
+  nfs:
+    server: 172.31.11.108
+    path: /export/otp-redis-0
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: otp-redis-1-nfs-pv
+  labels:
+    app: otp-redis
+    redis-pod: otp-redis-1
+    storage-role: redis-data
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: otp-redis-nfs
+  mountOptions:
+    - nfsvers=4.1
+  nfs:
+    server: 172.31.11.108
+    path: /export/otp-redis-1
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: otp-redis-2-nfs-pv
+  labels:
+    app: otp-redis
+    redis-pod: otp-redis-2
+    storage-role: redis-data
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: otp-redis-nfs
+  mountOptions:
+    - nfsvers=4.1
+  nfs:
+    server: 172.31.11.108
+    path: /export/otp-redis-2
