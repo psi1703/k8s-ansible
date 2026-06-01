@@ -13,7 +13,7 @@ import openpyxl
 from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from otp_relay.audit import audit, read_audit_log
+from otp_relay.audit import audit, count_audit_log_entries, read_audit_log
 import otp_relay.redis_state as redis_state
 from otp_relay.config import (
     ADMIN_LOGIN_LOCKOUT_SECONDS,
@@ -275,7 +275,8 @@ def _default_wizard_record(token: str) -> Dict[str, Any]:
 async def get_log(limit: int = 200, x_admin_session: Optional[str] = Header(default=None)):
     _require_admin(x_admin_session)
     entries = read_audit_log(limit)
-    return {"entries": entries, "total": len(entries)}
+    total = count_audit_log_entries()
+    return {"entries": entries, "total": total}
 
 
 @router.get("/admin/queue")
