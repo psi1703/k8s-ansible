@@ -16,25 +16,28 @@ spec:
       labels:
         app: otp-redis
     spec:
+      nodeSelector:
+        otp-relay/redis-node: "true"
+
       affinity:
         podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                    - key: app
-                      operator: In
-                      values:
-                        - otp-redis
-                topologyKey: kubernetes.io/hostname
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - otp-redis
+              topologyKey: kubernetes.io/hostname
+
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
+          whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               app: otp-redis
+
       containers:
         - name: redis
           image: redis:7-alpine
@@ -47,7 +50,7 @@ spec:
               name: redis
           env:
             - name: REDIS_CONFIG_VERSION
-              value: "2026-05-13-redis-node-spread"
+              value: "2026-06-01-redis-nfs-required-spread"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -84,18 +87,20 @@ spec:
               mountPath: /data
             - name: redis-config
               mountPath: /etc/redis
+
       volumes:
         - name: redis-config
           configMap:
             name: otp-redis-config
             defaultMode: 0755
+
   volumeClaimTemplates:
     - metadata:
         name: redis-data
       spec:
         accessModes:
           - ReadWriteOnce
-        storageClassName: local-path
+        storageClassName: otp-redis-nfs
         resources:
           requests:
             storage: 1Gi
