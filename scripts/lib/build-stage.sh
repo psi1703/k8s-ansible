@@ -198,6 +198,7 @@ stage_and_validate_manifests() {
   if [ "$REDIS_ENABLED" = "1" ]; then
     log "dry-run validating Redis manifests"
     for redis_manifest in \
+      redis-nfs-pv.yaml \
       redis-service.yaml \
       redis-configmap.yaml \
       redis-statefulset.yaml \
