@@ -77,6 +77,13 @@ main() {
 
   run_phase "load or create installer environment" load_or_create_env
   run_phase "normalize installer environment" normalize_loaded_env
+
+  if [ -n "${INSTALLER_DEPLOY_MODE:-}" ]; then
+    log "using installer deploy mode override: ${INSTALLER_DEPLOY_MODE}"
+    DEPLOY_MODE="$INSTALLER_DEPLOY_MODE"
+    export DEPLOY_MODE
+  fi
+  
   run_phase "detect host environment" detect_host_environment
   run_phase "check optional GitHub runner setup" prompt_optional_runner_setup
   run_phase "run preflight checks and prepare cluster host" run_preflight_and_prepare_cluster
