@@ -218,6 +218,7 @@ apply_kubernetes_resources_if_required() {
 
     if [ "$REDIS_ENABLED" = "1" ]; then
       log "applying Redis HA shared-state resources"
+      apply_if_exists "$MANIFEST_DIR/redis-nfs-pv.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-configmap.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-service.yaml"
       apply_if_exists "$MANIFEST_DIR/redis-statefulset.yaml"
