@@ -46,7 +46,7 @@ DNS="${DNS:-}"
 PREFIX="${PREFIX:-24}"
 
 VM_USER="${VM_USER:-otp-relay}"
-VM_PASSWORD="${VM_PASSWORD:-otp-relay}"
+VM_PASSWORD="${VM_PASSWORD:-}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/otp-relay-cluster}"
 SSH_PUB_KEY="${SSH_KEY}.pub"
 
@@ -129,6 +129,11 @@ dns_yaml_nameservers() {
 : "${GATEWAY:?GATEWAY must be set in .env or the shell environment}"
 : "${DNS:?DNS must be set in .env or the shell environment}"
 : "${IP_SCAN_PREFIX:?IP_SCAN_PREFIX must be set in .env or the shell environment}"
+: "${VM_PASSWORD:?VM_PASSWORD must be set in .env or the shell environment}"
+ 
+  if [[ "$VM_PASSWORD" == "otp-relay" || "$VM_PASSWORD" == "CHANGE_ME_VM_PASSWORD" ]]; then
+    fatal "VM_PASSWORD must be changed from the default before provisioning worker VMs"
+  fi
 
 require_non_root() {
   if [[ "${EUID}" -eq 0 && "${ALLOW_ROOT_RUN:-0}" != "1" ]]; then
