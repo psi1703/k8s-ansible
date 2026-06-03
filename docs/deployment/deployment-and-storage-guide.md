@@ -168,7 +168,7 @@ PVC_STORAGE_CLASS=otp-relay-nfs
 
 `REPLICA_COUNT` is controlled by `.env`.
 
-Two app replicas are the intended HA posture, but final approval requires OTP business-flow validation after the latest source/build/workflow changes.
+Two app replicas were validated with real SMS/OTP portal confirmation and worker-drain recovery on **2026-06-03**.
 
 The portal is exposed through Traefik Ingress. The `otp-relay` service remains internal to the cluster and is used as the Ingress backend.
 
@@ -199,6 +199,8 @@ Known node labels:
 otp-relay/storage-node=true
 otp-relay/monitor-node=true
 ```
+
+During controlled worker-drain maintenance, one Redis pod may temporarily remain `Pending` because of one-per-node Redis placement. This is acceptable only if `/readyz`, Redis/Sentinel/HAProxy checks, app availability, and post-uncordon strict health all pass.
 
 ---
 
@@ -266,6 +268,8 @@ audit.log
 The monitor also reads the shared audit log from this storage path.
 
 OTP values must not be written to the NFS-backed files.
+
+NFS/RWX app storage was validated on **2026-06-03** by writing a proof file from one app pod and reading it from another app pod.
 
 ---
 
@@ -343,6 +347,8 @@ REDIS_URL=redis://otp-redis-haproxy:6379/0
 
 App pods should not connect directly to a single Redis pod.
 
+Redis HA/Sentinel/HAProxy behavior was validated on **2026-06-03**, including Redis master pod deletion recovery and post-recovery strict health validation.
+
 ---
 
 ## Redis StatefulSet update safety
@@ -405,6 +411,8 @@ Source:    k8s/observability/dashboards/otp-relay-live.json
 Generated: k8s/observability/grafana-dashboard-otp-relay-live.yaml
 Generator: scripts/build_grafana_dashboard_configmap.py
 ```
+
+Observability recovery was validated on **2026-06-03**, including Prometheus/Grafana/Loki/Alloy checks and Grafana dashboard persistence after restart.
 
 This guide does not own dashboard query details or Grafana troubleshooting.
 
@@ -605,20 +613,25 @@ audit.log
 
 ## Deployment sign-off checklist
 
-* [ ] `.env` exists and contains the intended runtime values.
-* [ ] GitHub Actions workflow uses the self-hosted runner.
-* [ ] Installer runs without replacing `.env` unexpectedly.
-* [ ] Required generated assets are produced before image build/apply.
-* [ ] App and monitor images build successfully.
-* [ ] K3s imports the expected images.
-* [ ] Kubernetes resources apply cleanly.
-* [ ] Redis StatefulSet is not destructively recreated during a normal update.
-* [ ] NFS PVC is Bound.
-* [ ] App can write to `/app/data`.
-* [ ] Monitor can read `/app/data/audit.log`.
-* [ ] `/healthz` returns 200.
-* [ ] `/readyz` returns 200 with Redis healthy.
-* [ ] Monitor health script reports OK.
-* [ ] Grafana loads at `https://grafana.init-db.lan` when observability is enabled.
-* [ ] Telegram alerting configuration is present when alerts are expected.
-* [ ] OTP business-flow validation is completed before declaring multi-replica posture complete.
+* [x] `.env` exists and contains the intended runtime values.
+* [x] GitHub Actions workflow uses the self-hosted runner.
+* [x] Installer runs without replacing `.env` unexpectedly.
+* [x] Required generated assets are produced before image build/apply.
+* [x] App and monitor images build successfully.
+* [x] K3s imports the expected images.
+* [x] Kubernetes resources apply cleanly.
+* [x] Redis StatefulSet is not destructively recreated during a normal update.
+* [x] NFS PVC is Bound.
+* [x] App can write to `/app/data`.
+* [x] Monitor can read `/app/data/audit.log`.
+* [x] `/healthz` returns 200.
+* [x] `/readyz` returns 200 with Redis healthy.
+* [x] Monitor health script reports OK.
+* [x] Grafana loads at `https://grafana.init-db.lan` when observability is enabled.
+* [x] Telegram alerting configuration is present when alerts are expected.
+* [x] OTP business-flow validation passed on 2026-06-03.
+* [x] Two-replica and worker-drain validation passed on 2026-06-03.
+* [ ] IT certificate trust rollout is completed or explicitly tracked as pending.
+* [ ] Redis backup/restore procedure is documented.
+* [ ] SCH accepts Redis Sentinel/HAProxy or selects managed Redis.
+* [ ] Final production LB/VIP model is confirmed with SCH if required.
