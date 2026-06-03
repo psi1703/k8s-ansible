@@ -6,7 +6,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host:  __TLS_HOST__
+    - host: __TLS_HOST__
       http:
         paths:
           - path: /
