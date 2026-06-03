@@ -393,7 +393,7 @@ ensure_vm_env() {
   IP_SCAN_START="${IP_SCAN_START:-100}"
   IP_SCAN_END="${IP_SCAN_END:-249}"
   VM_USER="${VM_USER:-otp-relay}"
-  VM_PASSWORD="${VM_PASSWORD:-otp-relay}"
+  VM_PASSWORD="${VM_PASSWORD:-}"
   VM_RAM_MB="${VM_RAM_MB:-3072}"
   VM_VCPUS="${VM_VCPUS:-2}"
   VM_DISK_GB="${VM_DISK_GB:-20}"
@@ -415,6 +415,11 @@ EOF_VM_INFO
   prompt_value IP_SCAN_END "IP scan end octet" 1 0
   prompt_value VM_USER "Worker VM login user" 1 0
   prompt_value VM_PASSWORD "Worker VM login password" 1 1
+
+  if [ "${VM_PASSWORD:-}" = "otp-relay" ] || [ "${VM_PASSWORD:-}" = "CHANGE_ME_VM_PASSWORD" ]; then
+  fatal "VM_PASSWORD must be changed from the default before provisioning worker VMs"
+  fi
+
   prompt_value VM_RAM_MB "Worker VM RAM MB" 1 0
   prompt_value VM_VCPUS "Worker VM vCPUs" 1 0
   prompt_value VM_DISK_GB "Worker VM disk GB" 1 0
