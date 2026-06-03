@@ -208,12 +208,20 @@ local kubeconfig files
 
 ## Current production-alignment items
 
-Remaining items are tracked in the architecture and operations docs, including:
+Phase 3 resilience validation completed on 2026-06-03 with no detected blockers.
 
-* final manager OTP business-flow validation
-* two-replica OTP validation after latest workflow/observability hardening
-* controlled worker-drain validation
-* TLS trust rollout or approved certificate installation
-* Redis backup/restore expectations
-* SCH decision on Redis Sentinel/HAProxy versus managed Redis
-* final check that normal updates preserve Redis StatefulSet and PVC resources
+Validated:
+- two app replicas
+- real SMS/OTP portal confirmation
+- Redis/Sentinel/HAProxy health
+- Redis master pod deletion recovery
+- app, monitor, HAProxy, Sentinel, and Grafana pod restart recovery
+- worker drain and uncordon recovery for otp-worker1 and otp-worker2
+- NFS/RWX app storage proof across app pods
+- Prometheus/Grafana/Loki/Alloy observability recovery
+  
+Remaining:
+- IT certificate trust rollout or approved certificate installation
+- SCH decision on Redis Sentinel/HAProxy versus managed Redis
+- Redis backup/restore procedure
+- final production LB/VIP decision if SCH requires more than current Traefik/internal DNS
