@@ -2,18 +2,36 @@
 
 ## Purpose
 
-This guide is the operational reference for OTP Relay Kubernetes observability.
+This guide is the observability reference for OTP Relay Kubernetes.
 
-It covers:
+It owns:
 
-* Prometheus, Grafana, Loki, and Alloy
-* ServiceMonitor resources
+* Prometheus, Grafana, Loki, and Alloy guidance
+* ServiceMonitor validation
 * OTP Relay portal and monitor metrics
 * Grafana dashboard provisioning
-* Dashboard source/generated workflow
-* Replica-aware PromQL rules
+* dashboard source/generated workflow
+* replica-aware PromQL guidance
 * Grafana access through Traefik/IngressRoute
-* Common troubleshooting steps
+* dashboard-specific troubleshooting
+
+General operations and SCH validation belong in:
+
+```text
+docs/operations/operations-and-validation-runbook.md
+```
+
+Deployment and storage guidance belongs in:
+
+```text
+docs/deployment/deployment-and-storage-guide.md
+```
+
+Build/source-generated artifact guidance belongs in:
+
+```text
+docs/development/build-and-development-guide.md
+```
 
 ---
 
@@ -230,7 +248,7 @@ sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability \
 
 ---
 
-## Live resource checks
+## Live observability checks
 
 ```bash
 sudo k3s kubectl get pods -n observability -o wide
