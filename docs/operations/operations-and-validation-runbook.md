@@ -60,21 +60,53 @@ otp-relay/storage-node=true
 otp-relay/monitor-node=true
 ```
 
+Last successful automated validation:
+
+```text
+Date:   2026-06-03
+Result: Passed with no detected blockers
+Scope:  Phase 3 resilience, observability, worker-drain, and OTP validation
+```
+
+Validated on 2026-06-03:
+
+* K3s 3-node baseline
+* NFS/RWX app storage
+* Redis HA/Sentinel/HAProxy topology
+* Redis failover and Redis master pod deletion recovery
+* `/readyz` with Redis required
+* TLS/Ingress path
+* monitor isolation
+* observability namespace recovery
+* Grafana dashboard ConfigMap persistence
+* app pod restart recovery
+* monitor pod restart recovery
+* Redis HAProxy pod restart recovery
+* Redis Sentinel pod restart recovery
+* Grafana pod restart recovery
+* two app replicas
+* real SMS/OTP portal confirmation
+* worker drain and uncordon recovery for `otp-worker1`
+* worker drain and uncordon recovery for `otp-worker2`
+* PDB presence
+* CPU/memory requests and limits
+* Kubernetes YAML and Helm template validation
+
 Current validation posture:
 
-| Area                               | Status                                             |
-| ---------------------------------- | -------------------------------------------------- |
-| K3s 3-node baseline                | Validated                                          |
-| NFS/RWX app storage                | Validated                                          |
-| Redis HA/Sentinel/HAProxy topology | Validated                                          |
-| Redis failover                     | Validated                                          |
-| `/readyz` with Redis required      | Validated                                          |
-| TLS/Ingress                        | Enabled; client trust rollout may still be pending |
-| Monitor isolation                  | Aligned                                            |
-| Observability namespace            | Enabled                                            |
-| Grafana live dashboard             | Provisioned from ConfigMap                         |
-| App multi-replica default          | Requires latest OTP business-flow validation       |
-| Worker-drain validation            | Pending controlled-window validation               |
+| Area                               | Status                                                        |
+| ---------------------------------- | ------------------------------------------------------------- |
+| K3s 3-node baseline                | Validated                                                     |
+| NFS/RWX app storage                | Validated                                                     |
+| Redis HA/Sentinel/HAProxy topology | Validated                                                     |
+| Redis failover                     | Validated                                                     |
+| `/readyz` with Redis required      | Validated                                                     |
+| TLS/Ingress                        | Enabled; client trust rollout may still be pending            |
+| Monitor isolation                  | Aligned                                                       |
+| Observability namespace            | Enabled and validated                                         |
+| Grafana live dashboard             | Provisioned from ConfigMap and restart-persistent             |
+| App multi-replica default          | Validated with real SMS/OTP portal confirmation on 2026-06-03 |
+| Worker-drain validation            | Validated for `otp-worker1` and `otp-worker2` on 2026-06-03   |
 
 ---
 
@@ -269,6 +301,8 @@ A normal application, documentation, workflow, frontend, or observability update
 
 Redis HA/Sentinel/HAProxy failover has been validated as a Phase 3 foundation.
 
+The 2026-06-03 automated validation also included Redis master pod deletion recovery and post-recovery strict health validation.
+
 Repeat failover testing only during a controlled maintenance/test window.
 
 Before testing:
@@ -288,8 +322,8 @@ curl -k https://srvotptest26.init-db.lan/readyz
 
 Pass criteria:
 
-* Sentinel promotes a new master.
-* HAProxy routes to the new master.
+* Sentinel promotes or confirms a valid master.
+* HAProxy routes to the current master.
 * `/readyz` returns Redis OK after recovery.
 * The app does not need a Redis URL change.
 * No Redis PVC is deleted.
@@ -431,7 +465,9 @@ sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana 
 
 ## OTP validation checklist
 
-Run this before approving multi-replica app validation:
+Real SMS/OTP validation passed on **2026-06-03** with audit evidence and human confirmation that the OTP was visible in the portal.
+
+Use this checklist for future re-validation or SCH-witnessed retesting:
 
 * [ ] Login page loads through HTTPS.
 * [ ] User token login works.
@@ -446,7 +482,7 @@ Run this before approving multi-replica app validation:
 * [ ] Pending OTP survives app restart when Redis is healthy.
 * [ ] Two-replica OTP flow works in a controlled test.
 
-Do not approve a production multi-replica posture until these checks pass after the latest source/build/workflow changes.
+Do not treat future code changes to the OTP flow, Redis state handling, frontend polling, or workflow deployment behavior as automatically validated. Re-run this checklist after those changes.
 
 ---
 
@@ -496,7 +532,11 @@ curl -k https://srvotptest26.init-db.lan/readyz
 
 ## Worker-drain validation checklist
 
-Run only in a controlled test window.
+Worker drain and uncordon recovery passed for both `otp-worker1` and `otp-worker2` on **2026-06-03**.
+
+Use this checklist for future re-validation or SCH-witnessed retesting.
+
+Run only in a controlled maintenance window.
 
 Before drain:
 
@@ -526,6 +566,13 @@ sudo k3s kubectl get pods -n otp-relay -o wide
 ```
 
 Do not drain multiple Redis/Sentinel-critical nodes at the same time.
+
+During active worker-drain maintenance, one Redis pod may temporarily remain `Pending` because of one-per-node Redis placement. This is acceptable only during the maintenance window if:
+
+* `/readyz` remains healthy,
+* Redis/Sentinel/HAProxy functional checks pass,
+* app replicas remain available,
+* and post-uncordon strict health returns to full readiness.
 
 ---
 
@@ -569,15 +616,18 @@ sudo k3s kubectl get events -n otp-relay --sort-by=.lastTimestamp
 
 Before declaring the deployment production-aligned for SCH:
 
-* [ ] Root README and docs are current.
-* [ ] `.env` is the single operator input source.
-* [ ] Workflow uses the self-hosted runner correctly.
-* [ ] Observability applies cleanly from source/generated files.
-* [ ] Grafana is reachable through `https://grafana.init-db.lan`.
-* [ ] Portal is reachable through the intended TLS host.
-* [ ] Redis update behavior is safe for existing StatefulSet/PVC resources.
-* [ ] Telegram is the documented alerting path.
-* [ ] OTP business-flow validation passes.
-* [ ] Two-replica OTP flow validation passes.
-* [ ] Worker-drain validation is completed or explicitly listed as pending.
-* [ ] IT certificate trust rollout is completed or explicitly listed as pending.
+* [x] Root README and docs are current.
+* [x] `.env` is the single operator input source.
+* [x] Workflow uses the self-hosted runner correctly.
+* [x] Observability applies cleanly from source/generated files.
+* [x] Grafana is reachable through `https://grafana.init-db.lan`.
+* [x] Portal is reachable through the intended TLS host.
+* [x] Redis update behavior is safe for existing StatefulSet/PVC resources.
+* [x] Telegram is the documented alerting path.
+* [x] OTP business-flow validation passed on 2026-06-03.
+* [x] Two-replica OTP flow validation passed on 2026-06-03.
+* [x] Worker-drain validation passed for `otp-worker1` and `otp-worker2` on 2026-06-03.
+* [ ] IT certificate trust rollout is completed or explicitly tracked as pending.
+* [ ] Redis backup/restore procedure is documented.
+* [ ] SCH accepts Redis Sentinel/HAProxy or selects managed Redis.
+* [ ] Final production LB/VIP model is confirmed with SCH if required.
