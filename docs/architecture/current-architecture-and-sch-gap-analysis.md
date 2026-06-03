@@ -4,22 +4,47 @@
 
 This document is the architecture reference for the OTP Relay Kubernetes deployment.
 
-It combines:
+It owns:
 
-* current deployed architecture
+* current architecture baseline
+* node and infrastructure model
+* runtime configuration model
+* app, monitor, Redis, NFS, and observability architecture
 * SCH target architecture
-* Redis/NFS/observability model
-* source/generated artifact rules
 * current production-alignment gaps
-* validation gates that must remain open until tested
+* architectural sign-off gates
+
+Detailed deployment and storage procedures belong in:
+
+```text
+docs/deployment/deployment-and-storage-guide.md
+```
+
+Detailed operations and validation commands belong in:
+
+```text
+docs/operations/operations-and-validation-runbook.md
+```
+
+Detailed Grafana, Prometheus, Loki, Alloy, dashboard generation, and PromQL guidance belongs in:
+
+```text
+docs/operations/observability-and-grafana.md
+```
+
+Detailed build, module layout, and source/generated artifact guidance belongs in:
+
+```text
+docs/development/build-and-development-guide.md
+```
 
 ---
 
-## Current validated baseline
+## Current architecture baseline
 
 The current implementation is a Phase 3 SCH-alignment validation baseline.
 
-```text id="1mdhwk"
+```text
 Clients / browsers / iPhone Shortcut
   -> DNS: srvotptest26.init-db.lan
   -> Traefik Ingress with HTTPS
@@ -38,7 +63,7 @@ iPhone / fake-iPhone test source
 
 Monitor pod
   -> hostNetwork + NET_RAW
-  -> phone presence and SMS-path checks
+  -> phone presence checks
   -> exports Prometheus metrics
   -> reads shared audit log
   -> sends Telegram alerts
@@ -54,7 +79,7 @@ Observability
 
 Current validation posture:
 
-```text id="vtzsko"
+```text
 SERVICE_TYPE=ClusterIP
 INGRESS_ENABLED=1
 TLS_ENABLED=1
@@ -94,7 +119,7 @@ Important placement rules:
 
 Known labels:
 
-```text id="9lpuev"
+```text
 otp-relay/storage-node=true
 otp-relay/monitor-node=true
 ```
@@ -109,7 +134,7 @@ Site-specific values should not be hardcoded in Python, shell scripts, Kubernete
 
 Examples of `.env`-owned values:
 
-```text id="nj2i9l"
+```text
 TLS_HOST
 PORTAL_URL
 SERVICE_TYPE
@@ -139,7 +164,7 @@ Updates should load the existing `.env` and must not overwrite it silently.
 
 ---
 
-## Current application model
+## Application model
 
 The portal consists of:
 
@@ -154,11 +179,11 @@ The portal consists of:
 * Redis-backed admin sessions and admin login-attempt tracking
 * PVC-backed runtime files under `/app/data`
 * generated RTA wizard/help content under `frontend/help/`
-* required monitor pod for phone presence, SMS-path, audit-log, Prometheus metrics, and alert checks
+* required monitor pod for phone presence, audit-log, Prometheus metrics, and alert checks
 
 Runtime app files under `/app/data`:
 
-```text id="u1rd84"
+```text
 users.xlsx
 admin_auth.json
 admin_config.json
@@ -170,76 +195,26 @@ OTP values must not be written to disk, audit logs, app logs, monitor logs, comm
 
 ---
 
-## Application package model
-
-The portal application package is:
-
-```text id="8ctl0i"
-otp_relay/
-```
-
-Key modules:
-
-| Module                     | Purpose                                           |
-| -------------------------- | ------------------------------------------------- |
-| `otp_relay/routes.py`      | App assembly and router registration              |
-| `otp_relay/config.py`      | Runtime configuration                             |
-| `otp_relay/state.py`       | Shared in-memory fallback state                   |
-| `otp_relay/storage.py`     | JSON/PVC-backed admin and wizard files            |
-| `otp_relay/users.py`       | `users.xlsx` import and validation                |
-| `otp_relay/redis_state.py` | Redis queue, pending OTP, and admin session state |
-| `otp_relay/otp_flow.py`    | OTP claim, status, cancel, and SMS receive flow   |
-| `otp_relay/admin.py`       | Admin auth, users, queue, wizard, and diagnostics |
-| `otp_relay/audit.py`       | Audit log write/read behavior                     |
-| `otp_relay/metrics.py`     | Prometheus metrics                                |
-| `otp_relay/frontend.py`    | Static frontend mounting and `guide.html`         |
-
-The top-level entrypoint remains:
-
-```text id="9wdq3d"
-main.py
-```
-
-`main.py` should stay thin and delegate app construction to the package.
-
----
-
 ## Monitor model
-
-The monitor package is:
-
-```text id="f5fnwu"
-otp_monitor/
-```
-
-Key modules:
-
-| Module                      | Purpose                           |
-| --------------------------- | --------------------------------- |
-| `otp_monitor/runner.py`     | Monitor launcher/runtime loop     |
-| `otp_monitor/config.py`     | Monitor runtime configuration     |
-| `otp_monitor/phone.py`      | iPhone presence and ARP detection |
-| `otp_monitor/alerts.py`     | Telegram alerts                   |
-| `otp_monitor/audit_tail.py` | Audit-log tailing                 |
-| `otp_monitor/metrics.py`    | Prometheus metrics                |
-
-The top-level entrypoint remains:
-
-```text id="22a9pk"
-monitor.py
-```
 
 The monitor is required and remains internal only.
 
 Required Kubernetes posture:
 
-```text id="20j333"
+```text
 hostNetwork: true
 dnsPolicy: ClusterFirstWithHostNet
 NET_RAW capability
 no Service
 no Ingress
 ```
+
+The monitor provides:
+
+* phone presence checks
+* audit-log checks
+* Prometheus metrics
+* Telegram alerts
 
 Telegram is the supported alerting path.
 
@@ -251,7 +226,7 @@ Redis is required in the validated Phase 3 posture.
 
 The app uses:
 
-```text id="h2lg4n"
+```text
 REDIS_URL=redis://otp-redis-haproxy:6379/0
 REDIS_REQUIRED=1
 ```
@@ -278,7 +253,7 @@ Redis is deployed as a StatefulSet, and Kubernetes makes some StatefulSet fields
 
 If a normal update attempts to change an immutable Redis StatefulSet field, Kubernetes may return:
 
-```text id="d6dyr6"
+```text
 The StatefulSet "otp-redis" is invalid: spec: Forbidden: updates to statefulset spec for fields other than ...
 ```
 
@@ -307,7 +282,7 @@ Application data uses NFS/RWX shared storage.
 
 Validated storage path:
 
-```text id="3lsy66"
+```text
 PVC:           otp-relay-data
 PV:            otp-relay-data-nfs-pv
 Access mode:   ReadWriteMany
@@ -323,67 +298,38 @@ NFS stores non-OTP runtime files only.
 
 ---
 
-## Frontend and help-doc model
-
-The portal frontend follows a source/generated model:
-
-```text id="6fgqkr"
-Source:    frontend/app.jsx
-Generated: frontend/app.js
-Served by: frontend/index.html
-```
-
-Rules:
-
-* Make frontend behavior changes in `frontend/app.jsx`.
-* Rebuild `frontend/app.js`.
-* Commit both files when the generated bundle changes.
-* Do not edit `frontend/app.js` directly as source.
-* Do not restore browser Babel or `text/babel`.
-
-Help documentation also follows a source/generated model:
-
-```text id="n41fvh"
-Source:    docs/help/*.md
-Assets:    docs/help/assets/*
-Generated: frontend/help/*
-Builder:   scripts/build_help_docs.py
-```
-
-The RTA wizard overlay and pop-out guide consume generated help JSON/HTML from `frontend/help/`.
-
----
-
 ## Observability model
 
 Observability assets live under:
 
-```text id="fd0acy"
+```text
 k8s/observability/
-```
-
-```text id="d6s62s"
-k8s/observability/
-├── dashboards/
-│   └── otp-relay-live.json
-├── grafana-dashboard-otp-relay-live.yaml
-├── grafana-ingressroute.yaml
-├── prometheus-stack-values.yaml
-├── loki-values.yaml
-├── alloy-values.yaml
-├── servicemonitor-otp-relay.yaml
-└── servicemonitor-otp-monitor.yaml
 ```
 
 Normal Grafana browser access:
 
-```text id="uoqx4m"
+```text
 https://grafana.init-db.lan
 ```
 
-Dashboard source/generated model:
+Observability architecture:
 
-```text id="fcew5d"
+```text
+Portal /metrics
+Monitor /metrics
+  -> ServiceMonitor resources
+  -> Prometheus
+  -> Grafana dashboard provisioned from ConfigMap
+
+Pod/application logs
+  -> Alloy
+  -> Loki
+  -> Grafana log views where configured
+```
+
+The Grafana dashboard follows a source-generated model:
+
+```text
 Source:    k8s/observability/dashboards/otp-relay-live.json
 Generated: k8s/observability/grafana-dashboard-otp-relay-live.yaml
 Generator: scripts/build_grafana_dashboard_configmap.py
@@ -391,98 +337,10 @@ ConfigMap: otp-relay-live-dashboard
 UID:       otp-relay-live
 ```
 
-The Grafana dashboard source may be a Grafana `dashboard.grafana.app/v2` export. The generator converts it into classic Grafana dashboard JSON for sidecar provisioning.
+Dashboard implementation details and PromQL guidance belong in:
 
-The generator must preserve:
-
-* `id: null`
-* `uid: otp-relay-live`
-* `refresh: 15s`
-* `timepicker.refresh_intervals`
-* Stat panel type from `vizConfig.group`
-* Grid layout and panel sizing
-
-Dashboard metrics include:
-
-```text id="54he9h"
-up{job="otp-relay"}
-up{job="otp-monitor"}
-otp_iphone_present
-otp_monitor_arp_last_success_timestamp_seconds
-otp_queue_depth
-otp_active_user
-otp_delivered_total
-otp_claims_total
-otp_iphone_absence_events_total
-```
-
-Replica-aware PromQL should be used for multi-pod safety.
-
-Examples:
-
-```promql id="kaq1rb"
-max(up{job="otp-relay"})
-```
-
-```promql id="bwxa8d"
-max(up{job="otp-monitor"})
-```
-
-```promql id="mxjxuj"
-sum(increase(otp_delivered_total[$__range]))
-```
-
-```promql id="bz4lx0"
-clamp_min(time() - max(otp_monitor_arp_last_success_timestamp_seconds > 0), 0)
-```
-
----
-
-## Kubernetes deployment assets
-
-The active Kubernetes assets live under `k8s/`.
-
-```text id="cjau2o"
-k8s/
-├── Dockerfile
-├── Dockerfile.monitor
-├── manifests/
-│   ├── configmap.yaml
-│   ├── deployment-monitor.yaml
-│   ├── deployment.yaml
-│   ├── ingress.yaml
-│   ├── namespace.yaml
-│   ├── pv-nfs.yaml
-│   ├── pvc.yaml
-│   ├── redis-configmap.yaml
-│   ├── redis-haproxy-configmap.yaml
-│   ├── redis-haproxy-deployment.yaml
-│   ├── redis-haproxy-service.yaml
-│   ├── redis-pdb.yaml
-│   ├── redis-sentinel-configmap.yaml
-│   ├── redis-sentinel-deployment.yaml
-│   ├── redis-sentinel-service.yaml
-│   ├── redis-service.yaml
-│   ├── redis-statefulset.yaml
-│   ├── secret-example.env
-│   └── service.yaml
-└── observability/
-    ├── dashboards/
-    ├── grafana-dashboard-otp-relay-live.yaml
-    ├── grafana-ingressroute.yaml
-    ├── prometheus-stack-values.yaml
-    ├── loki-values.yaml
-    ├── alloy-values.yaml
-    ├── servicemonitor-otp-relay.yaml
-    └── servicemonitor-otp-monitor.yaml
-```
-
-Do not restore `k8s/docs/`.
-
-Documentation belongs under:
-
-```text id="kpjs4s"
-docs/
+```text
+docs/operations/observability-and-grafana.md
 ```
 
 ---
@@ -491,12 +349,12 @@ docs/
 
 The normal deployment path is GitHub Actions with a self-hosted runner.
 
-```text id="kaynxz"
+```text
 GitHub workflow
   -> self-hosted runner
   -> installer script
   -> .env load/validation
-  -> frontend/help/Grafana generation
+  -> generated assets
   -> image build/import
   -> manifest render/apply
   -> rollout validation
@@ -504,7 +362,7 @@ GitHub workflow
 
 Deployment logic should remain in:
 
-```text id="65u7ci"
+```text
 install-otp-relay-k8s.sh
 scripts/lib/
 k8s/manifests/
@@ -515,7 +373,7 @@ GitHub Actions workflow YAML should orchestrate deployment, not duplicate instal
 
 Dependency rule:
 
-```text id="g3mg25"
+```text
 requirements.txt affects both app and monitor images.
 ```
 
@@ -527,7 +385,7 @@ A `requirements.txt` change should trigger app and monitor rebuilds.
 
 SCH's production direction is:
 
-```text id="h5nlvd"
+```text
 Clients
   -> internal DNS
   -> approved LB/VIP layer
@@ -601,7 +459,7 @@ Do not loosen safeguards just to make the architecture look complete.
 
 The correct current position is:
 
-```text id="1m4xgn"
+```text
 Redis and NFS foundations are validated.
 Redis HA/Sentinel/HAProxy failover is validated.
 Normal Redis updates must not be destructive.
@@ -628,7 +486,6 @@ Telegram is the supported monitor alerting path.
 * [ ] Telegram alerting works when configured.
 * [ ] Prometheus scrapes portal and monitor.
 * [ ] Grafana dashboard is provisioned from generated ConfigMap.
-* [ ] Dashboard uses replica-aware PromQL where needed.
 * [ ] OTP business-flow validation passes.
 * [ ] Two-replica OTP validation passes.
 * [ ] Controlled worker-drain validation passes or is explicitly tracked as pending.
