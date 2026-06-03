@@ -4,19 +4,35 @@
 
 This guide is the deployment and storage reference for OTP Relay Kubernetes.
 
-It covers:
+It owns:
 
-* GitHub Actions deployment through the self-hosted runner
+* GitHub Actions deployment flow
 * installer behavior
 * `.env` source-of-truth configuration
-* K3s deployment expectations
+* cluster/node deployment model
 * Traefik/TLS exposure
 * NFS/RWX application storage
-* Redis Sentinel/HAProxy deployment
+* Redis deployment model
 * Redis StatefulSet update safety
-* observability deployment
-* generated frontend/help/Grafana assets
 * post-deployment verification
+
+Detailed operational checks belong in:
+
+```text
+docs/operations/operations-and-validation-runbook.md
+```
+
+Detailed Grafana, Prometheus, Loki, Alloy, and dashboard guidance belongs in:
+
+```text
+docs/operations/observability-and-grafana.md
+```
+
+Detailed build/source-generated artifact guidance belongs in:
+
+```text
+docs/development/build-and-development-guide.md
+```
 
 ---
 
@@ -24,14 +40,13 @@ It covers:
 
 Use GitHub Actions with the self-hosted runner.
 
-```text id="h9nr4r"
+```text
 GitHub push or workflow run
   -> GitHub Actions job starts
   -> self-hosted runner checks out the repo
   -> installer runs from the runner/control-plane host
   -> installer loads or creates .env
-  -> installer builds frontend app.js and help docs
-  -> installer generates the Grafana dashboard ConfigMap
+  -> installer builds required generated assets
   -> installer builds/imports app and monitor images
   -> installer renders Kubernetes resources from .env
   -> installer applies Kubernetes resources
@@ -40,7 +55,11 @@ GitHub push or workflow run
   -> installer prints deployment summary
 ```
 
-The workflow should call `install-otp-relay-k8s.sh`.
+The workflow should call:
+
+```text
+install-otp-relay-k8s.sh
+```
 
 Deployment logic belongs in the installer and repository scripts, not duplicated in GitHub Actions YAML.
 
@@ -65,7 +84,7 @@ Update behavior:
 
 Values that belong in `.env` include:
 
-```text id="fxwjz4"
+```text
 TLS_HOST
 PORTAL_URL
 SERVICE_TYPE
@@ -89,7 +108,15 @@ PVC_STORAGE_CLASS
 REPLICA_COUNT
 ```
 
-Do not place site-specific values directly in Python, shell scripts, Kubernetes YAML, or Ansible task files.
+Do not place site-specific values directly in:
+
+```text
+Python files
+shell scripts
+Kubernetes YAML
+Ansible tasks
+documentation examples
+```
 
 ---
 
@@ -97,7 +124,7 @@ Do not place site-specific values directly in Python, shell scripts, Kubernetes 
 
 Create these in GitHub Actions secrets when the workflow expects them:
 
-```text id="1f3jcg"
+```text
 PHONE_IP
 PHONE_INTERFACE
 TELEGRAM_BOT_TOKEN
@@ -122,7 +149,7 @@ Do not commit:
 
 Current validation values:
 
-```text id="5l42bu"
+```text
 SERVICE_TYPE=ClusterIP
 INGRESS_ENABLED=1
 TLS_ENABLED=1
@@ -158,23 +185,19 @@ The current `k8s-ansible` deployment model uses:
 | Worker 2      | VM worker node                                               |
 | NFS server    | External storage server, not joined as a Kubernetes node     |
 
-VM provisioning should create worker VMs only.
+Deployment rules:
 
-The external NFS server should not be joined to Kubernetes.
+* VM provisioning should create worker VMs only.
+* The real server is the K3s control-plane and Ansible runner.
+* The external NFS server should not be joined to Kubernetes.
+* The monitor should run on the node with phone-network visibility.
+* Redis-capable nodes should be labelled for Redis/storage placement.
 
 Known node labels:
 
-```text id="1jk8c9"
+```text
 otp-relay/storage-node=true
 otp-relay/monitor-node=true
-```
-
-The monitor should run on the node with phone-network visibility.
-
-Redis-capable nodes should be labelled with:
-
-```text id="dfd4o0"
-otp-relay/storage-node=true
 ```
 
 ---
@@ -190,7 +213,7 @@ The current validation path uses:
 
 Validate exposure after deployment:
 
-```bash id="fm57ly"
+```bash
 sudo k3s kubectl get svc -n otp-relay
 sudo k3s kubectl get ingress -n otp-relay
 sudo k3s kubectl get secret otp-relay-tls -n otp-relay
@@ -215,14 +238,14 @@ The app data PVC should use shared NFS/RWX storage.
 
 Expected NFS export:
 
-```text id="fgtgoi"
+```text
 NFS server: 172.31.11.108
 NFS path:   /export/otp-relay-data
 ```
 
 Expected Kubernetes storage:
 
-```text id="ah57fl"
+```text
 PV:            otp-relay-data-nfs-pv
 PVC:           otp-relay-data
 StorageClass:  otp-relay-nfs
@@ -232,7 +255,7 @@ Mount path:    /app/data
 
 Expected files in `/app/data`:
 
-```text id="jl6inq"
+```text
 users.xlsx
 admin_auth.json
 admin_config.json
@@ -265,7 +288,7 @@ Do not delete old PVC data until the NFS-backed deployment is verified.
 
 Validate write access:
 
-```bash id="z8d1hm"
+```bash
 sudo k3s kubectl -n otp-relay get pods -l app=otp-relay -o name | while read p; do
   echo "=== $p ==="
   sudo k3s kubectl -n otp-relay exec "${p#pod/}" -- sh -c '
@@ -279,7 +302,7 @@ done
 
 Expected:
 
-```text id="extk5j"
+```text
 WRITE_OK
 ```
 
@@ -291,14 +314,14 @@ from each app pod.
 
 Redis is required in the Phase 3 validation posture.
 
-```text id="eptvml"
+```text
 REDIS_REQUIRED=1
 REDIS_URL=redis://otp-redis-haproxy:6379/0
 ```
 
 Redis components:
 
-```text id="rhi9ds"
+```text
 redis-statefulset.yaml
 redis-service.yaml
 redis-pdb.yaml
@@ -312,7 +335,7 @@ redis-haproxy-service.yaml
 
 The app uses:
 
-```text id="748q30"
+```text
 REDIS_URL=redis://otp-redis-haproxy:6379/0
 ```
 
@@ -328,7 +351,7 @@ Kubernetes does not allow normal `apply`/patch updates to some StatefulSet field
 
 A normal update may fail with:
 
-```text id="idskx6"
+```text
 The StatefulSet "otp-redis" is invalid: spec: Forbidden: updates to statefulset spec for fields other than ...
 ```
 
@@ -349,7 +372,7 @@ Safe behavior is one of:
 
 Before any destructive Redis action, inspect:
 
-```bash id="iu3mfe"
+```bash
 sudo k3s kubectl -n otp-relay get statefulset otp-redis -o yaml
 sudo k3s kubectl -n otp-relay get pvc
 sudo k3s kubectl -n otp-relay get pods -l app=otp-redis -o wide
@@ -359,142 +382,65 @@ A normal application, documentation, workflow, frontend, or observability update
 
 ---
 
-## Redis verification
-
-List Redis-related pods:
-
-```bash id="tg4dhd"
-sudo k3s kubectl get pods -n otp-relay -o wide | grep -E 'redis|haproxy'
-```
-
-Check Redis services:
-
-```bash id="fdynii"
-sudo k3s kubectl get svc -n otp-relay | grep redis
-```
-
-Check Sentinel-reported master:
-
-```bash id="4clv73"
-SENTINEL_POD=$(sudo k3s kubectl -n otp-relay get pod \
-  -l app=otp-redis-sentinel \
-  -o jsonpath='{.items[0].metadata.name}')
-
-sudo k3s kubectl -n otp-relay exec "$SENTINEL_POD" -- \
-  redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
-```
-
-Check logs:
-
-```bash id="knygss"
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=100
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
-```
-
----
-
-## Observability deployment model
+## Observability deployment hook
 
 Observability resources live under:
 
-```text id="k1vdpz"
+```text
 k8s/observability/
 ```
 
-Important files:
-
-```text id="nlnp7l"
-k8s/observability/prometheus-stack-values.yaml
-k8s/observability/loki-values.yaml
-k8s/observability/alloy-values.yaml
-k8s/observability/grafana-ingressroute.yaml
-k8s/observability/servicemonitor-otp-relay.yaml
-k8s/observability/servicemonitor-otp-monitor.yaml
-k8s/observability/dashboards/otp-relay-live.json
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
+The installer may apply observability resources when observability is enabled.
 
 Normal Grafana access:
 
-```text id="9zyywk"
+```text
 https://grafana.init-db.lan
 ```
 
-The Grafana dashboard source of truth is:
+The Grafana dashboard follows this source-generated model:
 
-```text id="1hny93"
-k8s/observability/dashboards/otp-relay-live.json
+```text
+Source:    k8s/observability/dashboards/otp-relay-live.json
+Generated: k8s/observability/grafana-dashboard-otp-relay-live.yaml
+Generator: scripts/build_grafana_dashboard_configmap.py
 ```
 
-The generated ConfigMap consumed by Grafana sidecar provisioning is:
+This guide does not own dashboard query details or Grafana troubleshooting.
 
-```text id="kv2a6q"
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
+See:
 
-Regenerate after editing the dashboard source:
-
-```bash id="ttekli"
-python3 scripts/build_grafana_dashboard_configmap.py
-```
-
-Validate generated dashboard metadata:
-
-```bash id="75v5fl"
-grep -n '"refresh"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"timepicker"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"refresh_intervals"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-Apply manually if needed:
-
-```bash id="lquz0f"
-sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
+```text
+docs/operations/observability-and-grafana.md
 ```
 
 ---
 
-## Frontend and help generated files
+## Generated assets during deployment
 
-The portal serves the generated frontend bundle:
+The installer is responsible for generating required deployment artifacts.
 
-```text id="2vig94"
+Important generated paths:
+
+```text
 frontend/app.js
+frontend/help/
+k8s/observability/grafana-dashboard-otp-relay-live.yaml
 ```
 
-The React source is:
+Source files:
 
-```text id="ipvsw9"
+```text
 frontend/app.jsx
-```
-
-Rules:
-
-* Edit `frontend/app.jsx`.
-* Rebuild `frontend/app.js`.
-* Commit both when frontend behavior changes.
-* Do not edit `frontend/app.js` directly as source.
-* Do not use browser-side Babel in production.
-
-Help docs source:
-
-```text id="f1eiwf"
 docs/help/
 docs/help/assets/
+k8s/observability/dashboards/otp-relay-live.json
 ```
 
-Generated help output:
+Detailed source/generated rules belong in:
 
-```text id="0bphbp"
-frontend/help/
-```
-
-Build command:
-
-```bash id="2woqln"
-python3 scripts/build_help_docs.py
+```text
+docs/development/build-and-development-guide.md
 ```
 
 ---
@@ -507,32 +453,38 @@ Manual build is only a fallback when intentionally operating from the runner/con
 
 Build locally from the repo root:
 
-```bash id="7m0026"
+```bash
 docker build -t otp-relay:latest -f k8s/Dockerfile .
 docker build -t otp-monitor:latest -f k8s/Dockerfile.monitor .
 ```
 
 Export images:
 
-```bash id="gj5glv"
+```bash
 docker save otp-relay:latest -o otp-relay-latest.tar
 docker save otp-monitor:latest -o otp-monitor-latest.tar
 ```
 
 Import on the K3s node:
 
-```bash id="6vuqs9"
+```bash
 sudo k3s ctr images import otp-relay-latest.tar
 sudo k3s ctr images import otp-monitor-latest.tar
 ```
 
 Restart workloads:
 
-```bash id="oibwz1"
+```bash
 sudo k3s kubectl rollout restart deployment/otp-relay -n otp-relay
 sudo k3s kubectl rollout restart deployment/otp-monitor -n otp-relay
 sudo k3s kubectl rollout status deployment/otp-relay -n otp-relay
 sudo k3s kubectl rollout status deployment/otp-monitor -n otp-relay
+```
+
+For image build details, see:
+
+```text
+docs/development/build-and-development-guide.md
 ```
 
 ---
@@ -541,111 +493,100 @@ sudo k3s kubectl rollout status deployment/otp-monitor -n otp-relay
 
 Run these after deployment:
 
-```bash id="ckp2f6"
+```bash
 sudo k3s kubectl get nodes -o wide
 sudo k3s kubectl get pods -n otp-relay -o wide
 sudo k3s kubectl get svc -n otp-relay
 sudo k3s kubectl get ingress -n otp-relay
 sudo k3s kubectl get pvc -n otp-relay
-sudo k3s kubectl get pods -n observability -o wide
-sudo k3s kubectl get svc -n observability
-sudo k3s kubectl get ingressroute -n observability
-sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability
-sudo k3s kubectl get servicemonitor -n observability
-sudo k3s kubectl logs -n otp-relay deployment/otp-relay --tail=100
-sudo k3s kubectl logs -n otp-relay deployment/otp-monitor --tail=100
 curl -k https://srvotptest26.init-db.lan/healthz
 curl -k https://srvotptest26.init-db.lan/readyz
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
 ```
 
-Expected `/readyz` result should include Redis healthy and Redis required.
+Expected:
 
-Expected observability state:
+* nodes are Ready
+* app pods are Running/Ready
+* monitor pod is Running/Ready
+* Redis/Sentinel/HAProxy pods are Running/Ready
+* PVC is Bound
+* `/healthz` returns 200
+* `/readyz` returns 200 with Redis healthy and required
+* monitor health script reports OK
 
-* Grafana pod is Running/Ready.
-* Prometheus pod is Running/Ready.
-* Grafana IngressRoute exists when enabled.
-* `otp-relay-live-dashboard` ConfigMap exists.
-* ServiceMonitor resources exist for portal and monitor.
-* Dashboard JSON contains `refresh: 15s` and `timepicker.refresh_intervals`.
+For complete operational validation, see:
 
-Validate the live dashboard ConfigMap:
-
-```bash id="o7dpzn"
-sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability \
-  -o jsonpath='{.data.otp-relay-live\.json}' | grep -E '"refresh":|"timepicker"|"refresh_intervals"'
-```
-
-Validate Grafana browser access:
-
-```text id="z0pc9g"
-https://grafana.init-db.lan
+```text
+docs/operations/operations-and-validation-runbook.md
 ```
 
 ---
 
-## Deployment troubleshooting
+## Deployment troubleshooting scope
 
-### `/readyz` fails after deployment
+This guide only covers deployment-specific failure areas.
+
+For day-to-day operations and validation, use:
+
+```text
+docs/operations/operations-and-validation-runbook.md
+```
+
+For Grafana/Prometheus issues, use:
+
+```text
+docs/operations/observability-and-grafana.md
+```
+
+For build/generation issues, use:
+
+```text
+docs/development/build-and-development-guide.md
+```
+
+### `/readyz` fails immediately after deployment
 
 Check Redis first when `REDIS_REQUIRED=1`:
 
-```bash id="h1kfed"
+```bash
 curl -k https://srvotptest26.init-db.lan/readyz
 sudo k3s kubectl get pods -n otp-relay -o wide | grep -E 'redis|haproxy'
 sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=100
 sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
 ```
 
-### Grafana does not load
-
-Check:
-
-```bash id="0g9tuo"
-sudo k3s kubectl get ingressroute -n observability
-sudo k3s kubectl get svc -n observability | grep grafana
-sudo k3s kubectl get pods -n observability -o wide | grep grafana
-```
-
-Then confirm DNS from the client machine:
-
-```bash id="b6y59p"
-nslookup grafana.init-db.lan
-```
-
-### Monitor cannot detect phone
-
-Check:
-
-```bash id="g3bd7r"
-sudo k3s kubectl logs -n otp-relay deployment/otp-monitor --tail=200
-sudo k3s kubectl describe deployment otp-monitor -n otp-relay | grep -Ei 'PHONE|hostNetwork|NET_RAW'
-```
-
-Review `.env` values:
-
-```text id="pi8w0j"
-PHONE_IP
-PHONE_INTERFACE
-```
-
-### NFS write fails
+### NFS write fails after deployment
 
 Check PVC and permissions:
 
-```bash id="dypre3"
+```bash
 sudo k3s kubectl describe pvc otp-relay-data -n otp-relay
 sudo k3s kubectl exec -n otp-relay deployment/otp-relay -- ls -l /app/data
 ```
 
 On the NFS server, verify ownership/permissions for the app UID/GID expected by the container.
 
+### Redis StatefulSet apply fails
+
+Treat this as an immutable-field update issue.
+
+Do not delete Redis PVCs during a normal update.
+
+Inspect:
+
+```bash
+sudo k3s kubectl -n otp-relay get statefulset otp-redis -o yaml
+sudo k3s kubectl -n otp-relay get pvc
+```
+
+Then use the documented maintenance/reset path only if destructive Redis recreation is intentionally approved.
+
 ---
 
 ## Files never to commit
 
-```text id="7bi8e0"
+```text
 .env
 secret.env
 Runtime tokens
@@ -667,9 +608,7 @@ audit.log
 * [ ] `.env` exists and contains the intended runtime values.
 * [ ] GitHub Actions workflow uses the self-hosted runner.
 * [ ] Installer runs without replacing `.env` unexpectedly.
-* [ ] Frontend bundle is generated from `frontend/app.jsx`.
-* [ ] Help output is generated from `docs/help/`.
-* [ ] Grafana dashboard ConfigMap is generated from `k8s/observability/dashboards/otp-relay-live.json`.
+* [ ] Required generated assets are produced before image build/apply.
 * [ ] App and monitor images build successfully.
 * [ ] K3s imports the expected images.
 * [ ] Kubernetes resources apply cleanly.
@@ -680,7 +619,6 @@ audit.log
 * [ ] `/healthz` returns 200.
 * [ ] `/readyz` returns 200 with Redis healthy.
 * [ ] Monitor health script reports OK.
-* [ ] Grafana loads at `https://grafana.init-db.lan`.
-* [ ] Dashboard appears and auto-refreshes.
+* [ ] Grafana loads at `https://grafana.init-db.lan` when observability is enabled.
 * [ ] Telegram alerting configuration is present when alerts are expected.
-* [ ] OTP business-flow validation passes before declaring multi-replica posture complete.
+* [ ] OTP business-flow validation is completed before declaring multi-replica posture complete.
