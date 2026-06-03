@@ -19,6 +19,7 @@ on:
         options:
           - auto
           - none
+          - observability
           - manifests
           - app
           - monitor
@@ -102,14 +103,14 @@ jobs:
             MONITOR_CHANGED=1
           fi
 
-          # Raw Kubernetes manifest changes can be applied without rebuilding images.
-          # Installer/control scripts are intentionally excluded here. They sync to
-          # /opt/k8s-ansible and are used by the next manual or app/monitor deploy.
+          # Raw OTP Relay Kubernetes manifest changes can be applied without rebuilding images.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/manifests/)'; then
             MANIFESTS_CHANGED=1
           fi
 
-          # Observability manifests/dashboard source can be applied as manifest-only.
+          # Observability-only changes must not run the general manifests installer path.
+          # That path also applies Redis manifests, and Redis StatefulSet volumeClaimTemplates
+          # are immutable after the NFS migration.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/observability/|scripts/build_grafana_dashboard_configmap\.py$)'; then
             OBSERVABILITY_CHANGED=1
           fi
@@ -129,9 +130,12 @@ jobs:
           elif [ "${MONITOR_CHANGED}" = "1" ]; then
             DEPLOY_MODE="monitor"
             REASON="monitor files changed"
-          elif [ "${MANIFESTS_CHANGED}" = "1" ] || [ "${OBSERVABILITY_CHANGED}" = "1" ]; then
+          elif [ "${MANIFESTS_CHANGED}" = "1" ]; then
             DEPLOY_MODE="manifests"
-            REASON="Kubernetes manifest or observability files changed"
+            REASON="OTP Relay Kubernetes manifests changed"
+          elif [ "${OBSERVABILITY_CHANGED}" = "1" ]; then
+            DEPLOY_MODE="observability"
+            REASON="observability files changed"
           fi
 
           echo "Selected deploy mode: ${DEPLOY_MODE}"
@@ -196,8 +200,60 @@ jobs:
           echo
           echo "Sync complete."
 
+      - name: Deploy observability only
+        if: steps.detect.outputs.deploy_mode == 'observability'
+        run: |
+          set -Eeuo pipefail
+
+          echo "Starting observability-only deployment after sync"
+          echo "Reason: ${{ steps.detect.outputs.reason }}"
+          echo "Repo: ${DEPLOY_REPO_DIR}"
+
+          cd "${DEPLOY_REPO_DIR}"
+
+          if [ -f "scripts/build_grafana_dashboard_configmap.py" ]; then
+            echo "Generating Grafana dashboard ConfigMap from dashboard JSON"
+            python3 scripts/build_grafana_dashboard_configmap.py
+          fi
+
+          if ! command -v helm >/dev/null 2>&1; then
+            echo "[ERROR] helm is missing on the runner host."
+            echo "Install Helm or run the full installer once to prepare observability tooling."
+            exit 1
+          fi
+
+          echo "Ensuring Helm repo prometheus-community exists"
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+          helm repo update
+
+          echo "Applying kube-prometheus-stack Helm values"
+          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+            --namespace observability \
+            --create-namespace \
+            --version 85.0.1 \
+            -f k8s/observability/prometheus-stack-values.yaml
+
+          echo "Applying observability Kubernetes manifests"
+          if [ -d "k8s/observability" ]; then
+            find k8s/observability -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) ! -name '*values.yaml' -print0 \
+              | sort -z \
+              | xargs -0 -r sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl apply -f
+          fi
+
+          echo "Waiting for observability workloads"
+          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status deployment/kube-prometheus-stack-operator --timeout=300s
+          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status deployment/kube-prometheus-stack-grafana --timeout=300s
+          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=300s
+          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status statefulset/alertmanager-kube-prometheus-stack-alertmanager --timeout=300s
+
+          echo
+          echo "Observability pods:"
+          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability get pods -o wide
+
+          echo "Observability-only deployment complete."
+
       - name: Deploy changed components
-        if: steps.detect.outputs.deploy_mode != 'none'
+        if: steps.detect.outputs.deploy_mode != 'none' && steps.detect.outputs.deploy_mode != 'observability'
         run: |
           set -Eeuo pipefail
 
@@ -235,5 +291,5 @@ jobs:
         if: steps.detect.outputs.deploy_mode == 'none'
         run: |
           set -Eeuo pipefail
-          echo "No deployable app, monitor, manifest, or requirements change detected."
+          echo "No deployable app, monitor, manifest, observability, or requirements change detected."
           echo "Repository sync completed only."
