@@ -4,17 +4,15 @@
 
 # This file is sourced by the installer; do not execute it directly.
 
-#
-
 # Current architecture:
 
-# - This server/real host is the K3s control-plane and Ansible runner.
+# This server/real host is the K3s control-plane and Ansible runner.
 
-# - The VM provisioner creates only worker1 and worker2.
+# The VM provisioner creates only worker1 and worker2.
 
-# - NFS is external and is not joined to Kubernetes.
+# NFS is external and is not joined to Kubernetes.
 
-# - frontend/app.jsx is source; frontend/app.js is generated during deployment.
+# frontend/app.jsx is source; frontend/app.js is generated during deployment.
 
 ENV_FILE_LOADED=0
 ENV_FILE_CREATED=0
