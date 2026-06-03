@@ -233,6 +233,20 @@ ensure_ansible_installed() {
   ensure_server_networking_helpers
 }
 
+ensure_ansible_collections_installed() {
+  local requirements_file="${REPO_ROOT}/collections/requirements.yml"
+
+  [[ -f "$requirements_file" ]] ||
+    fatal "Missing Ansible collection requirements file: $requirements_file"
+
+  command -v ansible-galaxy >/dev/null 2>&1 ||
+    fatal "ansible-galaxy is required but was not found after Ansible installation"
+
+  log "Installing Ansible collection dependencies from ${requirements_file}"
+  ansible-galaxy collection install -r "$requirements_file"
+  ok "Ansible collection dependencies are installed"
+}
+
 detect_host_bridge_ip() {
   local ip=""
 
@@ -711,6 +725,7 @@ main() {
   log "PATH: $PATH"
 
   ensure_ansible_installed
+  ensure_ansible_collections_installed
   fix_local_ssh_permissions
   cleanup_known_hosts
   write_ansible_ssh_defaults
