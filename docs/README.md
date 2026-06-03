@@ -8,6 +8,24 @@ Explanations, architecture notes, deployment guides, runbooks, validation notes,
 
 ---
 
+## Current documentation status
+
+Phase 3 resilience validation completed on **2026-06-03** with no detected blockers.
+
+Validated:
+
+* two app replicas
+* real SMS/OTP portal confirmation
+* Redis/Sentinel/HAProxy health and Redis master pod deletion recovery
+* app, monitor, HAProxy, Sentinel, and Grafana pod restart recovery
+* worker drain and uncordon recovery for `otp-worker1` and `otp-worker2`
+* NFS/RWX app storage proof across app pods
+* Prometheus/Grafana/Loki/Alloy observability recovery
+
+Remaining production-alignment items are tracked in the architecture and operations docs.
+
+---
+
 ## Active documents
 
 | Area          | Document                                                                                               | Purpose                                                                                                                                       |
@@ -33,7 +51,7 @@ For SCH review or a new maintainer, read in this order:
 
 Portal user-facing help source is maintained separately under:
 
-```text
+```text id="l9xfgh"
 docs/help/
 ```
 
@@ -77,7 +95,8 @@ Avoid duplicating detailed procedures across documents. Cross-link to the owner 
 * Keep observability explanations under `docs/operations/`.
 * Do not use archived or old planning notes as deployment source of truth.
 * Do not document WhatsApp as the active alerting path unless the feature is intentionally restored.
-* Keep multi-replica OTP and worker-drain status conservative until validation is complete.
+* Treat the 2026-06-03 multi-replica OTP and worker-drain validation as complete for the current code/configuration baseline.
+* Re-run validation after future changes to OTP flow, Redis state handling, frontend polling, Kubernetes placement, or deployment workflow behavior.
 
 ---
 
@@ -85,7 +104,7 @@ Avoid duplicating detailed procedures across documents. Cross-link to the owner 
 
 Do not commit runtime or secret-bearing files:
 
-```text
+```text id="e2bkgb"
 .env
 secret.env
 users.xlsx
@@ -103,7 +122,7 @@ local kubeconfig files
 
 Generated files may be committed only when the repository expects generated artifacts to be versioned, and only after regenerating them from source:
 
-```text
+```text id="pe9lpy"
 frontend/app.js
 frontend/help/
 k8s/observability/grafana-dashboard-otp-relay-live.yaml
