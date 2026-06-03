@@ -211,6 +211,18 @@ prometheusOperator:
     limits:
       memory: 128Mi
       cpu: 100m
+      
+# Resources for Prometheus Operator-managed config-reloader containers.
+  # This covers the config-reloader and init-config-reloader sidecars that
+  # are injected into Prometheus and Alertmanager pods.
+  prometheusConfigReloader:
+    resources:
+      requests:
+        memory: 32Mi
+        cpu: 10m
+      limits:
+        memory: 64Mi
+        cpu: 50m
 
 # K3s compatibility:
 # K3s does not expose these as normal separate scrape targets.
