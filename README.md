@@ -2,7 +2,7 @@
 
 **Repository:** [psi1703/k8s-ansible](https://github.com/psi1703/k8s-ansible)
 **License:** MIT
-**Status:** Phase 3 observability, workflow, and SCH-alignment hardening baseline
+**Status:** Phase 3 resilience validation completed on 2026-06-03 with no detected blockers
 
 ---
 
@@ -52,7 +52,7 @@ Client browser
   -> internal DNS
   -> Traefik HTTPS ingress
   -> otp-relay Kubernetes service
-  -> FastAPI app pod
+  -> FastAPI app pods
   -> Redis HAProxy
   -> Redis Sentinel-managed Redis master/replicas
   -> NFS-backed /app/data for persistent non-OTP files
@@ -182,7 +182,7 @@ docs/operations/operations-and-validation-runbook.md
 * Telegram is the active monitor alerting path.
 * `frontend/app.jsx` is the frontend source; `frontend/app.js` is generated.
 * Grafana dashboard source is JSON; the ConfigMap YAML is generated.
-* Multi-replica OTP and worker-drain status should remain conservative until validation is complete.
+* Re-run validation after future changes to OTP flow, Redis state handling, frontend polling, Kubernetes placement, or deployment workflow behavior.
 
 ---
 
@@ -208,20 +208,22 @@ local kubeconfig files
 
 ## Current production-alignment items
 
-Phase 3 resilience validation completed on 2026-06-03 with no detected blockers.
+Phase 3 resilience validation completed on **2026-06-03** with no detected blockers.
 
 Validated:
-- two app replicas
-- real SMS/OTP portal confirmation
-- Redis/Sentinel/HAProxy health
-- Redis master pod deletion recovery
-- app, monitor, HAProxy, Sentinel, and Grafana pod restart recovery
-- worker drain and uncordon recovery for otp-worker1 and otp-worker2
-- NFS/RWX app storage proof across app pods
-- Prometheus/Grafana/Loki/Alloy observability recovery
-  
+
+* two app replicas
+* real SMS/OTP portal confirmation
+* Redis/Sentinel/HAProxy health
+* Redis master pod deletion recovery
+* app, monitor, HAProxy, Sentinel, and Grafana pod restart recovery
+* worker drain and uncordon recovery for `otp-worker1` and `otp-worker2`
+* NFS/RWX app storage proof across app pods
+* Prometheus/Grafana/Loki/Alloy observability recovery
+
 Remaining:
-- IT certificate trust rollout or approved certificate installation
-- SCH decision on Redis Sentinel/HAProxy versus managed Redis
-- Redis backup/restore procedure
-- final production LB/VIP decision if SCH requires more than current Traefik/internal DNS
+
+* IT certificate trust rollout or approved certificate installation
+* SCH decision on Redis Sentinel/HAProxy versus managed Redis
+* Redis backup/restore procedure
+* final production LB/VIP decision if SCH requires more than current Traefik/internal DNS
