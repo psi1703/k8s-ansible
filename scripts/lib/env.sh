@@ -124,7 +124,7 @@ SERVICE_NODE_PORT=$(_env_quote "${SERVICE_NODE_PORT:-30080}")
 LOADBALANCER_IP=$(_env_quote "${LOADBALANCER_IP:-}")
 INGRESS_ENABLED=$(_env_quote "${INGRESS_ENABLED:-1}")
 TLS_ENABLED=$(_env_quote "${TLS_ENABLED:-0}")
-TLS_HOST=$(_env_quote "${TLS_HOST:-otp-relay.local}")
+TLS_HOST=$(_env_quote "${TLS_HOST:-CHANGE_ME_TLS_HOST}")
 TLS_SECRET_NAME=$(_env_quote "${TLS_SECRET_NAME:-otp-relay-tls}")
 TLS_SELF_SIGNED=$(_env_quote "${TLS_SELF_SIGNED:-1}")
 PORTAL_URL=$(_env_quote "${PORTAL_URL:-}")
@@ -263,7 +263,7 @@ create_env_interactive() {
   _env_set_default SERVICE_TYPE "ClusterIP"
   _env_set_default INGRESS_ENABLED "1"
   _env_set_default TLS_ENABLED "0"
-  _env_set_default TLS_HOST "otp-relay.local"
+  _env_set_default TLS_HOST "CHANGE_ME_TLS_HOST"
 
   _env_set_default NFS_ENABLED "1"
   _env_set_default PVC_STORAGE_CLASS "otp-relay-nfs"
@@ -596,7 +596,7 @@ normalize_loaded_env() {
   LOADBALANCER_IP="${LOADBALANCER_IP:-}"
   INGRESS_ENABLED="${INGRESS_ENABLED:-1}"
   TLS_ENABLED="${TLS_ENABLED:-0}"
-  TLS_HOST="${TLS_HOST:-otp-relay.local}"
+  TLS_HOST="${TLS_HOST:-CHANGE_ME_TLS_HOST}"
   TLS_SECRET_NAME="${TLS_SECRET_NAME:-otp-relay-tls}"
   TLS_SELF_SIGNED="${TLS_SELF_SIGNED:-1}"
 
