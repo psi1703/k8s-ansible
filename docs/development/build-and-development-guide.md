@@ -4,17 +4,35 @@
 
 This guide is the development and build reference for OTP Relay Kubernetes.
 
-It covers:
+It owns:
 
+* app and monitor package layout
 * app and monitor image build rules
-* modularized Python package layout
-* frontend source/generated bundle model
-* help-doc generation
-* Grafana dashboard ConfigMap generation
-* runtime data rules
-* local validation commands
 * dependency-change behavior
-* generated artifact rules
+* frontend source/generated bundle model
+* help-doc generation model
+* Grafana dashboard generation model
+* runtime data rules
+* local build commands
+* generated artifact commit rules
+
+Deployment flow belongs in:
+
+```text
+docs/deployment/deployment-and-storage-guide.md
+```
+
+Operations and validation commands belong in:
+
+```text
+docs/operations/operations-and-validation-runbook.md
+```
+
+Grafana/Prometheus troubleshooting and PromQL guidance belongs in:
+
+```text
+docs/operations/observability-and-grafana.md
+```
 
 ---
 
@@ -22,7 +40,7 @@ It covers:
 
 The portal application is organized under:
 
-```text id="uh7mjh"
+```text
 otp_relay/
 ```
 
@@ -44,7 +62,7 @@ Important modules:
 
 The top-level app entry remains:
 
-```text id="mz4ygo"
+```text
 main.py
 ```
 
@@ -56,7 +74,7 @@ main.py
 
 The monitor is organized under:
 
-```text id="cxw1zz"
+```text
 otp_monitor/
 ```
 
@@ -73,7 +91,7 @@ Important modules:
 
 The top-level monitor entry remains:
 
-```text id="8g6f3r"
+```text
 monitor.py
 ```
 
@@ -85,7 +103,7 @@ monitor.py
 
 The app image is built from:
 
-```text id="5gzm3u"
+```text
 k8s/Dockerfile
 ```
 
@@ -101,7 +119,7 @@ The app image includes:
 
 The app starts Uvicorn through Python:
 
-```text id="n1ih5l"
+```text
 python -m uvicorn main:app
 ```
 
@@ -115,7 +133,7 @@ The app should run as non-root where possible and use `/app/data` as a mounted p
 
 The monitor image is built from:
 
-```text id="lrqbli"
+```text
 k8s/Dockerfile.monitor
 ```
 
@@ -129,7 +147,6 @@ The monitor image includes:
 The monitor is a required service. It performs:
 
 * phone presence checks
-* SMS-path checks
 * audit-log checks
 * Prometheus metric export
 * Telegram alert checks
@@ -163,13 +180,13 @@ Do not classify a `requirements.txt` change as observability-only or manifest-on
 
 The React source is:
 
-```text id="6b1xt9"
+```text
 frontend/app.jsx
 ```
 
 The production build output is:
 
-```text id="o3c35k"
+```text
 frontend/app.js
 ```
 
@@ -197,26 +214,26 @@ This matters for portal behavior such as:
 
 Help source lives under:
 
-```text id="l6jzzx"
+```text
 docs/help/
 docs/help/assets/
 ```
 
 The build script is:
 
-```text id="98lnrw"
+```text
 scripts/build_help_docs.py
 ```
 
 The generated portal help output is under:
 
-```text id="pn0cy0"
+```text
 frontend/help/
 ```
 
 Generated help output includes:
 
-```text id="3u97li"
+```text
 frontend/help/manifest.json
 frontend/help/wizard-guide.json
 frontend/help/rendered/
@@ -225,7 +242,7 @@ frontend/help/assets/
 
 Build command:
 
-```bash id="dg0yx1"
+```bash
 python3 scripts/build_help_docs.py
 ```
 
@@ -235,27 +252,24 @@ Generated help output should be handled by the build/deploy process according to
 
 ---
 
-## Help overlay validation
+## Help overlay development note
 
-If an image works in the pop-out guide but not in the portal overlay, check the generated guide assets and the React overlay source:
+If an image works in the pop-out guide but not in the portal overlay, the relevant source is usually:
 
-```bash id="7gx3sp"
-find frontend/help -type f | sort | grep -Ei 'png|jpg|jpeg|webp|svg'
-grep -R 'new-user-onboarding-sequence.png' -n docs/help frontend/help frontend/app.jsx frontend/guide.html scripts/build_help_docs.py
-curl -I http://127.0.0.1:8000/help/assets/new-user-onboarding-sequence.png
-curl -I http://127.0.0.1:8000/help/wizard-guide.json
-```
-
-The overlay code lives in:
-
-```text id="26xbok"
+```text
 frontend/app.jsx
 ```
 
-After fixing it, rebuild:
+After fixing overlay behavior, rebuild:
 
-```text id="k32tz9"
+```text
 frontend/app.js
+```
+
+For operational checks of the live portal, use:
+
+```text
+docs/operations/operations-and-validation-runbook.md
 ```
 
 ---
@@ -264,25 +278,25 @@ frontend/app.js
 
 Grafana dashboard source lives at:
 
-```text id="c6j1gj"
+```text
 k8s/observability/dashboards/otp-relay-live.json
 ```
 
 The generator script is:
 
-```text id="9kumw7"
+```text
 scripts/build_grafana_dashboard_configmap.py
 ```
 
 The generated ConfigMap output is:
 
-```text id="hwpswr"
+```text
 k8s/observability/grafana-dashboard-otp-relay-live.yaml
 ```
 
 Build command:
 
-```bash id="9nam8k"
+```bash
 python3 scripts/build_grafana_dashboard_configmap.py
 ```
 
@@ -295,39 +309,10 @@ Rules:
 * The Grafana UI should not be used as the permanent source of truth.
 * Provisioned dashboards may not be saveable from Grafana UI; this is expected.
 
-The generator supports Grafana `dashboard.grafana.app/v2` exports and converts them to classic Grafana dashboard JSON for sidecar provisioning.
+Dashboard behavior, PromQL, and troubleshooting belong in:
 
-The generated dashboard JSON must preserve:
-
-```text id="epuwfh"
-id: null
-uid: otp-relay-live
-refresh: 15s
-timepicker.refresh_intervals
-panel type from vizConfig.group
-dashboard layout and panel sizing
-```
-
-Validation commands:
-
-```bash id="dcqfca"
-grep -n '"refresh"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"timepicker"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"refresh_intervals"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-Manual apply/reload commands:
-
-```bash id="83paua"
-sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-```
-
-Normal Grafana browser access:
-
-```text id="ch1bmy"
-https://grafana.init-db.lan
+```text
+docs/operations/observability-and-grafana.md
 ```
 
 ---
@@ -336,7 +321,7 @@ https://grafana.init-db.lan
 
 Runtime data belongs on the Kubernetes PVC at:
 
-```text id="pk4d61"
+```text
 /app/data
 ```
 
@@ -344,7 +329,7 @@ Do not bake runtime files into the image.
 
 Expected runtime files:
 
-```text id="bk7pyv"
+```text
 users.xlsx
 admin_auth.json
 admin_config.json
@@ -360,71 +345,46 @@ OTP values must not be written to runtime files, image layers, logs, or committe
 
 From the repository root:
 
-```bash id="1yk3oi"
+```bash
 docker build -t otp-relay:latest -f k8s/Dockerfile .
 docker build -t otp-monitor:latest -f k8s/Dockerfile.monitor .
 ```
 
 For K3s without a registry:
 
-```bash id="7cflwy"
+```bash
 docker save otp-relay:latest -o otp-relay-latest.tar
 docker save otp-monitor:latest -o otp-monitor-latest.tar
 sudo k3s ctr images import otp-relay-latest.tar
 sudo k3s ctr images import otp-monitor-latest.tar
 ```
 
-Restart workloads:
+For deployment and rollout checks after import, use:
 
-```bash id="s3t1ja"
-sudo k3s kubectl rollout restart deployment/otp-relay -n otp-relay
-sudo k3s kubectl rollout restart deployment/otp-monitor -n otp-relay
-sudo k3s kubectl rollout status deployment/otp-relay -n otp-relay
-sudo k3s kubectl rollout status deployment/otp-monitor -n otp-relay
+```text
+docs/deployment/deployment-and-storage-guide.md
+docs/operations/operations-and-validation-runbook.md
 ```
 
 ---
 
-## Local validation commands
+## Local generation commands
 
-Before committing frontend/help/Grafana generated changes, run the relevant checks.
+Before committing generated changes, run the relevant command.
 
 Help docs:
 
-```bash id="vrixdv"
+```bash
 python3 scripts/build_help_docs.py
 ```
 
 Grafana dashboard ConfigMap:
 
-```bash id="lv9m7g"
+```bash
 python3 scripts/build_grafana_dashboard_configmap.py
 ```
 
-Dashboard refresh metadata:
-
-```bash id="lhgk0x"
-grep -n '"refresh"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"timepicker"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"refresh_intervals"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-Docker image builds:
-
-```bash id="bqnzfw"
-docker build -t otp-relay:latest -f k8s/Dockerfile .
-docker build -t otp-monitor:latest -f k8s/Dockerfile.monitor .
-```
-
-Basic Kubernetes rollout checks after deployment:
-
-```bash id="g08041"
-sudo k3s kubectl get pods -n otp-relay -o wide
-sudo k3s kubectl rollout status deployment/otp-relay -n otp-relay
-sudo k3s kubectl rollout status deployment/otp-monitor -n otp-relay
-curl -k https://srvotptest26.init-db.lan/healthz
-curl -k https://srvotptest26.init-db.lan/readyz
-```
+Frontend bundle generation is handled by the installer/frontend build path. When frontend source changes, commit the rebuilt `frontend/app.js` only if the repository intentionally versions the generated bundle.
 
 ---
 
@@ -436,7 +396,7 @@ curl -k https://srvotptest26.init-db.lan/readyz
 * Keep Kubernetes manifests as deployment source.
 * Keep observability manifests under `k8s/observability/`.
 * Keep docs under `docs/`; do not recreate `k8s/docs/`.
-* Keep frontend source/generated bundle changes together.
+* Keep frontend source/generated bundle changes together when generated artifacts are versioned.
 * Keep Grafana dashboard source/generated ConfigMap changes together.
 * Keep `.env` as the source of operator/site-specific values.
 * Do not hardcode phone IP, interface, Telegram token, NFS server, TLS host, Redis URL, or storage class in code.
@@ -446,7 +406,7 @@ curl -k https://srvotptest26.init-db.lan/readyz
 
 ## Files not to commit
 
-```text id="dscg6p"
+```text
 .env
 secret.env
 data/
@@ -462,7 +422,7 @@ audit.log
 
 Generated files such as these may be committed only when the repository's deployment model expects generated artifacts to be versioned:
 
-```text id="vybnqm"
+```text
 frontend/app.js
 frontend/help/
 k8s/observability/grafana-dashboard-otp-relay-live.yaml
@@ -496,8 +456,6 @@ When committed, regenerate them from their source files instead of editing them 
 * [ ] `frontend/app.js` is generated from `frontend/app.jsx`.
 * [ ] Help output is generated from `docs/help/`.
 * [ ] Grafana dashboard ConfigMap is generated by `scripts/build_grafana_dashboard_configmap.py`.
-* [ ] Dashboard generated YAML contains `refresh: 15s`.
-* [ ] Dashboard generated YAML contains `timepicker.refresh_intervals`.
 * [ ] Runtime data is not baked into images.
 * [ ] Secrets are not committed.
 * [ ] Docker images build cleanly.
