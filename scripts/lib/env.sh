@@ -406,7 +406,7 @@ Environment file: $ENV_FILE
 8. Worker VM provisioning: bridge, worker IPs, VM sizing
 9. Observability: Grafana/Prometheus install and Grafana host
 10. Save and continue
-    EOF_MENU
+EOF_MENU
 
     read -r -p "Choose what to change [10]: " choice
     choice="${choice:-10}"
