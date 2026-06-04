@@ -1,7 +1,7 @@
 # OTP Relay Kubernetes
 
-**Repository:** [psi1703/k8s-ansible](https://github.com/psi1703/k8s-ansible)
-**License:** MIT
+**Repository:** [psi1703/k8s-ansible](https://github.com/psi1703/k8s-ansible)  
+**License:** MIT  
 **Status:** Phase 3 resilience validation completed on 2026-06-03 with no detected blockers
 
 ---
@@ -119,6 +119,96 @@ Do not edit generated files as source.
 
 ---
 
+## First install flow
+
+Before running a real install, run the non-mutating health check:
+
+```bash
+cd /opt/k8s-ansible
+bash setup.sh --doctor
+```
+
+`--doctor` checks the repository layout, key script syntax, `.env` syntax and consistency, local K3s status, generated Ansible inventory, worker SSH reachability when inventory exists, NFS/TLS/Ingress placeholders, and required host commands.
+
+It does **not** create `.env`, provision worker VMs, install K3s, run Ansible, apply manifests, or change system state.
+
+Normal first install:
+
+```bash
+cd /opt/k8s-ansible
+bash setup.sh
+```
+
+After a successful install, the installer writes an operator handover report:
+
+```text
+/opt/k8s-ansible/install-report.txt
+```
+
+Use that report for a concise view of the portal URL, Grafana URL, namespace, service/ingress/TLS state, NFS state, Redis state, pods, services, PVCs, and useful validation commands.
+
+---
+
+## Environment file behavior
+
+`.env` is the single source of operator-provided deployment values.
+
+Normal behavior:
+
+* A valid existing `.env` is reused.
+* Normal update runs must not silently overwrite `.env`.
+* Incomplete, cancelled, or syntactically broken `.env` files are rejected safely.
+* Rejected files are backed up as `.env.rejected.<timestamp>` before a clean `.env` is recreated.
+
+Recommended pre-install check:
+
+```bash
+bash setup.sh --doctor
+```
+
+Useful recovery artifacts:
+
+```text
+.env.rejected.<timestamp>
+install-report.txt
+/var/backups/otp-relay-k8s/
+```
+
+---
+
+## TLS and internal HTTPS behavior
+
+The preferred internal access model is Traefik ingress with DNS pointing to the server/load-balancer address.
+
+Important TLS settings:
+
+```bash
+TLS_ENABLED="1"
+TLS_HOST="srvotptest26.init-db.lan"
+TLS_SECRET_NAME="otp-relay-tls"
+TLS_SELF_SIGNED="1"
+TLS_ROTATE_SELF_SIGNED="0"
+```
+
+Behavior:
+
+* `TLS_ENABLED=0` leaves the portal on HTTP ingress/service behavior.
+* `TLS_ENABLED=1` enables HTTPS ingress configuration.
+* `TLS_SELF_SIGNED=1` lets the installer create the Kubernetes TLS secret only when the secret is missing.
+* Existing self-signed TLS secrets are preserved by default.
+* `TLS_ROTATE_SELF_SIGNED=1` intentionally replaces the existing self-signed certificate.
+* `TLS_SELF_SIGNED=0` requires the Kubernetes TLS secret to exist before the installer runs.
+
+To export the self-signed certificate for IT Group Policy distribution:
+
+```bash
+sudo k3s kubectl get secret otp-relay-tls -n otp-relay -o jsonpath='{.data.tls\.crt}' | base64 -d > otp-relay.crt
+```
+
+Do not rotate the certificate after IT has trusted/distributed it unless the rotation is intentional.
+
+---
+
 ## Deployment
 
 Normal deployment is through GitHub Actions using the self-hosted runner.
@@ -138,6 +228,13 @@ cd /opt/k8s-ansible
 sudo ./install-otp-relay-k8s.sh
 ```
 
+For full first-install orchestration, including worker VM provisioning and Ansible cluster setup, use:
+
+```bash
+cd /opt/k8s-ansible
+bash setup.sh
+```
+
 For detailed deployment, storage, Redis, and observability deployment guidance, see:
 
 ```text
@@ -147,6 +244,15 @@ docs/deployment/deployment-and-storage-guide.md
 ---
 
 ## Quick health check
+
+Pre-install or troubleshooting health check:
+
+```bash
+cd /opt/k8s-ansible
+bash setup.sh --doctor
+```
+
+Cluster and application health check:
 
 ```bash
 sudo k3s kubectl get nodes -o wide
@@ -163,6 +269,12 @@ Expected:
 OK: OTP Relay K3s deployment is healthy.
 ```
 
+Install report:
+
+```bash
+cat /opt/k8s-ansible/install-report.txt
+```
+
 For the full runbook, see:
 
 ```text
@@ -175,6 +287,8 @@ docs/operations/operations-and-validation-runbook.md
 
 * `.env` is the source of operator-provided deployment values.
 * Normal updates must not overwrite `.env` silently.
+* Broken or incomplete `.env` files are backed up as `.env.rejected.<timestamp>` before recovery.
+* Run `bash setup.sh --doctor` before first install or when troubleshooting setup state.
 * Redis is required in the current Kubernetes validation posture.
 * Normal updates must not destructively recreate Redis StatefulSet or Redis PVC resources.
 * OTP values must not be written to disk or logs.
@@ -182,6 +296,8 @@ docs/operations/operations-and-validation-runbook.md
 * Telegram is the active monitor alerting path.
 * `frontend/app.jsx` is the frontend source; `frontend/app.js` is generated.
 * Grafana dashboard source is JSON; the ConfigMap YAML is generated.
+* Self-signed TLS secrets are not rotated on normal installer reruns.
+* Set `TLS_ROTATE_SELF_SIGNED=1` only when certificate replacement is intentional.
 * Re-run validation after future changes to OTP flow, Redis state handling, frontend polling, Kubernetes placement, or deployment workflow behavior.
 
 ---
@@ -190,12 +306,14 @@ docs/operations/operations-and-validation-runbook.md
 
 ```text
 .env
+.env.rejected.*
 secret.env
 users.xlsx
 admin_auth.json
 admin_config.json
 wizard_progress.json
 audit.log
+install-report.txt
 *.tar
 *.log
 runtime tokens
