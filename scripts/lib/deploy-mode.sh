@@ -67,7 +67,7 @@ requires_monitor_image() {
 
 requires_manifests_apply() {
   case "$(current_deploy_mode)" in
-    full|app|monitor|manifests|observability) return 0 ;;
+    full|app|monitor|manifests) return 0 ;;
     *) return 1 ;;
   esac
 }
