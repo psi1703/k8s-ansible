@@ -3,11 +3,12 @@
 # Source this file; do not execute it directly.
 
 # Supported DEPLOY_MODE values:
-#   full      - build/import app and monitor images, apply all manifests
-#   app       - build/import app image, apply app-related manifests
-#   monitor   - build/import monitor image, apply monitor-related manifests
-#   manifests - apply rendered Kubernetes manifests only; do not build images
-#   none      - load/validate environment and exit before deployment work
+#   full          - build/import app and monitor images, apply all manifests
+#   app           - build/import app image, apply app-related manifests
+#   monitor       - build/import monitor image, apply monitor-related manifests
+#   manifests     - apply rendered Kubernetes manifests only; do not build images
+#   observability - apply observability Helm stacks/manifests only
+#   none          - load/validate environment and exit before deployment work
 
 current_deploy_mode() {
   local mode="${DEPLOY_MODE:-full}"
@@ -24,7 +25,7 @@ current_deploy_mode() {
 
 valid_deploy_mode() {
   case "${1:-}" in
-    full|app|monitor|manifests|none) return 0 ;;
+    full|app|monitor|manifests|observability|none) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -34,7 +35,7 @@ validate_deploy_mode() {
   mode="$(current_deploy_mode)"
 
   if ! valid_deploy_mode "$mode"; then
-    fatal "unsupported DEPLOY_MODE=$mode. Use one of: full, app, monitor, manifests, none."
+    fatal "unsupported DEPLOY_MODE=$mode. Use one of: full, app, monitor, manifests, observability, none."
   fi
 
   DEPLOY_MODE="$mode"
@@ -66,7 +67,7 @@ requires_monitor_image() {
 
 requires_manifests_apply() {
   case "$(current_deploy_mode)" in
-    full|app|monitor|manifests) return 0 ;;
+    full|app|monitor|manifests|observability) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -84,6 +85,9 @@ explain_deploy_mode() {
       ;;
     manifests)
       log "DEPLOY_MODE=manifests: render/apply Kubernetes manifests without rebuilding images"
+      ;;
+    observability)
+      log "DEPLOY_MODE=observability: install/update Prometheus, Grafana, Loki, Alloy, dashboard, ServiceMonitor, and Grafana ingress only"
       ;;
     none)
       log "DEPLOY_MODE=none: validate environment only; no Docker, K3s, image, or manifest work"
