@@ -23,6 +23,7 @@ _env_quote() {
   value="${value//\"/\\\"}"
   printf '"%s"' "$value"
 }
+
 _env_get_current() {
 local name="$1"
 local current=""
@@ -92,7 +93,6 @@ fi
 _env_default_interface() {
 ip route show default 2>/dev/null | awk '{print $5; exit}'
 }
-
 
 _env_reset_config_vars() {
 local names="REPO_URL REPO_REF INSTALL_DIR NAMESPACE APP_IMAGE MONITOR_IMAGE DEPLOY_MODE SERVICE_TYPE SERVICE_NODE_PORT LOADBALANCER_IP INGRESS_ENABLED TLS_ENABLED TLS_HOST TLS_SECRET_NAME TLS_SELF_SIGNED PORTAL_URL PVC_STORAGE_CLASS PVC_SIZE NFS_ENABLED NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_PV_NAME NFS_MOUNT_OPTIONS REPLICA_COUNT APP_NODE_SELECTOR_KEY APP_NODE_SELECTOR_VALUE MONITOR_NODE_SELECTOR_KEY MONITOR_NODE_SELECTOR_VALUE REDIS_NODE_SELECTOR_KEY REDIS_NODE_SELECTOR_VALUE REQUIRE_METALLB INSTALL_METALLB METALLB_VERSION METALLB_MANIFEST_URL METALLB_IP_RANGE METALLB_POOL_NAME SERVER_HOSTNAME SERVER_IP PHONE_IP PHONE_INTERFACE PHONE_PING_INTERVAL PHONE_OFFLINE_THRESHOLD PHONE_ARP_COUNT PHONE_ARP_TIMEOUT MONITOR_METRICS_PORT OTP_RELAY_DATA_DIR USERS_EXCEL_PATH AUDIT_LOG_PATH CLAIM_EXPIRY_SEC OTP_DISPLAY_SEC CONCURRENT_RISK_SEC TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD INSTALL_GITHUB_RUNNER GITHUB_RUNNER_URL GITHUB_RUNNER_TOKEN GITHUB_RUNNER_DIR GITHUB_RUNNER_USER RUNNER_ONLY DOCKER_BIN REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS DISTRIBUTE_IMAGES_TO_NODES IMAGE_DISTRIBUTION_PORT IMAGE_IMPORTER_IMAGE SMS_SECRET_TOKEN BRIDGE_NAME HOST_IFACE HOST_IP_CIDR GATEWAY DNS PREFIX IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END AUTO_ASSIGN_IPS WORKER1_IP WORKER2_IP VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB WORKER1_NAME WORKER2_NAME OBSERVABILITY_NAMESPACE OBSERVABILITY_INSTALL_STACK OBSERVABILITY_STACK_CHART_VERSION GRAFANA_HOST"
@@ -551,7 +551,7 @@ EOF_MENU
     _env_prompt REDIS_NODE_SELECTOR_VALUE "Redis node selector value" 0 0
     ;;
     7)
-    _env_prompt DEPLOY_MODE "Deploy mode: full, app, monitor, manifests, or none" 1 0
+    _env_prompt DEPLOY_MODE "Deploy mode: full, app, monitor, manifests, observability, or none" 1 0
     _env_prompt RUNNER_ONLY "Runner-only mode? 1/0" 1 0
     _env_prompt SKIP_REPO_SYNC "Skip repo sync? auto, 1, or 0" 1 0
     ;;
@@ -597,6 +597,19 @@ log "validating required installer environment values"
 
 [ -n "${NAMESPACE:-}" ] || fatal "NAMESPACE is required in $ENV_FILE"
 [ -n "${INSTALL_DIR:-}" ] || fatal "INSTALL_DIR is required in $ENV_FILE"
+
+if [ "${DEPLOY_MODE:-full}" = "observability" ]; then
+log "DEPLOY_MODE=observability; using observability-only environment validation"
+
+[ -n "${OBSERVABILITY_NAMESPACE:-}" ] || fatal "OBSERVABILITY_NAMESPACE is required in $ENV_FILE when DEPLOY_MODE=observability"
+[ -n "${OBSERVABILITY_INSTALL_STACK:-}" ] || fatal "OBSERVABILITY_INSTALL_STACK is required in $ENV_FILE when DEPLOY_MODE=observability"
+[ -n "${OBSERVABILITY_STACK_CHART_VERSION:-}" ] || fatal "OBSERVABILITY_STACK_CHART_VERSION is required in $ENV_FILE when DEPLOY_MODE=observability"
+[ -n "${GRAFANA_HOST:-}" ] || fatal "GRAFANA_HOST is required in $ENV_FILE when DEPLOY_MODE=observability"
+
+log "observability-only environment values validated"
+return 0
+fi
+
 [ -n "${SERVICE_TYPE:-}" ] || fatal "SERVICE_TYPE is required in $ENV_FILE"
 [ -n "${PHONE_IP:-}" ] || fatal "PHONE_IP is required in $ENV_FILE because the monitor is a core component"
 [ -n "${PHONE_INTERFACE:-}" ] || fatal "PHONE_INTERFACE is required in $ENV_FILE because ARP monitoring requires a host interface"
@@ -691,6 +704,7 @@ export ENV_FILE
 local runtime_noninteractive="${NONINTERACTIVE:-}"
 local runtime_skip_repo_sync="${SKIP_REPO_SYNC:-}"
 local runtime_git_clean="${GIT_CLEAN:-}"
+local runtime_deploy_mode="${DEPLOY_MODE:-}"
 local recovery_service_type="${SERVICE_TYPE:-}"
 local recovery_ingress_enabled="${INGRESS_ENABLED:-}"
 local recovery_tls_enabled="${TLS_ENABLED:-}"
@@ -717,6 +731,7 @@ if [ -f "$ENV_FILE" ]; then
   else
     _env_reject_file "$ENV_FILE" "file is not valid shell syntax or could not be sourced"
     _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+    _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
     _env_restore_recovery_input SERVICE_TYPE "$recovery_service_type"
     _env_restore_recovery_input INGRESS_ENABLED "$recovery_ingress_enabled"
     _env_restore_recovery_input TLS_ENABLED "$recovery_tls_enabled"
@@ -738,17 +753,20 @@ fi
 
 if [ ! -f "$ENV_FILE" ]; then
   _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+  _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
   _env_create_new_file_for_current_mode
 fi
 
 if [ "$loaded_existing_env" = "1" ]; then
   _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+  _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
   normalize_loaded_env
 
   if _env_existing_file_is_recoverable_first_run; then
     _env_reject_file "$ENV_FILE" "file appears incomplete or still contains first-run placeholders"
     _env_clear_recoverable_placeholders
     _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+    _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
     _env_restore_recovery_input SERVICE_TYPE "$recovery_service_type"
     _env_restore_recovery_input INGRESS_ENABLED "$recovery_ingress_enabled"
     _env_restore_recovery_input TLS_ENABLED "$recovery_tls_enabled"
@@ -770,6 +788,7 @@ if [ "$loaded_existing_env" = "1" ]; then
       change_env_menu
       source_env_file "$ENV_FILE"
       _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+      _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
       normalize_loaded_env
     fi
   else
@@ -780,6 +799,7 @@ fi
 source_env_file "$ENV_FILE"
 ENV_FILE_LOADED=1
 _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+_env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
 normalize_loaded_env
 
 validate_env_required
