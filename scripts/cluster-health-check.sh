@@ -6,9 +6,16 @@ LOG="${1:-/tmp/k8s-ansible-health-check-$(date +%Y%m%d-%H%M%S).log}"
 REPO="${REPO:-/opt/k8s-ansible}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-/etc/rancher/k3s/k3s.yaml}"
 KPS_CHART_VERSION="${KPS_CHART_VERSION:-85.0.1}"
+LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-13.7.0}"
+ALLOY_CHART_VERSION="${ALLOY_CHART_VERSION:-1.8.1}"
 
 NAMESPACE="${NAMESPACE:-otp-relay}"
 OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
+KPS_RELEASE="${KPS_RELEASE:-kube-prometheus-stack}"
+LOKI_RELEASE="${LOKI_RELEASE:-loki}"
+ALLOY_RELEASE="${ALLOY_RELEASE:-alloy}"
+LOKI_SERVICE="${LOKI_SERVICE:-loki}"
+LOKI_PORT="${LOKI_PORT:-3100}"
 
 APP_LABEL_SELECTOR="${APP_LABEL_SELECTOR:-app=otp-relay}"
 MONITOR_LABEL_SELECTOR="${MONITOR_LABEL_SELECTOR:-app=otp-monitor}"
@@ -133,6 +140,33 @@ check_statefulset_ready() {
   fi
 }
 
+check_daemonset_ready() {
+  local ns="$1"
+  local name="$2"
+  local label="$3"
+
+  if ! kubectl -n "$ns" get daemonset "$name" >/dev/null 2>&1; then
+    problem "$label DaemonSet missing: $ns/$name"
+    return
+  fi
+
+  local desired ready available
+  desired="$(kubectl -n "$ns" get daemonset "$name" -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 0)"
+  ready="$(kubectl -n "$ns" get daemonset "$name" -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)"
+  available="$(kubectl -n "$ns" get daemonset "$name" -o jsonpath='{.status.numberAvailable}' 2>/dev/null || echo 0)"
+  desired="${desired:-0}"
+  ready="${ready:-0}"
+  available="${available:-0}"
+
+  if [ "$desired" = "0" ]; then
+    problem "$label DaemonSet has zero desired pods: $ns/$name"
+  elif [ "$desired" != "$ready" ] || [ "$desired" != "$available" ]; then
+    problem "$label DaemonSet not ready: desired=$desired ready=$ready available=$available"
+  else
+    echo "OK: $label DaemonSet ready: desired=$desired ready=$ready available=$available"
+  fi
+}
+
 check_service_endpoints() {
   local ns="$1"
   local svc="$2"
@@ -195,7 +229,25 @@ run kubectl get nodes -L observability/role,otp-relay/app-node,otp-relay/redis-n
 section "Helm access"
 run_sh "helm -n $OBSERVABILITY_NAMESPACE list -a || true"
 run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE list -a || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status kube-prometheus-stack || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $KPS_RELEASE || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $LOKI_RELEASE || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $ALLOY_RELEASE || true"
+
+if ! sudo KUBECONFIG="$KUBECONFIG_PATH" helm -n "$OBSERVABILITY_NAMESPACE" status "$KPS_RELEASE" >/dev/null 2>&1; then
+  problem "Helm release missing or unhealthy: $OBSERVABILITY_NAMESPACE/$KPS_RELEASE"
+fi
+
+if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
+  if ! sudo KUBECONFIG="$KUBECONFIG_PATH" helm -n "$OBSERVABILITY_NAMESPACE" status "$LOKI_RELEASE" >/dev/null 2>&1; then
+    problem "Helm release missing or unhealthy: $OBSERVABILITY_NAMESPACE/$LOKI_RELEASE"
+  fi
+fi
+
+if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
+  if ! sudo KUBECONFIG="$KUBECONFIG_PATH" helm -n "$OBSERVABILITY_NAMESPACE" status "$ALLOY_RELEASE" >/dev/null 2>&1; then
+    problem "Helm release missing or unhealthy: $OBSERVABILITY_NAMESPACE/$ALLOY_RELEASE"
+  fi
+fi
 
 section "Namespaces"
 run kubectl get ns
@@ -311,10 +363,22 @@ fi
 section "Observability resources"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get pods -o wide 2>/dev/null || true"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get svc -o wide 2>/dev/null || true"
+run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get daemonset -o wide 2>/dev/null || true"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get ingressroute -o wide 2>/dev/null || true"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get servicemonitor -o wide 2>/dev/null || true"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get prometheus,alertmanager 2>/dev/null || true"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get configmap otp-relay-live-dashboard 2>/dev/null || true"
+
+check_service_endpoints "$OBSERVABILITY_NAMESPACE" "${KPS_RELEASE}-grafana" "Grafana"
+check_service_endpoints "$OBSERVABILITY_NAMESPACE" "${KPS_RELEASE}-prometheus" "Prometheus"
+
+if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
+  check_service_endpoints "$OBSERVABILITY_NAMESPACE" "$LOKI_SERVICE" "Loki"
+fi
+
+if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
+  check_daemonset_ready "$OBSERVABILITY_NAMESPACE" "$ALLOY_RELEASE" "Alloy"
+fi
 
 section "Metrics endpoints from inside cluster"
 run_sh "kubectl -n '$NAMESPACE' run curl-metrics-test --rm -i --restart=Never --image=curlimages/curl:latest -- sh -c '
@@ -323,6 +387,25 @@ curl -fsS http://otp-relay.otp-relay.svc.cluster.local/metrics | grep -E \"otp_q
 echo --- otp-monitor metrics ---
 curl -fsS http://otp-monitor.otp-relay.svc.cluster.local:9101/metrics | grep -E \"otp_iphone_present|otp_monitor_arp_last_success_timestamp_seconds|otp_iphone_absence_events_total\" | head -30 || true
 ' || true"
+
+section "Loki and Alloy log pipeline checks"
+if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
+  LOKI_URL="http://${LOKI_SERVICE}.${OBSERVABILITY_NAMESPACE}.svc.cluster.local:${LOKI_PORT}"
+
+  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-api-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/ready' || true"
+
+  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-labels-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/loki/api/v1/labels' | head -40 || true"
+
+  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-query-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS --get '$LOKI_URL/loki/api/v1/query' --data-urlencode 'query={namespace=\"otp-relay\"}' | head -80 || true"
+else
+  warning "loki-values.yaml not present; skipping Loki API checks"
+fi
+
+if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
+  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' logs daemonset/'$ALLOY_RELEASE' --tail=80 --all-containers=true 2>/dev/null || true"
+else
+  warning "alloy-values.yaml not present; skipping Alloy log checks"
+fi
 
 section "Prometheus targets and dashboard queries"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run prometheus-api-check --rm -i --restart=Never --image=curlimages/curl:latest -- sh -c '
@@ -381,9 +464,22 @@ if [ -d "$REPO/k8s" ]; then
 fi
 
 section "Repo Helm values render check"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo list || true"
+
 if [ -f "$REPO/k8s/observability/prometheus-stack-values.yaml" ]; then
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo list || true"
   run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --namespace '$OBSERVABILITY_NAMESPACE' --version '$KPS_CHART_VERSION' -f k8s/observability/prometheus-stack-values.yaml >/tmp/kps-rendered-health-check.yaml && echo OK || echo FAILED"
+fi
+
+if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana-community https://grafana.github.io/helm-charts >/dev/null 2>&1 || true"
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo update >/dev/null 2>&1 || true"
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template loki grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' --version '$LOKI_CHART_VERSION' -f k8s/observability/loki-values.yaml >/tmp/loki-rendered-health-check.yaml && echo OK || echo FAILED"
+fi
+
+if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true"
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo update >/dev/null 2>&1 || true"
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template alloy grafana/alloy --namespace '$OBSERVABILITY_NAMESPACE' --version '$ALLOY_CHART_VERSION' -f k8s/observability/alloy-values.yaml >/tmp/alloy-rendered-health-check.yaml && echo OK || echo FAILED"
 fi
 
 section "Installer recent log tail"
