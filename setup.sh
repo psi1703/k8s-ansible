@@ -201,11 +201,34 @@ chown_env_to_original_user() {
 }
 
 source_env_if_present() {
-  if [ -f "$SCRIPT_DIR/.env" ]; then
+  local file="${ENV_FILE:-$SCRIPT_DIR/.env}"
+  local forced_noninteractive="0"
+
+  [ -f "$file" ] || return 0
+
+  # Keep command-line/runtime noninteractive mode from being overwritten by
+  # NONINTERACTIVE=0 persisted in .env. Other persisted values remain sourced.
+  if [ "${NONINTERACTIVE:-0}" = "1" ]; then
+    forced_noninteractive="1"
+  fi
+
+  if declare -F source_env_file >/dev/null 2>&1; then
+    source_env_file "$file"
+  else
+    bash -n "$file" >/dev/null 2>&1 || fatal "$file contains invalid shell syntax; repair or remove it before continuing"
     set -a
-    # shellcheck disable=SC1091
-    . "$SCRIPT_DIR/.env"
+    # shellcheck disable=SC1090
+    . "$file"
     set +a
+  fi
+
+  if [ "$forced_noninteractive" = "1" ]; then
+    NONINTERACTIVE="1"
+    export NONINTERACTIVE
+  fi
+
+  if declare -F normalize_loaded_env >/dev/null 2>&1; then
+    normalize_loaded_env
   fi
 }
 
@@ -233,7 +256,6 @@ ensure_base_env() {
   fi
 
   chown_env_to_original_user
-  source_env_if_present
 }
 
 _env_escape_sed() {
