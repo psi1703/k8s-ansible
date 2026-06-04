@@ -1,61 +1,27 @@
 # Helm values for Loki
 #
-# Chart: grafana/loki
-# Version used with SCH setup: 6.27.0
+# Chart source: grafana-community/loki
+# Chart version used with SCH setup: 13.7.0
 #
 # Purpose:
 # - Store logs shipped by Grafana Alloy.
-# - Run in SingleBinary mode for this small K3s cluster.
+# - Run in Monolithic/single-binary mode for this small K3s cluster.
 # - Keep logs for 7 days.
 # - Use local-path PVC on the observability data worker.
 #
 # Target cluster:
-# - observability/role=data should be assigned to otp-worker2.
+# - observability/role=data should be assigned to the observability data worker.
+#
+# Design reference:
+# - SCH k8s observability design
+# - SCH current k8s/observability/loki-values.yaml
 
-deploymentMode: SingleBinary
-
-loki:
-  auth_enabled: false
-
-  commonConfig:
-    replication_factor: 1
-    path_prefix: /var/loki
-
-  storage:
-    type: filesystem
-    filesystem:
-      chunks_directory: /var/loki/chunks
-      rules_directory: /var/loki/rules
-
-  schemaConfig:
-    configs:
-      - from: "2024-01-01"
-        store: tsdb
-        object_store: filesystem
-        schema: v13
-        index:
-          prefix: loki_index_
-          period: 24h
-
-  limits_config:
-    retention_period: 168h
-    reject_old_samples: true
-    reject_old_samples_max_age: 168h
-
-  compactor:
-    retention_enabled: true
-    delete_request_store: filesystem
-    working_directory: /var/loki/compactor
-
-  rulerConfig:
-    enable_api: false
-
-  analytics:
-    reporting_enabled: false
+deploymentMode: Monolithic
 
 singleBinary:
   replicas: 1
 
+  # Pin to data worker, alongside Prometheus.
   nodeSelector:
     observability/role: data
 
@@ -67,6 +33,7 @@ singleBinary:
       memory: 512Mi
       cpu: 300m
 
+  # Persistence for chunks and index.
   persistence:
     enabled: true
     storageClass: local-path
@@ -74,7 +41,7 @@ singleBinary:
       - ReadWriteOnce
     size: 5Gi
 
-# Disable distributed/simple-scalable components.
+# Disable microservices-mode components.
 backend:
   replicas: 0
 
@@ -111,21 +78,6 @@ bloomCompactor:
 bloomGateway:
   replicas: 0
 
-# Keep gateway enabled so Grafana has a stable HTTP URL.
-gateway:
-  enabled: true
-
-  nodeSelector:
-    observability/role: data
-
-  resources:
-    requests:
-      memory: 64Mi
-      cpu: 20m
-    limits:
-      memory: 128Mi
-      cpu: 100m
-
 # Disable cache subcharts for this small cluster.
 chunksCache:
   enabled: false
@@ -133,9 +85,54 @@ chunksCache:
 resultsCache:
   enabled: false
 
+# Disable the chart test pod.
+test:
+  enabled: false
+
+# SCH model: disable the nginx gateway. Grafana talks to Loki directly.
+gateway:
+  enabled: false
+
 # Disable synthetic Loki traffic generator.
 lokiCanary:
   enabled: false
 
-test:
-  enabled: false
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+    path_prefix: /var/loki
+
+  storage:
+    type: filesystem
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  limits_config:
+    retention_period: 168h
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+
+  # We use Prometheus for alerts, not Loki ruler.
+  rulerConfig:
+    enable_api: false
+
+  analytics:
+    reporting_enabled: false
