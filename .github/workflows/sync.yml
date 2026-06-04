@@ -207,6 +207,8 @@ jobs:
 
           KUBECONFIG_PATH="/etc/rancher/k3s/k3s.yaml"
           OBS_NS="observability"
+          LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-13.1.2}"
+          ALLOY_CHART_VERSION="${ALLOY_CHART_VERSION:-1.8.1}"
 
           echo "Starting observability-only deployment after sync"
           echo "Reason: ${{ steps.detect.outputs.reason }}"
@@ -227,7 +229,7 @@ jobs:
 
           echo "Ensuring Helm repos exist"
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
-          helm repo add grafana-community https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
+          helm repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true
           helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
           helm repo update
 
@@ -245,7 +247,7 @@ jobs:
             sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install loki grafana-community/loki \
               --namespace "${OBS_NS}" \
               --create-namespace \
-              --version 13.7.0 \
+              --version "${LOKI_CHART_VERSION}" \
               -f k8s/observability/loki-values.yaml \
               --wait \
               --timeout 15m
@@ -258,7 +260,7 @@ jobs:
             sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install alloy grafana/alloy \
               --namespace "${OBS_NS}" \
               --create-namespace \
-              --version 1.8.1 \
+              --version "${ALLOY_CHART_VERSION}" \
               -f k8s/observability/alloy-values.yaml \
               --wait \
               --timeout 15m
