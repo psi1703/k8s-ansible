@@ -18,12 +18,11 @@ ENV_FILE_LOADED=0
 ENV_FILE_CREATED=0
 
 _env_quote() {
-local value="${1:-}"
-value="${value//\/\\}"
-value="${value//"/\"}"
-printf '"%s"' "$value"
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
 }
-
 _env_get_current() {
 local name="$1"
 local current=""
@@ -57,7 +56,6 @@ read -r -p "$label: " input
 fi
 fi
 
-```
 if [ -n "$input" ]; then
   printf -v "$name" '%s' "$input"
   export "$name"
@@ -77,7 +75,6 @@ if [ "$required" != "1" ]; then
 fi
 
 warn "$name is required"
-```
 
 done
 }
@@ -503,11 +500,9 @@ log "validating required installer environment values"
 if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
 [ -n "${TLS_HOST:-}" ] || fatal "TLS_HOST is required in $ENV_FILE when ingress or TLS is enabled"
 
-```
 if [ "${TLS_HOST:-}" = "CHANGE_ME_TLS_HOST" ] || [ "${TLS_HOST:-}" = "otp-relay.local" ]; then
   fatal "TLS_HOST must be changed from the default when ingress or TLS is enabled"
 fi
-```
 
 fi
 
@@ -559,7 +554,6 @@ log "loading environment from $ENV_FILE"
 source_env_file "$ENV_FILE"
 ENV_FILE_LOADED=1
 
-```
 if [ -n "$runtime_noninteractive" ]; then
   NONINTERACTIVE="$runtime_noninteractive"
   export NONINTERACTIVE
@@ -602,7 +596,6 @@ if [ "${NONINTERACTIVE:-0}" != "1" ]; then
 else
   log "NONINTERACTIVE=1; using existing .env without prompting"
 fi
-```
 
 else
 if [ "${NONINTERACTIVE:-0}" = "1" ]; then
@@ -611,7 +604,6 @@ else
 create_env_interactive
 fi
 
-```
 source_env_file "$ENV_FILE"
 ENV_FILE_LOADED=1
 
@@ -631,7 +623,6 @@ if [ -n "$runtime_git_clean" ]; then
 fi
 
 normalize_loaded_env
-```
 
 fi
 
