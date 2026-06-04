@@ -207,7 +207,10 @@ jobs:
 
           KUBECONFIG_PATH="/etc/rancher/k3s/k3s.yaml"
           OBS_NS="observability"
-          LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-13.1.2}"
+          # Leave LOKI_CHART_VERSION empty by default so Helm uses the current
+          # chart available from grafana-community. Set it only after verifying
+          # the exact version exists with: helm search repo grafana-community/loki --versions
+          LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-}"
           ALLOY_CHART_VERSION="${ALLOY_CHART_VERSION:-1.8.1}"
 
           echo "Starting observability-only deployment after sync"
@@ -244,10 +247,19 @@ jobs:
 
           if [ -f "k8s/observability/loki-values.yaml" ]; then
             echo "Applying Loki Helm values"
+
+            LOKI_VERSION_ARGS=()
+            if [ -n "${LOKI_CHART_VERSION}" ]; then
+              echo "Using pinned Loki chart version: ${LOKI_CHART_VERSION}"
+              LOKI_VERSION_ARGS=(--version "${LOKI_CHART_VERSION}")
+            else
+              echo "No Loki chart version pinned; using latest chart from grafana-community repo"
+            fi
+
             sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install loki grafana-community/loki \
               --namespace "${OBS_NS}" \
               --create-namespace \
-              --version "${LOKI_CHART_VERSION}" \
+              "${LOKI_VERSION_ARGS[@]}" \
               -f k8s/observability/loki-values.yaml \
               --wait \
               --timeout 15m
