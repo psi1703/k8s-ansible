@@ -231,10 +231,10 @@ jobs:
           fi
 
           echo "Ensuring Helm repos exist"
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1
-          helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null 2>&1
-          helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1
-          helm repo update
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null 2>&1
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo update
 
           echo "Applying kube-prometheus-stack Helm values"
           sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
