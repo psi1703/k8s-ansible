@@ -1,7 +1,7 @@
 # Helm values for Grafana Alloy log shipping
 #
-# Chart: grafana/alloy
-# Version used with SCH setup: 1.8.1
+# Chart source: grafana/alloy
+# Chart version used with SCH setup: 1.8.1
 #
 # Purpose:
 # - Run one Alloy pod per Kubernetes node.
@@ -14,6 +14,10 @@
 # - debian
 # - otp-worker-1
 # - otp-worker-2
+#
+# Design reference:
+# - SCH k8s observability design
+# - SCH current k8s/observability/alloy-values.yaml
 
 controller:
   type: daemonset
@@ -45,6 +49,7 @@ alloy:
   configMap:
     create: true
     content: |-
+      // Local node name comes from the downward API; see extraEnv below.
       // Discover pods through the Kubernetes API.
       // Each Alloy pod only collects logs for pods on its own node.
       discovery.kubernetes "pods" {
@@ -79,11 +84,6 @@ alloy:
           source_labels = ["__meta_kubernetes_node_name"]
           target_label  = "node"
         }
-
-        rule {
-          source_labels = ["__meta_kubernetes_pod_label_app"]
-          target_label  = "app"
-        }
       }
 
       // Read pod logs through the Kubernetes API.
@@ -100,6 +100,8 @@ alloy:
       }
 
 # Use the actual Kubernetes node name for node-local filtering.
+# Some Helm versions of the chart wire this automatically; setting it
+# explicitly guarantees the filter above works.
 extraEnv:
   - name: HOSTNAME
     valueFrom:
