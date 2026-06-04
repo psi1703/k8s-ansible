@@ -4,17 +4,36 @@
 #
 # Contract:
 #   - Owns kube-prometheus-stack installation when OBSERVABILITY_INSTALL_STACK=1.
+#   - Owns Loki installation from k8s/observability/loki-values.yaml when present.
+#   - Owns Alloy installation from k8s/observability/alloy-values.yaml when present.
 #   - Owns applying OTP Relay dashboard, ServiceMonitor, and Grafana IngressRoute manifests.
 #   - Treats k8s/observability/*values.yaml as Helm values, not raw Kubernetes manifests.
 #   - Fails fast when observability is enabled but the requested stack cannot be made usable.
 
 OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
 OBSERVABILITY_INSTALL_STACK="${OBSERVABILITY_INSTALL_STACK:-1}"
+
 OBSERVABILITY_STACK_RELEASE="${OBSERVABILITY_STACK_RELEASE:-kube-prometheus-stack}"
 OBSERVABILITY_STACK_REPO_NAME="${OBSERVABILITY_STACK_REPO_NAME:-prometheus-community}"
 OBSERVABILITY_STACK_REPO_URL="${OBSERVABILITY_STACK_REPO_URL:-https://prometheus-community.github.io/helm-charts}"
 OBSERVABILITY_STACK_CHART="${OBSERVABILITY_STACK_CHART:-kube-prometheus-stack}"
 OBSERVABILITY_STACK_CHART_VERSION="${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}"
+
+# SCH-aligned log stack:
+# - Loki chart moved from grafana/loki to grafana-community/loki.
+# - Alloy remains in the grafana chart repo.
+OBSERVABILITY_LOKI_RELEASE="${OBSERVABILITY_LOKI_RELEASE:-loki}"
+OBSERVABILITY_LOKI_REPO_NAME="${OBSERVABILITY_LOKI_REPO_NAME:-grafana-community}"
+OBSERVABILITY_LOKI_REPO_URL="${OBSERVABILITY_LOKI_REPO_URL:-https://grafana.github.io/helm-charts}"
+OBSERVABILITY_LOKI_CHART="${OBSERVABILITY_LOKI_CHART:-loki}"
+OBSERVABILITY_LOKI_CHART_VERSION="${OBSERVABILITY_LOKI_CHART_VERSION:-13.7.0}"
+
+OBSERVABILITY_ALLOY_RELEASE="${OBSERVABILITY_ALLOY_RELEASE:-alloy}"
+OBSERVABILITY_ALLOY_REPO_NAME="${OBSERVABILITY_ALLOY_REPO_NAME:-grafana}"
+OBSERVABILITY_ALLOY_REPO_URL="${OBSERVABILITY_ALLOY_REPO_URL:-https://grafana.github.io/helm-charts}"
+OBSERVABILITY_ALLOY_CHART="${OBSERVABILITY_ALLOY_CHART:-alloy}"
+OBSERVABILITY_ALLOY_CHART_VERSION="${OBSERVABILITY_ALLOY_CHART_VERSION:-1.8.1}"
+
 OBSERVABILITY_HELM_TIMEOUT="${OBSERVABILITY_HELM_TIMEOUT:-15m}"
 HELM_KUBECONFIG="${HELM_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 GRAFANA_HOST="${GRAFANA_HOST:-grafana-test.lan}"
@@ -47,6 +66,18 @@ _observability_values_file() {
   printf '%s\n' "$source_dir/prometheus-stack-values.yaml"
 }
 
+_observability_loki_values_file() {
+  local source_dir
+  source_dir="$(_observability_source_dir)"
+  printf '%s\n' "$source_dir/loki-values.yaml"
+}
+
+_observability_alloy_values_file() {
+  local source_dir
+  source_dir="$(_observability_source_dir)"
+  printf '%s\n' "$source_dir/alloy-values.yaml"
+}
+
 _is_helm_values_file() {
   local base="$1"
 
@@ -70,6 +101,14 @@ _grafana_service_available() {
 
 _prometheus_service_available() {
   k3s kubectl get svc "${OBSERVABILITY_STACK_RELEASE}-prometheus" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1
+}
+
+_loki_service_available() {
+  k3s kubectl get svc "${OBSERVABILITY_LOKI_RELEASE}" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1
+}
+
+_alloy_daemonset_available() {
+  k3s kubectl get daemonset "${OBSERVABILITY_ALLOY_RELEASE}" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1
 }
 
 _helm_available() {
@@ -103,19 +142,23 @@ print_observability_diagnostics() {
 
   k3s kubectl get pods -n "$OBSERVABILITY_NAMESPACE" -o wide || true
   k3s kubectl get svc -n "$OBSERVABILITY_NAMESPACE" || true
+  k3s kubectl get daemonset -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
   k3s kubectl get ingress -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
   k3s kubectl get ingressroute -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
   k3s kubectl get servicemonitor -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
-  k3s kubectl get configmap -n "$OBSERVABILITY_NAMESPACE" | grep -E 'grafana|dashboard|otp' || true
-  k3s kubectl get events -n "$OBSERVABILITY_NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 80 || true
+  k3s kubectl get configmap -n "$OBSERVABILITY_NAMESPACE" | grep -E 'grafana|dashboard|otp|loki|alloy' || true
+  k3s kubectl get events -n "$OBSERVABILITY_NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 100 || true
 
   if command -v helm >/dev/null 2>&1; then
     helm_k3s list -n "$OBSERVABILITY_NAMESPACE" || true
     helm_k3s status "$OBSERVABILITY_STACK_RELEASE" -n "$OBSERVABILITY_NAMESPACE" || true
+    helm_k3s status "$OBSERVABILITY_LOKI_RELEASE" -n "$OBSERVABILITY_NAMESPACE" || true
+    helm_k3s status "$OBSERVABILITY_ALLOY_RELEASE" -n "$OBSERVABILITY_NAMESPACE" || true
   fi
 
   k3s kubectl describe deploy -n "$OBSERVABILITY_NAMESPACE" -l app.kubernetes.io/name=grafana 2>/dev/null || true
   k3s kubectl describe statefulset -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
+  k3s kubectl describe daemonset "$OBSERVABILITY_ALLOY_RELEASE" -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
 }
 
 fatal_observability() {
@@ -163,6 +206,20 @@ ensure_observability_namespace() {
   k3s kubectl create namespace "$OBSERVABILITY_NAMESPACE" --dry-run=client -o yaml | k3s kubectl apply -f -
 }
 
+_add_or_update_helm_repo() {
+  local repo_name="$1"
+  local repo_url="$2"
+
+  log "adding/updating Helm repo: $repo_name -> $repo_url"
+  ensure_helm_kubeconfig
+  helm_k3s repo add "$repo_name" "$repo_url" >/dev/null 2>&1 || true
+}
+
+_update_helm_repos() {
+  ensure_helm_kubeconfig
+  helm_k3s repo update || fatal_observability "Helm repo update failed"
+}
+
 install_kube_prometheus_stack() {
   local source_dir values_file
 
@@ -186,11 +243,8 @@ install_kube_prometheus_stack() {
 
   ensure_observability_namespace
   ensure_helm_available
-
-  log "adding/updating Helm repo: $OBSERVABILITY_STACK_REPO_NAME -> $OBSERVABILITY_STACK_REPO_URL"
-  ensure_helm_kubeconfig
-  helm_k3s repo add "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL" >/dev/null 2>&1 || true
-  helm_k3s repo update || fatal_observability "Helm repo update failed for $OBSERVABILITY_STACK_REPO_NAME"
+  _add_or_update_helm_repo "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL"
+  _update_helm_repos
 
   log "installing/upgrading kube-prometheus-stack release $OBSERVABILITY_STACK_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
   log "Helm chart: $OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART version $OBSERVABILITY_STACK_CHART_VERSION"
@@ -215,6 +269,100 @@ install_kube_prometheus_stack() {
     fatal_observability "Grafana service did not become available after kube-prometheus-stack install"
   wait_with_progress "waiting for Prometheus service from kube-prometheus-stack" 180 5 _prometheus_service_available || \
     fatal_observability "Prometheus service did not become available after kube-prometheus-stack install"
+}
+
+install_loki_stack_if_available() {
+  local source_dir values_file
+
+  source_dir="$(_observability_source_dir)"
+  [ -n "$source_dir" ] || return 0
+  [ -d "$source_dir" ] || return 0
+
+  if [ "$OBSERVABILITY_INSTALL_STACK" != "1" ]; then
+    log "OBSERVABILITY_INSTALL_STACK=$OBSERVABILITY_INSTALL_STACK; skipping Loki Helm install"
+    return 0
+  fi
+
+  values_file="$(_observability_loki_values_file)"
+  if [ ! -f "$values_file" ]; then
+    log "Loki values file not found; skipping Loki Helm install: $values_file"
+    return 0
+  fi
+
+  ensure_observability_namespace
+  ensure_helm_available
+  _add_or_update_helm_repo "$OBSERVABILITY_LOKI_REPO_NAME" "$OBSERVABILITY_LOKI_REPO_URL"
+  _update_helm_repos
+
+  log "installing/upgrading Loki release $OBSERVABILITY_LOKI_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
+  log "Helm chart: $OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART version $OBSERVABILITY_LOKI_CHART_VERSION"
+  log "Values file: $values_file"
+
+  if ! helm_k3s upgrade --install "$OBSERVABILITY_LOKI_RELEASE" \
+    "$OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART" \
+    --namespace "$OBSERVABILITY_NAMESPACE" \
+    --create-namespace \
+    --version "$OBSERVABILITY_LOKI_CHART_VERSION" \
+    -f "$values_file" \
+    --wait \
+    --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
+    fatal_observability "Loki Helm install/upgrade failed"
+  fi
+
+  wait_with_progress "waiting for Loki service" 180 5 _loki_service_available || \
+    fatal_observability "Loki service did not become available after Helm install"
+
+  log "Loki Helm install/upgrade completed"
+}
+
+install_alloy_stack_if_available() {
+  local source_dir values_file
+
+  source_dir="$(_observability_source_dir)"
+  [ -n "$source_dir" ] || return 0
+  [ -d "$source_dir" ] || return 0
+
+  if [ "$OBSERVABILITY_INSTALL_STACK" != "1" ]; then
+    log "OBSERVABILITY_INSTALL_STACK=$OBSERVABILITY_INSTALL_STACK; skipping Alloy Helm install"
+    return 0
+  fi
+
+  values_file="$(_observability_alloy_values_file)"
+  if [ ! -f "$values_file" ]; then
+    log "Alloy values file not found; skipping Alloy Helm install: $values_file"
+    return 0
+  fi
+
+  ensure_observability_namespace
+  ensure_helm_available
+  _add_or_update_helm_repo "$OBSERVABILITY_ALLOY_REPO_NAME" "$OBSERVABILITY_ALLOY_REPO_URL"
+  _update_helm_repos
+
+  log "installing/upgrading Alloy release $OBSERVABILITY_ALLOY_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
+  log "Helm chart: $OBSERVABILITY_ALLOY_REPO_NAME/$OBSERVABILITY_ALLOY_CHART version $OBSERVABILITY_ALLOY_CHART_VERSION"
+  log "Values file: $values_file"
+
+  if ! helm_k3s upgrade --install "$OBSERVABILITY_ALLOY_RELEASE" \
+    "$OBSERVABILITY_ALLOY_REPO_NAME/$OBSERVABILITY_ALLOY_CHART" \
+    --namespace "$OBSERVABILITY_NAMESPACE" \
+    --create-namespace \
+    --version "$OBSERVABILITY_ALLOY_CHART_VERSION" \
+    -f "$values_file" \
+    --wait \
+    --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
+    fatal_observability "Alloy Helm install/upgrade failed"
+  fi
+
+  wait_with_progress "waiting for Alloy DaemonSet" 180 5 _alloy_daemonset_available || \
+    fatal_observability "Alloy DaemonSet did not become available after Helm install"
+
+  log "Alloy Helm install/upgrade completed"
+}
+
+install_observability_helm_stacks() {
+  install_kube_prometheus_stack
+  install_loki_stack_if_available
+  install_alloy_stack_if_available
 }
 
 _render_observability_manifest() {
@@ -279,7 +427,7 @@ _apply_single_observability_manifest() {
       fi
       ;;
 
-    grafana-ingressroute.yaml)
+    grafana-ingress.yaml|grafana-ingressroute.yaml)
       if _grafana_service_available; then
         log "applying Grafana IngressRoute manifest $base for host $GRAFANA_HOST"
         _apply_rendered_manifest "$file"
@@ -322,7 +470,7 @@ apply_observability_manifests() {
     return 0
   }
 
-  install_kube_prometheus_stack
+  install_observability_helm_stacks
   ensure_observability_namespace
 
   for file in "$source_dir"/*.yaml; do
@@ -341,6 +489,14 @@ apply_observability_manifests() {
     _grafana_service_available || fatal_observability "observability install completed but Grafana service is missing"
     _prometheus_service_available || fatal_observability "observability install completed but Prometheus service is missing"
     _service_monitor_crd_available || fatal_observability "observability install completed but ServiceMonitor CRD is missing"
+
+    if [ -f "$source_dir/loki-values.yaml" ]; then
+      _loki_service_available || fatal_observability "observability install completed but Loki service is missing"
+    fi
+
+    if [ -f "$source_dir/alloy-values.yaml" ]; then
+      _alloy_daemonset_available || fatal_observability "observability install completed but Alloy DaemonSet is missing"
+    fi
   fi
 
   log "observability status summary"
@@ -374,7 +530,7 @@ _dry_run_single_observability_manifest() {
         warn "skipping dry-run for $base because ServiceMonitor CRD is not installed yet"
       fi
       ;;
-    grafana-ingressroute.yaml)
+    grafana-ingress.yaml|grafana-ingressroute.yaml)
       if _grafana_service_available; then
         k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null
       else
