@@ -76,6 +76,55 @@ _helm_available() {
   command -v helm >/dev/null 2>&1
 }
 
+run_apt_get_observability() {
+  local attempt
+
+  export DEBIAN_FRONTEND=noninteractive
+
+  for attempt in 1 2 3; do
+    if apt-get -o Acquire::Retries=3 "$@"; then
+      return 0
+    fi
+
+    warn "apt-get $* failed on attempt $attempt/3"
+    sleep 5
+  done
+
+  fatal "apt-get $* failed after 3 attempts"
+}
+
+print_observability_diagnostics() {
+  log "observability diagnostics for namespace $OBSERVABILITY_NAMESPACE"
+
+  k3s kubectl get namespace "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1 || {
+    warn "namespace $OBSERVABILITY_NAMESPACE does not exist"
+    return 0
+  }
+
+  k3s kubectl get pods -n "$OBSERVABILITY_NAMESPACE" -o wide || true
+  k3s kubectl get svc -n "$OBSERVABILITY_NAMESPACE" || true
+  k3s kubectl get ingress -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
+  k3s kubectl get ingressroute -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
+  k3s kubectl get servicemonitor -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
+  k3s kubectl get configmap -n "$OBSERVABILITY_NAMESPACE" | grep -E 'grafana|dashboard|otp' || true
+  k3s kubectl get events -n "$OBSERVABILITY_NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 80 || true
+
+  if command -v helm >/dev/null 2>&1; then
+    helm_k3s list -n "$OBSERVABILITY_NAMESPACE" || true
+    helm_k3s status "$OBSERVABILITY_STACK_RELEASE" -n "$OBSERVABILITY_NAMESPACE" || true
+  fi
+
+  k3s kubectl describe deploy -n "$OBSERVABILITY_NAMESPACE" -l app.kubernetes.io/name=grafana 2>/dev/null || true
+  k3s kubectl describe statefulset -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
+}
+
+fatal_observability() {
+  local message="$1"
+  warn "$message"
+  print_observability_diagnostics
+  fatal "$message"
+}
+
 ensure_helm_available() {
   local tmp_helm_install
 
@@ -85,14 +134,19 @@ ensure_helm_available() {
   fi
 
   log "Helm is not installed; installing Helm 3"
-  apt-get update
-  apt-get install -y curl ca-certificates openssl tar gzip
+  run_apt_get_observability update
+  run_apt_get_observability install -y --no-install-recommends curl ca-certificates openssl tar gzip
 
   tmp_helm_install="$(mktemp)"
-  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$tmp_helm_install"
+  cleanup_tmp_helm_install() {
+    rm -f "$tmp_helm_install"
+  }
+  trap cleanup_tmp_helm_install RETURN
+
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$tmp_helm_install" || \
+    fatal "failed to download Helm installer from GitHub"
   chmod +x "$tmp_helm_install"
   "$tmp_helm_install"
-  rm -f "$tmp_helm_install"
 
   command -v helm >/dev/null 2>&1 || fatal "Helm installation completed but helm is not available on PATH"
   log "Helm installed: $(helm version --short 2>/dev/null || echo helm)"
@@ -136,26 +190,31 @@ install_kube_prometheus_stack() {
   log "adding/updating Helm repo: $OBSERVABILITY_STACK_REPO_NAME -> $OBSERVABILITY_STACK_REPO_URL"
   ensure_helm_kubeconfig
   helm_k3s repo add "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL" >/dev/null 2>&1 || true
-  helm_k3s repo update
+  helm_k3s repo update || fatal_observability "Helm repo update failed for $OBSERVABILITY_STACK_REPO_NAME"
 
   log "installing/upgrading kube-prometheus-stack release $OBSERVABILITY_STACK_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
   log "Helm chart: $OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART version $OBSERVABILITY_STACK_CHART_VERSION"
   log "Values file: $values_file"
 
-  helm_k3s upgrade --install "$OBSERVABILITY_STACK_RELEASE" \
+  if ! helm_k3s upgrade --install "$OBSERVABILITY_STACK_RELEASE" \
     "$OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
     --create-namespace \
     --version "$OBSERVABILITY_STACK_CHART_VERSION" \
     -f "$values_file" \
     --wait \
-    --timeout "$OBSERVABILITY_HELM_TIMEOUT"
+    --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
+    fatal_observability "kube-prometheus-stack Helm install/upgrade failed"
+  fi
 
   log "kube-prometheus-stack Helm install/upgrade completed"
 
-  wait_with_progress "waiting for ServiceMonitor CRD from kube-prometheus-stack" 180 5 _service_monitor_crd_available
-  wait_with_progress "waiting for Grafana service from kube-prometheus-stack" 180 5 _grafana_service_available
-  wait_with_progress "waiting for Prometheus service from kube-prometheus-stack" 180 5 _prometheus_service_available
+  wait_with_progress "waiting for ServiceMonitor CRD from kube-prometheus-stack" 180 5 _service_monitor_crd_available || \
+    fatal_observability "ServiceMonitor CRD did not become available after kube-prometheus-stack install"
+  wait_with_progress "waiting for Grafana service from kube-prometheus-stack" 180 5 _grafana_service_available || \
+    fatal_observability "Grafana service did not become available after kube-prometheus-stack install"
+  wait_with_progress "waiting for Prometheus service from kube-prometheus-stack" 180 5 _prometheus_service_available || \
+    fatal_observability "Prometheus service did not become available after kube-prometheus-stack install"
 }
 
 _render_observability_manifest() {
@@ -170,6 +229,12 @@ _render_observability_manifest() {
     -e "s/namespace: observability/namespace: ${OBSERVABILITY_NAMESPACE}/g" \
     -e "s/grafana\.init-db\.lan/${GRAFANA_HOST}/g" \
     "$rendered_file"
+
+  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan' "$rendered_file" >/dev/null 2>&1; then
+    warn "unresolved placeholder detected in rendered observability manifest from $(basename "$source_file")"
+    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan' "$rendered_file" >&2 || true
+    return 1
+  fi
 }
 
 _apply_rendered_manifest() {
@@ -177,9 +242,18 @@ _apply_rendered_manifest() {
   local tmp
 
   tmp="$(mktemp)"
-  _render_observability_manifest "$file" "$tmp"
-  k3s kubectl apply -f "$tmp"
-  rm -f "$tmp"
+  cleanup_observability_render_tmp() {
+    rm -f "$tmp"
+  }
+  trap cleanup_observability_render_tmp RETURN
+
+  _render_observability_manifest "$file" "$tmp" || fatal "failed to render observability manifest: $file"
+
+  if ! k3s kubectl apply -f "$tmp"; then
+    warn "failed to apply rendered observability manifest: $file"
+    sed -n '1,160p' "$tmp" >&2 || true
+    fatal_observability "observability manifest apply failed: $(basename "$file")"
+  fi
 }
 
 _apply_single_observability_manifest() {
@@ -199,7 +273,7 @@ _apply_single_observability_manifest() {
         log "applying ServiceMonitor manifest $base"
         _apply_rendered_manifest "$file"
       elif [ "$OBSERVABILITY_INSTALL_STACK" = "1" ]; then
-        fatal "ServiceMonitor CRD is missing after kube-prometheus-stack install; cannot apply $base"
+        fatal_observability "ServiceMonitor CRD is missing after kube-prometheus-stack install; cannot apply $base"
       else
         warn "skipping $base because ServiceMonitor CRD is not installed"
       fi
@@ -210,7 +284,7 @@ _apply_single_observability_manifest() {
         log "applying Grafana IngressRoute manifest $base for host $GRAFANA_HOST"
         _apply_rendered_manifest "$file"
       elif [ "$OBSERVABILITY_INSTALL_STACK" = "1" ]; then
-        fatal "Grafana service $OBSERVABILITY_NAMESPACE/${OBSERVABILITY_STACK_RELEASE}-grafana is missing; cannot apply $base"
+        fatal_observability "Grafana service $OBSERVABILITY_NAMESPACE/${OBSERVABILITY_STACK_RELEASE}-grafana is missing; cannot apply $base"
       else
         warn "skipping $base because service $OBSERVABILITY_NAMESPACE/${OBSERVABILITY_STACK_RELEASE}-grafana does not exist"
       fi
@@ -221,7 +295,7 @@ _apply_single_observability_manifest() {
         log "applying Grafana dashboard ConfigMap $base"
         _apply_rendered_manifest "$file"
       elif [ "$OBSERVABILITY_INSTALL_STACK" = "1" ]; then
-        fatal "Grafana is missing; cannot apply dashboard ConfigMap $base"
+        fatal_observability "Grafana is missing; cannot apply dashboard ConfigMap $base"
       else
         warn "skipping $base because Grafana is not installed in namespace $OBSERVABILITY_NAMESPACE"
       fi
@@ -264,16 +338,13 @@ apply_observability_manifests() {
   fi
 
   if [ "$OBSERVABILITY_INSTALL_STACK" = "1" ]; then
-    _grafana_service_available || fatal "observability install completed but Grafana service is missing"
-    _prometheus_service_available || fatal "observability install completed but Prometheus service is missing"
-    _service_monitor_crd_available || fatal "observability install completed but ServiceMonitor CRD is missing"
+    _grafana_service_available || fatal_observability "observability install completed but Grafana service is missing"
+    _prometheus_service_available || fatal_observability "observability install completed but Prometheus service is missing"
+    _service_monitor_crd_available || fatal_observability "observability install completed but ServiceMonitor CRD is missing"
   fi
 
   log "observability status summary"
-  k3s kubectl get pods -n "$OBSERVABILITY_NAMESPACE" -o wide || true
-  k3s kubectl get svc -n "$OBSERVABILITY_NAMESPACE" || true
-  k3s kubectl get ingressroute -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
-  k3s kubectl get servicemonitor -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
+  print_observability_diagnostics
 }
 
 _dry_run_single_observability_manifest() {
@@ -288,7 +359,12 @@ _dry_run_single_observability_manifest() {
   fi
 
   tmp="$(mktemp)"
-  _render_observability_manifest "$file" "$tmp"
+  cleanup_observability_dryrun_tmp() {
+    rm -f "$tmp"
+  }
+  trap cleanup_observability_dryrun_tmp RETURN
+
+  _render_observability_manifest "$file" "$tmp" || fatal "failed to render observability manifest for dry-run: $file"
 
   case "$base" in
     servicemonitor-*.yaml)
@@ -316,8 +392,6 @@ _dry_run_single_observability_manifest() {
       k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null
       ;;
   esac
-
-  rm -f "$tmp"
 }
 
 dry_run_observability_manifests() {
