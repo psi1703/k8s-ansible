@@ -149,16 +149,14 @@ main() {
   log "noninteractive mode: ${NONINTERACTIVE:-0}"
   log "env file: ${ENV_FILE:-$SCRIPT_DIR/.env}"
 
-  run_phase "load or create installer environment" load_or_create_env
-
   if [ -n "${INSTALLER_DEPLOY_MODE:-}" ]; then
     log "using installer deploy mode override: ${INSTALLER_DEPLOY_MODE}"
     DEPLOY_MODE="$INSTALLER_DEPLOY_MODE"
     export DEPLOY_MODE
-    normalize_loaded_env
   fi
 
-    run_phase "validate deployment mode" validate_deploy_mode
+  run_phase "load or create installer environment" load_or_create_env
+  run_phase "validate deployment mode" validate_deploy_mode
   explain_deploy_mode
 
   run_phase "detect host environment" detect_host_environment
