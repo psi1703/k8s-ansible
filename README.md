@@ -255,18 +255,27 @@ bash setup.sh --doctor
 Cluster and application health check:
 
 ```bash
+cd /opt/k8s-ansible
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+bash scripts/cluster-health-check.sh
+```
+
+The script writes a timestamped log under `/tmp` by default.
+
+Expected successful result:
+
+```text
+OK: OTP Relay Kubernetes stack health check passed.
+```
+
+Quick manual checks:
+
+```bash
 sudo k3s kubectl get nodes -o wide
 sudo k3s kubectl get pods -n otp-relay -o wide
 sudo k3s kubectl get pods -n observability -o wide
-sudo /usr/local/bin/otp-relayk3s-monitor.sh
 curl -k https://srvotptest26.init-db.lan/healthz
 curl -k https://srvotptest26.init-db.lan/readyz
-```
-
-Expected:
-
-```text
-OK: OTP Relay K3s deployment is healthy.
 ```
 
 Install report:
