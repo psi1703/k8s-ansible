@@ -26,7 +26,7 @@ OBSERVABILITY_LOKI_RELEASE="${OBSERVABILITY_LOKI_RELEASE:-loki}"
 OBSERVABILITY_LOKI_REPO_NAME="${OBSERVABILITY_LOKI_REPO_NAME:-grafana-community}"
 OBSERVABILITY_LOKI_REPO_URL="${OBSERVABILITY_LOKI_REPO_URL:-https://grafana.github.io/helm-charts}"
 OBSERVABILITY_LOKI_CHART="${OBSERVABILITY_LOKI_CHART:-loki}"
-OBSERVABILITY_LOKI_CHART_VERSION="${OBSERVABILITY_LOKI_CHART_VERSION:-13.7.0}"
+OBSERVABILITY_LOKI_CHART_VERSION="${OBSERVABILITY_LOKI_CHART_VERSION:-}"
 
 OBSERVABILITY_ALLOY_RELEASE="${OBSERVABILITY_ALLOY_RELEASE:-alloy}"
 OBSERVABILITY_ALLOY_REPO_NAME="${OBSERVABILITY_ALLOY_REPO_NAME:-grafana}"
@@ -273,6 +273,7 @@ install_kube_prometheus_stack() {
 
 install_loki_stack_if_available() {
   local source_dir values_file
+  local loki_version_args=()
 
   source_dir="$(_observability_source_dir)"
   [ -n "$source_dir" ] || return 0
@@ -295,14 +296,21 @@ install_loki_stack_if_available() {
   _update_helm_repos
 
   log "installing/upgrading Loki release $OBSERVABILITY_LOKI_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
-  log "Helm chart: $OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART version $OBSERVABILITY_LOKI_CHART_VERSION"
+
+  if [ -n "$OBSERVABILITY_LOKI_CHART_VERSION" ]; then
+    log "Helm chart: $OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART version $OBSERVABILITY_LOKI_CHART_VERSION"
+    loki_version_args=(--version "$OBSERVABILITY_LOKI_CHART_VERSION")
+  else
+    log "Helm chart: $OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART with no pinned version"
+  fi
+
   log "Values file: $values_file"
 
   if ! helm_k3s upgrade --install "$OBSERVABILITY_LOKI_RELEASE" \
     "$OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
     --create-namespace \
-    --version "$OBSERVABILITY_LOKI_CHART_VERSION" \
+    "${loki_version_args[@]}" \
     -f "$values_file" \
     --wait \
     --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
