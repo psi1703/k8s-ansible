@@ -233,7 +233,7 @@ jobs:
           echo "Ensuring Helm repos exist"
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1
           helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null 2>&1
-          helm repo add grafana https://grafana.github.io/helm-charts --force-charts >/dev/null 2>&1
+          helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1
           helm repo update
 
           echo "Applying kube-prometheus-stack Helm values"
