@@ -108,9 +108,8 @@ jobs:
             MANIFESTS_CHANGED=1
           fi
 
-          # Observability-only changes must not run the general manifests installer path.
-          # That path also applies Redis manifests, and Redis StatefulSet volumeClaimTemplates
-          # are immutable after the NFS migration.
+          # Observability-only changes are handled by the installer in observability mode.
+          # Keep the workflow as a dispatcher only; do not duplicate Helm/kubectl logic here.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/observability/|scripts/build_grafana_dashboard_configmap\.py$)'; then
             OBSERVABILITY_CHANGED=1
           fi
@@ -200,131 +199,8 @@ jobs:
           echo
           echo "Sync complete."
 
-      - name: Deploy observability only
-        if: steps.detect.outputs.deploy_mode == 'observability'
-        run: |
-          set -Eeuo pipefail
-
-          KUBECONFIG_PATH="/etc/rancher/k3s/k3s.yaml"
-          OBS_NS="observability"
-          # Leave LOKI_CHART_VERSION empty by default so Helm uses the current
-          # chart available from grafana-community. Set it only after verifying
-          # the exact version exists with: helm search repo grafana-community/loki --versions
-          LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-}"
-          ALLOY_CHART_VERSION="${ALLOY_CHART_VERSION:-1.8.1}"
-
-          echo "Starting observability-only deployment after sync"
-          echo "Reason: ${{ steps.detect.outputs.reason }}"
-          echo "Repo: ${DEPLOY_REPO_DIR}"
-
-          cd "${DEPLOY_REPO_DIR}"
-
-          if [ -f "scripts/build_grafana_dashboard_configmap.py" ]; then
-            echo "Generating Grafana dashboard ConfigMap from dashboard JSON"
-            python3 scripts/build_grafana_dashboard_configmap.py
-          fi
-
-          if ! command -v helm >/dev/null 2>&1; then
-            echo "[ERROR] helm is missing on the runner host."
-            echo "Install Helm or run the full installer once to prepare observability tooling."
-            exit 1
-          fi
-
-          echo "Ensuring Helm repos exist"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null 2>&1
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm repo update
-
-          echo "Applying kube-prometheus-stack Helm values"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
-            --namespace "${OBS_NS}" \
-            --create-namespace \
-            --version 85.0.1 \
-            -f k8s/observability/prometheus-stack-values.yaml \
-            --wait \
-            --timeout 15m
-
-          if [ -f "k8s/observability/loki-values.yaml" ]; then
-            echo "Applying Loki Helm values"
-
-            LOKI_VERSION_ARGS=()
-            if [ -n "${LOKI_CHART_VERSION}" ]; then
-              echo "Using pinned Loki chart version: ${LOKI_CHART_VERSION}"
-              LOKI_VERSION_ARGS=(--version "${LOKI_CHART_VERSION}")
-            else
-              echo "No Loki chart version pinned; using latest chart from grafana-community repo"
-            fi
-
-            sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install loki grafana-community/loki \
-              --namespace "${OBS_NS}" \
-              --create-namespace \
-              "${LOKI_VERSION_ARGS[@]}" \
-              -f k8s/observability/loki-values.yaml \
-              --wait \
-              --timeout 15m
-          else
-            echo "loki-values.yaml not found; skipping Loki Helm install"
-          fi
-
-          if [ -f "k8s/observability/alloy-values.yaml" ]; then
-            echo "Applying Alloy Helm values"
-            sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install alloy grafana/alloy \
-              --namespace "${OBS_NS}" \
-              --create-namespace \
-              --version "${ALLOY_CHART_VERSION}" \
-              -f k8s/observability/alloy-values.yaml \
-              --wait \
-              --timeout 15m
-          else
-            echo "alloy-values.yaml not found; skipping Alloy Helm install"
-          fi
-
-          echo "Applying observability Kubernetes manifests"
-          if [ -d "k8s/observability" ]; then
-            while IFS= read -r -d '' manifest; do
-              echo "Applying ${manifest}"
-              sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -f "${manifest}"
-            done < <(
-              find k8s/observability -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) ! -name '*values.yaml' -print0 \
-                | sort -z
-            )
-          fi
-
-          echo "Waiting for observability workloads"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status deployment/kube-prometheus-stack-operator --timeout=300s
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status deployment/kube-prometheus-stack-grafana --timeout=300s
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=300s
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status statefulset/alertmanager-kube-prometheus-stack-alertmanager --timeout=300s
-
-          if sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get statefulset loki >/dev/null 2>&1; then
-            sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status statefulset/loki --timeout=300s
-          fi
-
-          if sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get daemonset alloy >/dev/null 2>&1; then
-            sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status daemonset/alloy --timeout=300s
-          fi
-
-          echo
-          echo "Observability Helm releases:"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm -n "${OBS_NS}" list || true
-
-          echo
-          echo "Observability pods:"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get pods -o wide
-
-          echo
-          echo "Observability services:"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get svc -o wide
-
-          echo
-          echo "Observability DaemonSets:"
-          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get daemonset -o wide || true
-
-          echo "Observability-only deployment complete."
-
       - name: Deploy changed components
-        if: steps.detect.outputs.deploy_mode != 'none' && steps.detect.outputs.deploy_mode != 'observability'
+        if: steps.detect.outputs.deploy_mode != 'none'
         run: |
           set -Eeuo pipefail
 
