@@ -1,7 +1,8 @@
 # Helm values for Loki
 #
-# Chart source: grafana-community/loki
-# Chart version used with SCH setup: 13.7.0
+# Chart version policy:
+# - Unpinned by default so Helm uses the current chart from grafana-community/loki.
+# - Pin OBSERVABILITY_LOKI_CHART_VERSION only after validating the exact chart version.
 #
 # Purpose:
 # - Store logs shipped by Grafana Alloy.
