@@ -205,6 +205,9 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          KUBECONFIG_PATH="/etc/rancher/k3s/k3s.yaml"
+          OBS_NS="observability"
+
           echo "Starting observability-only deployment after sync"
           echo "Reason: ${{ steps.detect.outputs.reason }}"
           echo "Repo: ${DEPLOY_REPO_DIR}"
@@ -222,33 +225,87 @@ jobs:
             exit 1
           fi
 
-          echo "Ensuring Helm repo prometheus-community exists"
+          echo "Ensuring Helm repos exist"
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+          helm repo add grafana-community https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
+          helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
           helm repo update
 
           echo "Applying kube-prometheus-stack Helm values"
-          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
-            --namespace observability \
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+            --namespace "${OBS_NS}" \
             --create-namespace \
             --version 85.0.1 \
-            -f k8s/observability/prometheus-stack-values.yaml
+            -f k8s/observability/prometheus-stack-values.yaml \
+            --wait \
+            --timeout 15m
+
+          if [ -f "k8s/observability/loki-values.yaml" ]; then
+            echo "Applying Loki Helm values"
+            sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install loki grafana-community/loki \
+              --namespace "${OBS_NS}" \
+              --create-namespace \
+              --version 13.7.0 \
+              -f k8s/observability/loki-values.yaml \
+              --wait \
+              --timeout 15m
+          else
+            echo "loki-values.yaml not found; skipping Loki Helm install"
+          fi
+
+          if [ -f "k8s/observability/alloy-values.yaml" ]; then
+            echo "Applying Alloy Helm values"
+            sudo KUBECONFIG="${KUBECONFIG_PATH}" helm upgrade --install alloy grafana/alloy \
+              --namespace "${OBS_NS}" \
+              --create-namespace \
+              --version 1.8.1 \
+              -f k8s/observability/alloy-values.yaml \
+              --wait \
+              --timeout 15m
+          else
+            echo "alloy-values.yaml not found; skipping Alloy Helm install"
+          fi
 
           echo "Applying observability Kubernetes manifests"
           if [ -d "k8s/observability" ]; then
-            find k8s/observability -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) ! -name '*values.yaml' -print0 \
-              | sort -z \
-              | xargs -0 -r sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl apply -f
+            while IFS= read -r -d '' manifest; do
+              echo "Applying ${manifest}"
+              sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -f "${manifest}"
+            done < <(
+              find k8s/observability -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) ! -name '*values.yaml' -print0 \
+                | sort -z
+            )
           fi
 
           echo "Waiting for observability workloads"
-          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status deployment/kube-prometheus-stack-operator --timeout=300s
-          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status deployment/kube-prometheus-stack-grafana --timeout=300s
-          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=300s
-          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability rollout status statefulset/alertmanager-kube-prometheus-stack-alertmanager --timeout=300s
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status deployment/kube-prometheus-stack-operator --timeout=300s
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status deployment/kube-prometheus-stack-grafana --timeout=300s
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status statefulset/prometheus-kube-prometheus-stack-prometheus --timeout=300s
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status statefulset/alertmanager-kube-prometheus-stack-alertmanager --timeout=300s
+
+          if sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get statefulset loki >/dev/null 2>&1; then
+            sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status statefulset/loki --timeout=300s
+          fi
+
+          if sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get daemonset alloy >/dev/null 2>&1; then
+            sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" rollout status daemonset/alloy --timeout=300s
+          fi
+
+          echo
+          echo "Observability Helm releases:"
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" helm -n "${OBS_NS}" list || true
 
           echo
           echo "Observability pods:"
-          sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n observability get pods -o wide
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get pods -o wide
+
+          echo
+          echo "Observability services:"
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get svc -o wide
+
+          echo
+          echo "Observability DaemonSets:"
+          sudo KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n "${OBS_NS}" get daemonset -o wide || true
 
           echo "Observability-only deployment complete."
 
