@@ -4,7 +4,7 @@
 apply_runtime_configmap() {
   if [ -n "${MANIFEST_DIR:-}" ] && [ -f "$MANIFEST_DIR/configmap.yaml" ]; then
     log "applying rendered ConfigMap manifest from repository template"
-    k3s kubectl apply -f "$MANIFEST_DIR/configmap.yaml"
+    apply_if_exists "$MANIFEST_DIR/configmap.yaml"
     return 0
   fi
 
@@ -27,8 +27,29 @@ apply_runtime_configmap() {
     --dry-run=client -o yaml | k3s kubectl apply -f -
 }
 
+validate_rendered_manifests() {
+  local found=""
+
+  [ -n "${MANIFEST_DIR:-}" ] || fatal "MANIFEST_DIR is not set; cannot validate rendered manifests"
+  [ -d "$MANIFEST_DIR" ] || fatal "MANIFEST_DIR does not exist: $MANIFEST_DIR"
+
+  log "validating rendered manifests under $MANIFEST_DIR"
+
+  found="$(grep -RInE '__[A-Z0-9_]+__|CHANGE_ME_[A-Z0-9_]*' "$MANIFEST_DIR" --include='*.yaml' --include='*.yml' 2>/dev/null || true)"
+  if [ -n "$found" ]; then
+    warn "unresolved manifest placeholders were found after rendering:"
+    printf '%s\n' "$found" >&2
+    fatal "manifest rendering left unresolved placeholders; fix .env values or renderer logic before applying"
+  fi
+
+  log "rendered manifest placeholder validation passed"
+}
+
 render_manifests() {
   log "rendering runtime values into staged repository manifests"
+
+  [ -n "${MANIFEST_DIR:-}" ] || fatal "MANIFEST_DIR is not set before render_manifests"
+  [ -d "$MANIFEST_DIR" ] || fatal "MANIFEST_DIR does not exist before render_manifests: $MANIFEST_DIR"
 
   MANIFEST_DIR="$MANIFEST_DIR" \
   NAMESPACE="$NAMESPACE" \
@@ -98,9 +119,13 @@ def replace_namespace(text: str) -> str:
     return re.sub(r"(\n  namespace: )otp-relay(\n)", rf"\g<1>{namespace}\2", text)
 
 
+def yaml_quote(value: str) -> str:
+    escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def set_data_value(text: str, key: str, value: str) -> str:
-    escaped = value.replace('"', '\\"')
-    line = f'  {key}: "{escaped}"'
+    line = f"  {key}: {yaml_quote(value)}"
     pattern = rf"^  {re.escape(key)}: .*?$"
 
     if re.search(pattern, text, flags=re.MULTILINE):
@@ -157,7 +182,7 @@ def add_nodesel(text: str, key: str, value: str) -> str:
     if not key:
         return text
 
-    block = f"      nodeSelector:\n        {key}: \"{value}\"\n"
+    block = f"      nodeSelector:\n        {key}: {yaml_quote(value)}\n"
     return text.replace("    spec:\n", "    spec:\n" + block, 1)
 
 
@@ -252,9 +277,9 @@ if (manifest_dir / "deployment.yaml").exists():
     if os.environ.get("REDIS_ENABLED") == "1":
         redis_env = (
             f"            - name: REDIS_URL\n"
-            f"              value: {os.environ['REDIS_URL']}\n"
+            f"              value: {yaml_quote(os.environ['REDIS_URL'])}\n"
             f"            - name: REDIS_REQUIRED\n"
-            f"              value: \"{os.environ['REDIS_REQUIRED']}\"\n"
+            f"              value: {yaml_quote(os.environ['REDIS_REQUIRED'])}\n"
         )
         text = text.replace("            - name: SMS_SECRET_TOKEN\n", redis_env + "            - name: SMS_SECRET_TOKEN\n", 1)
 
@@ -364,6 +389,8 @@ if (manifest_dir / "ingress.yaml").exists():
     else:
         if not tls_host:
             raise SystemExit("TLS_HOST is required when INGRESS_ENABLED=1")
+        if tls_host in {"CHANGE_ME_TLS_HOST", "otp-relay.local"}:
+            raise SystemExit("TLS_HOST must be changed from the default when INGRESS_ENABLED=1")
 
         # Render ingress from scratch instead of patching a template.
         # Important: Ingress backend port must reference the Kubernetes Service port.
@@ -400,12 +427,24 @@ if (manifest_dir / "ingress.yaml").exists():
 
         write("ingress.yaml", text)
 PY_RENDER_MANIFESTS
+
+  validate_rendered_manifests
 }
 
 apply_if_exists() {
   local file="$1"
 
-  if [ -f "$file" ]; then
-    k3s kubectl apply -f "$file"
+  if [ ! -f "$file" ]; then
+    log "manifest not present, skipping: $file"
+    return 0
+  fi
+
+  log "applying manifest: $file"
+
+  if ! k3s kubectl apply -f "$file"; then
+    warn "failed to apply manifest: $file"
+    warn "showing first 120 lines of failed manifest for diagnostics"
+    sed -n '1,120p' "$file" >&2 || true
+    fatal "kubectl apply failed for $file"
   fi
 }
