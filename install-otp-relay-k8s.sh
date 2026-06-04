@@ -158,12 +158,8 @@ main() {
     normalize_loaded_env
   fi
 
-  case "$DEPLOY_MODE" in
-    full|app|monitor|manifests|none) ;;
-    *) fatal "unsupported DEPLOY_MODE=$DEPLOY_MODE. Use full, app, monitor, manifests, or none." ;;
-  esac
-
-  log "deployment mode: $DEPLOY_MODE"
+    run_phase "validate deployment mode" validate_deploy_mode
+  explain_deploy_mode
 
   run_phase "detect host environment" detect_host_environment
   run_phase "check optional GitHub runner setup" prompt_optional_runner_setup
