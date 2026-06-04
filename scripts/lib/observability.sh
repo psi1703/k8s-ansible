@@ -181,15 +181,15 @@ ensure_helm_available() {
   run_apt_get_observability install -y --no-install-recommends curl ca-certificates openssl tar gzip
 
   tmp_helm_install="$(mktemp)"
-  cleanup_tmp_helm_install() {
-    rm -f "$tmp_helm_install"
-  }
-  trap cleanup_tmp_helm_install RETURN
 
-  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$tmp_helm_install" || \
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$tmp_helm_install" || {
+    rm -f "$tmp_helm_install"
     fatal "failed to download Helm installer from GitHub"
+  }
+
   chmod +x "$tmp_helm_install"
   "$tmp_helm_install"
+  rm -f "$tmp_helm_install"
 
   command -v helm >/dev/null 2>&1 || fatal "Helm installation completed but helm is not available on PATH"
   log "Helm installed: $(helm version --short 2>/dev/null || echo helm)"
@@ -398,18 +398,20 @@ _apply_rendered_manifest() {
   local tmp
 
   tmp="$(mktemp)"
-  cleanup_observability_render_tmp() {
-    rm -f "$tmp"
-  }
-  trap cleanup_observability_render_tmp RETURN
 
-  _render_observability_manifest "$file" "$tmp" || fatal "failed to render observability manifest: $file"
+  if ! _render_observability_manifest "$file" "$tmp"; then
+    rm -f "$tmp"
+    fatal "failed to render observability manifest: $file"
+  fi
 
   if ! k3s kubectl apply -f "$tmp"; then
     warn "failed to apply rendered observability manifest: $file"
     sed -n '1,160p' "$tmp" >&2 || true
+    rm -f "$tmp"
     fatal_observability "observability manifest apply failed: $(basename "$file")"
   fi
+
+  rm -f "$tmp"
 }
 
 _apply_single_observability_manifest() {
@@ -523,39 +525,55 @@ _dry_run_single_observability_manifest() {
   fi
 
   tmp="$(mktemp)"
-  cleanup_observability_dryrun_tmp() {
-    rm -f "$tmp"
-  }
-  trap cleanup_observability_dryrun_tmp RETURN
 
-  _render_observability_manifest "$file" "$tmp" || fatal "failed to render observability manifest for dry-run: $file"
+  if ! _render_observability_manifest "$file" "$tmp"; then
+    rm -f "$tmp"
+    fatal "failed to render observability manifest for dry-run: $file"
+  fi
 
   case "$base" in
     servicemonitor-*.yaml)
       if _service_monitor_crd_available; then
-        k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null
+        if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
+          rm -f "$tmp"
+          fatal_observability "observability dry-run failed: $base"
+        fi
       else
         warn "skipping dry-run for $base because ServiceMonitor CRD is not installed yet"
       fi
       ;;
+
     grafana-ingress.yaml|grafana-ingressroute.yaml)
       if _grafana_service_available; then
-        k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null
+        if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
+          rm -f "$tmp"
+          fatal_observability "observability dry-run failed: $base"
+        fi
       else
         warn "skipping dry-run for $base because Grafana service is not installed yet"
       fi
       ;;
+
     grafana-dashboard-*.yaml)
       if _grafana_service_available; then
-        k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null
+        if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
+          rm -f "$tmp"
+          fatal_observability "observability dry-run failed: $base"
+        fi
       else
         warn "skipping dry-run for $base because Grafana is not installed yet"
       fi
       ;;
+
     *)
-      k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null
+      if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        fatal_observability "observability dry-run failed: $base"
+      fi
       ;;
   esac
+
+  rm -f "$tmp"
 }
 
 dry_run_observability_manifests() {
