@@ -411,6 +411,17 @@ apply_monitor_resources_if_required() {
 }
 
 apply_kubernetes_resources_if_required() {
+  if [ "$DEPLOY_MODE" = "observability" ]; then
+    log "DEPLOY_MODE=observability; applying observability resources only"
+
+    log "applying observability manifests if present"
+    apply_observability_manifests
+    log "observability manifest apply completed"
+
+    log "Kubernetes resource apply phase completed"
+    return 0
+  fi
+
   if requires_manifests_apply; then
     log "applying Kubernetes resources for DEPLOY_MODE=$DEPLOY_MODE"
 
