@@ -6,7 +6,7 @@ LOG="${1:-/tmp/k8s-ansible-health-check-$(date +%Y%m%d-%H%M%S).log}"
 REPO="${REPO:-/opt/k8s-ansible}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-/etc/rancher/k3s/k3s.yaml}"
 KPS_CHART_VERSION="${KPS_CHART_VERSION:-85.0.1}"
-LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-13.7.0}"
+LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-}"
 ALLOY_CHART_VERSION="${ALLOY_CHART_VERSION:-1.8.1}"
 
 NAMESPACE="${NAMESPACE:-otp-relay}"
@@ -16,6 +16,10 @@ LOKI_RELEASE="${LOKI_RELEASE:-loki}"
 ALLOY_RELEASE="${ALLOY_RELEASE:-alloy}"
 LOKI_SERVICE="${LOKI_SERVICE:-loki}"
 LOKI_PORT="${LOKI_PORT:-3100}"
+# Some Loki chart versions expose a gateway instead of service/loki.
+# Keep service/loki as the preferred SCH target, but auto-detect a usable fallback
+# so the health check reports the real live state instead of only one assumed name.
+LOKI_GATEWAY_SERVICE="${LOKI_GATEWAY_SERVICE:-loki-gateway}"
 
 APP_LABEL_SELECTOR="${APP_LABEL_SELECTOR:-app=otp-relay}"
 MONITOR_LABEL_SELECTOR="${MONITOR_LABEL_SELECTOR:-app=otp-monitor}"
@@ -187,6 +191,42 @@ check_service_endpoints() {
   fi
 }
 
+detect_loki_service() {
+  local ns="$1"
+
+  if kubectl -n "$ns" get svc "$LOKI_SERVICE" >/dev/null 2>&1; then
+    printf '%s\n' "$LOKI_SERVICE"
+    return 0
+  fi
+
+  if kubectl -n "$ns" get svc "$LOKI_GATEWAY_SERVICE" >/dev/null 2>&1; then
+    printf '%s\n' "$LOKI_GATEWAY_SERVICE"
+    return 0
+  fi
+
+  # Fall back to the first non-memberlist Loki service if the chart produced
+  # version-specific service names.
+  kubectl -n "$ns" get svc -l app.kubernetes.io/instance="$LOKI_RELEASE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -Ev 'memberlist$' \
+    | head -1
+}
+
+check_loki_workload_present() {
+  local ns="$1"
+  local count
+
+  count="$(kubectl -n "$ns" get pod -l app.kubernetes.io/instance="$LOKI_RELEASE" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}x{end}' 2>/dev/null | wc -c | xargs)"
+
+  if [ "${count:-0}" = "0" ]; then
+    problem "Loki Helm release exists but no running Loki pods were found for app.kubernetes.io/instance=$LOKI_RELEASE"
+  else
+    echo "OK: Loki running pod marker count: $count"
+  fi
+}
+
 section "Health check metadata"
 echo "Started: $(date -Is)"
 echo "Host: $(hostname -f 2>/dev/null || hostname)"
@@ -232,6 +272,7 @@ run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE list -
 run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $KPS_RELEASE || true"
 run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $LOKI_RELEASE || true"
 run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $ALLOY_RELEASE || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo list || true"
 
 if ! sudo KUBECONFIG="$KUBECONFIG_PATH" helm -n "$OBSERVABILITY_NAMESPACE" status "$KPS_RELEASE" >/dev/null 2>&1; then
   problem "Helm release missing or unhealthy: $OBSERVABILITY_NAMESPACE/$KPS_RELEASE"
@@ -373,7 +414,15 @@ check_service_endpoints "$OBSERVABILITY_NAMESPACE" "${KPS_RELEASE}-grafana" "Gra
 check_service_endpoints "$OBSERVABILITY_NAMESPACE" "${KPS_RELEASE}-prometheus" "Prometheus"
 
 if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
-  check_service_endpoints "$OBSERVABILITY_NAMESPACE" "$LOKI_SERVICE" "Loki"
+  check_loki_workload_present "$OBSERVABILITY_NAMESPACE"
+
+  DETECTED_LOKI_SERVICE="$(detect_loki_service "$OBSERVABILITY_NAMESPACE")"
+  if [ -n "$DETECTED_LOKI_SERVICE" ]; then
+    echo "Detected Loki service for health checks: $DETECTED_LOKI_SERVICE"
+    check_service_endpoints "$OBSERVABILITY_NAMESPACE" "$DETECTED_LOKI_SERVICE" "Loki"
+  else
+    problem "Loki service missing: no usable Loki service found in namespace $OBSERVABILITY_NAMESPACE"
+  fi
 fi
 
 if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
@@ -390,13 +439,20 @@ curl -fsS http://otp-monitor.otp-relay.svc.cluster.local:9101/metrics | grep -E 
 
 section "Loki and Alloy log pipeline checks"
 if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
-  LOKI_URL="http://${LOKI_SERVICE}.${OBSERVABILITY_NAMESPACE}.svc.cluster.local:${LOKI_PORT}"
+  DETECTED_LOKI_SERVICE="$(detect_loki_service "$OBSERVABILITY_NAMESPACE")"
 
-  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-api-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/ready' || true"
+  if [ -z "$DETECTED_LOKI_SERVICE" ]; then
+    problem "Skipping Loki API checks because no usable Loki service was detected"
+  else
+    LOKI_URL="http://${DETECTED_LOKI_SERVICE}.${OBSERVABILITY_NAMESPACE}.svc.cluster.local:${LOKI_PORT}"
+    echo "LOKI_URL=$LOKI_URL"
 
-  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-labels-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/loki/api/v1/labels' | head -40 || true"
+    run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-api-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/ready' || true"
 
-  run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-query-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS --get '$LOKI_URL/loki/api/v1/query' --data-urlencode 'query={namespace=\"otp-relay\"}' | head -80 || true"
+    run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-labels-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/loki/api/v1/labels' | head -40 || true"
+
+    run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-query-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS --get '$LOKI_URL/loki/api/v1/query' --data-urlencode 'query={namespace=\"otp-relay\"}' | head -80 || true"
+  fi
 else
   warning "loki-values.yaml not present; skipping Loki API checks"
 fi
@@ -464,22 +520,29 @@ if [ -d "$REPO/k8s" ]; then
 fi
 
 section "Repo Helm values render check"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo update >/dev/null 2>&1 || true"
 run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo list || true"
 
 if [ -f "$REPO/k8s/observability/prometheus-stack-values.yaml" ]; then
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --namespace '$OBSERVABILITY_NAMESPACE' --version '$KPS_CHART_VERSION' -f k8s/observability/prometheus-stack-values.yaml >/tmp/kps-rendered-health-check.yaml && echo OK || echo FAILED"
+  KPS_RENDER="$(mktemp /tmp/kps-rendered-health-check.XXXXXX.yaml)"
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --namespace '$OBSERVABILITY_NAMESPACE' --version '$KPS_CHART_VERSION' -f k8s/observability/prometheus-stack-values.yaml >'$KPS_RENDER' && echo OK || echo FAILED"
 fi
 
 if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana-community https://grafana.github.io/helm-charts >/dev/null 2>&1 || true"
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo update >/dev/null 2>&1 || true"
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template loki grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' --version '$LOKI_CHART_VERSION' -f k8s/observability/loki-values.yaml >/tmp/loki-rendered-health-check.yaml && echo OK || echo FAILED"
+  LOKI_RENDER="$(mktemp /tmp/loki-rendered-health-check.XXXXXX.yaml)"
+  if [ -n "$LOKI_CHART_VERSION" ]; then
+    run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template loki grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' --version '$LOKI_CHART_VERSION' -f k8s/observability/loki-values.yaml >'$LOKI_RENDER' && echo OK || echo FAILED"
+  else
+    run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template loki grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' -f k8s/observability/loki-values.yaml >'$LOKI_RENDER' && echo OK || echo FAILED"
+  fi
 fi
 
 if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true"
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo update >/dev/null 2>&1 || true"
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template alloy grafana/alloy --namespace '$OBSERVABILITY_NAMESPACE' --version '$ALLOY_CHART_VERSION' -f k8s/observability/alloy-values.yaml >/tmp/alloy-rendered-health-check.yaml && echo OK || echo FAILED"
+  ALLOY_RENDER="$(mktemp /tmp/alloy-rendered-health-check.XXXXXX.yaml)"
+  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template alloy grafana/alloy --namespace '$OBSERVABILITY_NAMESPACE' --version '$ALLOY_CHART_VERSION' -f k8s/observability/alloy-values.yaml >'$ALLOY_RENDER' && echo OK || echo FAILED"
 fi
 
 section "Installer recent log tail"
