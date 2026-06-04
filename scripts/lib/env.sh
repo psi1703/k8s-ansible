@@ -93,6 +93,102 @@ _env_default_interface() {
 ip route show default 2>/dev/null | awk '{print $5; exit}'
 }
 
+
+_env_reset_config_vars() {
+local names="REPO_URL REPO_REF INSTALL_DIR NAMESPACE APP_IMAGE MONITOR_IMAGE DEPLOY_MODE SERVICE_TYPE SERVICE_NODE_PORT LOADBALANCER_IP INGRESS_ENABLED TLS_ENABLED TLS_HOST TLS_SECRET_NAME TLS_SELF_SIGNED PORTAL_URL PVC_STORAGE_CLASS PVC_SIZE NFS_ENABLED NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_PV_NAME NFS_MOUNT_OPTIONS REPLICA_COUNT APP_NODE_SELECTOR_KEY APP_NODE_SELECTOR_VALUE MONITOR_NODE_SELECTOR_KEY MONITOR_NODE_SELECTOR_VALUE REDIS_NODE_SELECTOR_KEY REDIS_NODE_SELECTOR_VALUE REQUIRE_METALLB INSTALL_METALLB METALLB_VERSION METALLB_MANIFEST_URL METALLB_IP_RANGE METALLB_POOL_NAME SERVER_HOSTNAME SERVER_IP PHONE_IP PHONE_INTERFACE PHONE_PING_INTERVAL PHONE_OFFLINE_THRESHOLD PHONE_ARP_COUNT PHONE_ARP_TIMEOUT MONITOR_METRICS_PORT OTP_RELAY_DATA_DIR USERS_EXCEL_PATH AUDIT_LOG_PATH CLAIM_EXPIRY_SEC OTP_DISPLAY_SEC CONCURRENT_RISK_SEC TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD INSTALL_GITHUB_RUNNER GITHUB_RUNNER_URL GITHUB_RUNNER_TOKEN GITHUB_RUNNER_DIR GITHUB_RUNNER_USER RUNNER_ONLY DOCKER_BIN REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS DISTRIBUTE_IMAGES_TO_NODES IMAGE_DISTRIBUTION_PORT IMAGE_IMPORTER_IMAGE SMS_SECRET_TOKEN BRIDGE_NAME HOST_IFACE HOST_IP_CIDR GATEWAY DNS PREFIX IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END AUTO_ASSIGN_IPS WORKER1_IP WORKER2_IP VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB WORKER1_NAME WORKER2_NAME OBSERVABILITY_NAMESPACE OBSERVABILITY_INSTALL_STACK OBSERVABILITY_STACK_CHART_VERSION GRAFANA_HOST"
+local name=""
+for name in $names; do
+  unset "$name"
+done
+}
+
+_env_file_syntax_ok() {
+local source_file="$1"
+
+if bash -n "$source_file" >/dev/null 2>&1; then
+  return 0
+fi
+
+return 1
+}
+
+_env_reject_file() {
+local source_file="$1"
+local reason="$2"
+local stamp=""
+local rejected=""
+
+stamp="$(date +%Y%m%d-%H%M%S)"
+rejected="${source_file}.rejected.${stamp}"
+
+warn "rejecting saved environment file: $source_file"
+warn "reason: $reason"
+
+mv "$source_file" "$rejected"
+chmod 0600 "$rejected" 2>/dev/null || true
+warn "saved rejected environment file as: $rejected"
+
+ENV_FILE_LOADED=0
+}
+
+_env_clear_recoverable_placeholders() {
+if _env_is_default_placeholder "${TLS_HOST:-}"; then
+  unset TLS_HOST
+fi
+
+if [ "${VM_PASSWORD:-}" = "CHANGE_ME_VM_PASSWORD" ]; then
+  unset VM_PASSWORD
+fi
+}
+
+_env_is_default_placeholder() {
+case "${1:-}" in
+  ""|"CHANGE_ME_TLS_HOST"|"otp-relay.local"|"CHANGE_ME_VM_PASSWORD") return 0 ;;
+  *) return 1 ;;
+esac
+}
+
+_env_existing_file_is_recoverable_first_run() {
+# Return 0 only for values that indicate an incomplete/cancelled first-run file.
+# Normal older .env files with missing optional values are normalized instead of rejected.
+
+if [ -z "${PHONE_IP:-}" ]; then
+  warn "saved .env is missing PHONE_IP"
+  return 0
+fi
+
+if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
+  if _env_is_default_placeholder "${TLS_HOST:-}"; then
+    warn "saved .env has no usable ingress/TLS hostname"
+    return 0
+  fi
+fi
+
+if [ "${NFS_ENABLED:-0}" = "1" ]; then
+  if [ -z "${NFS_SERVER:-}" ] || [ -z "${NFS_PATH:-}" ]; then
+    warn "saved .env is missing NFS_SERVER or NFS_PATH while NFS_ENABLED=1"
+    return 0
+  fi
+fi
+
+if [ "${INSTALL_METALLB:-0}" = "1" ] && [ -z "${METALLB_IP_RANGE:-}" ]; then
+  warn "saved .env is missing METALLB_IP_RANGE while INSTALL_METALLB=1"
+  return 0
+fi
+
+if [ -z "${SMS_SECRET_TOKEN:-}" ]; then
+  warn "saved .env is missing SMS_SECRET_TOKEN"
+  return 0
+fi
+
+if [ "${VM_PASSWORD:-}" = "CHANGE_ME_VM_PASSWORD" ]; then
+  warn "saved .env contains the default VM_PASSWORD placeholder"
+  return 0
+fi
+
+return 1
+}
+
 _write_env_file() {
 local target="$1"
 local tmp="${target}.tmp"
@@ -244,7 +340,7 @@ AUTO_ASSIGN_IPS=$(_env_quote "${AUTO_ASSIGN_IPS:-1}")
 WORKER1_IP=$(_env_quote "${WORKER1_IP:-}")
 WORKER2_IP=$(_env_quote "${WORKER2_IP:-}")
 VM_USER=$(_env_quote "${VM_USER:-otp-relay}")
-VM_PASSWORD=$(_env_quote "${VM_PASSWORD:-CHANGE_ME_VM_PASSWORD}")
+VM_PASSWORD=$(_env_quote "${VM_PASSWORD:-}")
 VM_RAM_MB=$(_env_quote "${VM_RAM_MB:-3072}")
 VM_VCPUS=$(_env_quote "${VM_VCPUS:-2}")
 VM_DISK_GB=$(_env_quote "${VM_DISK_GB:-20}")
@@ -273,12 +369,20 @@ if [ ! -f "$source_file" ]; then
 return 1
 fi
 
+if ! _env_file_syntax_ok "$source_file"; then
+return 2
+fi
+
 log "sourcing environment file: $source_file"
 set -a
 
 # shellcheck disable=SC1090
 
-. "$source_file"
+if ! . "$source_file"; then
+  set +a
+  return 2
+fi
+
 set +a
 }
 
@@ -537,6 +641,45 @@ fi
 log "required installer environment values validated"
 }
 
+_env_reapply_runtime_overrides() {
+local runtime_noninteractive="$1"
+local runtime_skip_repo_sync="$2"
+local runtime_git_clean="$3"
+
+if [ -n "$runtime_noninteractive" ]; then
+  NONINTERACTIVE="$runtime_noninteractive"
+  export NONINTERACTIVE
+fi
+
+if [ -n "$runtime_skip_repo_sync" ]; then
+  SKIP_REPO_SYNC="$runtime_skip_repo_sync"
+  export SKIP_REPO_SYNC
+fi
+
+if [ -n "$runtime_git_clean" ]; then
+  GIT_CLEAN="$runtime_git_clean"
+  export GIT_CLEAN
+fi
+}
+
+_env_restore_recovery_input() {
+local name="$1"
+local value="${2:-}"
+
+if [ -n "$value" ]; then
+  printf -v "$name" '%s' "$value"
+  export "$name"
+fi
+}
+
+_env_create_new_file_for_current_mode() {
+if [ "${NONINTERACTIVE:-0}" = "1" ]; then
+  create_env_noninteractive
+else
+  create_env_interactive
+fi
+}
+
 load_or_create_env() {
 ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
 export ENV_FILE
@@ -548,83 +691,96 @@ export ENV_FILE
 local runtime_noninteractive="${NONINTERACTIVE:-}"
 local runtime_skip_repo_sync="${SKIP_REPO_SYNC:-}"
 local runtime_git_clean="${GIT_CLEAN:-}"
+local recovery_service_type="${SERVICE_TYPE:-}"
+local recovery_ingress_enabled="${INGRESS_ENABLED:-}"
+local recovery_tls_enabled="${TLS_ENABLED:-}"
+local recovery_tls_host="${TLS_HOST:-}"
+local recovery_nfs_enabled="${NFS_ENABLED:-}"
+local recovery_nfs_server="${NFS_SERVER:-}"
+local recovery_nfs_path="${NFS_PATH:-}"
+local recovery_install_metallb="${INSTALL_METALLB:-}"
+local recovery_metallb_ip_range="${METALLB_IP_RANGE:-}"
+local recovery_phone_ip="${PHONE_IP:-}"
+local recovery_phone_interface="${PHONE_INTERFACE:-}"
+local recovery_sms_secret_token="${SMS_SECRET_TOKEN:-}"
+local recovery_redis_enabled="${REDIS_ENABLED:-}"
+local recovery_redis_url="${REDIS_URL:-}"
+local recovery_redis_required="${REDIS_REQUIRED:-}"
+local loaded_existing_env=0
 
 if [ -f "$ENV_FILE" ]; then
-log "loading environment from $ENV_FILE"
-source_env_file "$ENV_FILE"
-ENV_FILE_LOADED=1
+  log "loading environment from $ENV_FILE"
 
-if [ -n "$runtime_noninteractive" ]; then
-  NONINTERACTIVE="$runtime_noninteractive"
-  export NONINTERACTIVE
-fi
-
-if [ -n "$runtime_skip_repo_sync" ]; then
-  SKIP_REPO_SYNC="$runtime_skip_repo_sync"
-  export SKIP_REPO_SYNC
-fi
-
-if [ -n "$runtime_git_clean" ]; then
-  GIT_CLEAN="$runtime_git_clean"
-  export GIT_CLEAN
-fi
-
-normalize_loaded_env
-
-if [ "${NONINTERACTIVE:-0}" != "1" ]; then
-  if prompt_yes_no "Change saved installer environment values before continuing? [y/N]" "N"; then
-    change_env_menu
-    source_env_file "$ENV_FILE"
-
-    if [ -n "$runtime_noninteractive" ]; then
-      NONINTERACTIVE="$runtime_noninteractive"
-      export NONINTERACTIVE
-    fi
-
-    if [ -n "$runtime_skip_repo_sync" ]; then
-      SKIP_REPO_SYNC="$runtime_skip_repo_sync"
-      export SKIP_REPO_SYNC
-    fi
-
-    if [ -n "$runtime_git_clean" ]; then
-      GIT_CLEAN="$runtime_git_clean"
-      export GIT_CLEAN
-    fi
-
-    normalize_loaded_env
+  if source_env_file "$ENV_FILE"; then
+    ENV_FILE_LOADED=1
+    loaded_existing_env=1
+  else
+    _env_reject_file "$ENV_FILE" "file is not valid shell syntax or could not be sourced"
+    _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+    _env_restore_recovery_input SERVICE_TYPE "$recovery_service_type"
+    _env_restore_recovery_input INGRESS_ENABLED "$recovery_ingress_enabled"
+    _env_restore_recovery_input TLS_ENABLED "$recovery_tls_enabled"
+    _env_restore_recovery_input TLS_HOST "$recovery_tls_host"
+    _env_restore_recovery_input NFS_ENABLED "$recovery_nfs_enabled"
+    _env_restore_recovery_input NFS_SERVER "$recovery_nfs_server"
+    _env_restore_recovery_input NFS_PATH "$recovery_nfs_path"
+    _env_restore_recovery_input INSTALL_METALLB "$recovery_install_metallb"
+    _env_restore_recovery_input METALLB_IP_RANGE "$recovery_metallb_ip_range"
+    _env_restore_recovery_input PHONE_IP "$recovery_phone_ip"
+    _env_restore_recovery_input PHONE_INTERFACE "$recovery_phone_interface"
+    _env_restore_recovery_input SMS_SECRET_TOKEN "$recovery_sms_secret_token"
+    _env_restore_recovery_input REDIS_ENABLED "$recovery_redis_enabled"
+    _env_restore_recovery_input REDIS_URL "$recovery_redis_url"
+    _env_restore_recovery_input REDIS_REQUIRED "$recovery_redis_required"
+    _env_create_new_file_for_current_mode
   fi
-else
-  log "NONINTERACTIVE=1; using existing .env without prompting"
 fi
 
-else
-if [ "${NONINTERACTIVE:-0}" = "1" ]; then
-create_env_noninteractive
-else
-create_env_interactive
+if [ ! -f "$ENV_FILE" ]; then
+  _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+  _env_create_new_file_for_current_mode
+fi
+
+if [ "$loaded_existing_env" = "1" ]; then
+  _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+  normalize_loaded_env
+
+  if _env_existing_file_is_recoverable_first_run; then
+    _env_reject_file "$ENV_FILE" "file appears incomplete or still contains first-run placeholders"
+    _env_clear_recoverable_placeholders
+    _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+    _env_restore_recovery_input SERVICE_TYPE "$recovery_service_type"
+    _env_restore_recovery_input INGRESS_ENABLED "$recovery_ingress_enabled"
+    _env_restore_recovery_input TLS_ENABLED "$recovery_tls_enabled"
+    _env_restore_recovery_input TLS_HOST "$recovery_tls_host"
+    _env_restore_recovery_input NFS_ENABLED "$recovery_nfs_enabled"
+    _env_restore_recovery_input NFS_SERVER "$recovery_nfs_server"
+    _env_restore_recovery_input NFS_PATH "$recovery_nfs_path"
+    _env_restore_recovery_input INSTALL_METALLB "$recovery_install_metallb"
+    _env_restore_recovery_input METALLB_IP_RANGE "$recovery_metallb_ip_range"
+    _env_restore_recovery_input PHONE_IP "$recovery_phone_ip"
+    _env_restore_recovery_input PHONE_INTERFACE "$recovery_phone_interface"
+    _env_restore_recovery_input SMS_SECRET_TOKEN "$recovery_sms_secret_token"
+    _env_restore_recovery_input REDIS_ENABLED "$recovery_redis_enabled"
+    _env_restore_recovery_input REDIS_URL "$recovery_redis_url"
+    _env_restore_recovery_input REDIS_REQUIRED "$recovery_redis_required"
+    _env_create_new_file_for_current_mode
+  elif [ "${NONINTERACTIVE:-0}" != "1" ]; then
+    if prompt_yes_no "Change saved installer environment values before continuing? [y/N]" "N"; then
+      change_env_menu
+      source_env_file "$ENV_FILE"
+      _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+      normalize_loaded_env
+    fi
+  else
+    log "NONINTERACTIVE=1; using existing .env without prompting"
+  fi
 fi
 
 source_env_file "$ENV_FILE"
 ENV_FILE_LOADED=1
-
-if [ -n "$runtime_noninteractive" ]; then
-  NONINTERACTIVE="$runtime_noninteractive"
-  export NONINTERACTIVE
-fi
-
-if [ -n "$runtime_skip_repo_sync" ]; then
-  SKIP_REPO_SYNC="$runtime_skip_repo_sync"
-  export SKIP_REPO_SYNC
-fi
-
-if [ -n "$runtime_git_clean" ]; then
-  GIT_CLEAN="$runtime_git_clean"
-  export GIT_CLEAN
-fi
-
+_env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
 normalize_loaded_env
-
-fi
 
 validate_env_required
 log "environment source: $ENV_FILE"
