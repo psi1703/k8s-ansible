@@ -1,6 +1,7 @@
 ---
 - name: Define OTP Relay deployment paths
   ansible.builtin.set_fact:
+    otp_relay_source_dir: "{{ otp_source_dir | default('/opt/k8s-ansible') }}"
     otp_relay_install_dir: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
     otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
     otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
@@ -31,19 +32,96 @@
     mode: "0755"
   become: true
 
-- name: Sync local k8s-ansible repo to remote control-plane
+- name: Validate local source repo before release sync
+  ansible.builtin.stat:
+    path: "{{ otp_relay_source_dir }}/install-otp-relay-k8s.sh"
+  delegate_to: localhost
+  register: otp_relay_local_installer_stat
+  when: not otp_relay_control_plane_is_local | bool
+
+- name: Stop when local source repo is missing installer
+  ansible.builtin.fail:
+    msg: >-
+      Missing {{ otp_relay_source_dir }}/install-otp-relay-k8s.sh on the Ansible runner.
+      The dev-side k8s-ansible source directory is required before syncing to the control-plane.
+  when:
+    - not otp_relay_control_plane_is_local | bool
+    - not otp_relay_local_installer_stat.stat.exists
+
+- name: Sync approved k8s-ansible release files to remote control-plane
   ansible.posix.synchronize:
-    src: /opt/k8s-ansible/
+    src: "{{ otp_relay_source_dir }}/"
     dest: "{{ otp_relay_install_dir }}/"
     archive: true
     delete: true
     rsync_opts:
+      # Safe top-level files.
+      - "--include=/.env.example"
+      - "--include=/.dockerignore"
+      - "--include=/LICENSE"
+      - "--include=/README.md"
+      - "--include=/setup.sh"
+      - "--include=/install-otp-relay-k8s.sh"
+      - "--include=/main.py"
+      - "--include=/monitor.py"
+      - "--include=/requirements.txt"
+      - "--include=/package.json"
+      - "--include=/package-lock.json"
+
+      # Safe deploy/app directories.
+      - "--include=/automation/"
+      - "--include=/automation/ansible/"
+      - "--include=/automation/ansible/***"
+      - "--include=/collections/***"
+      - "--include=/docs/"
+      - "--include=/docs/help/***"
+      - "--include=/frontend/***"
+      - "--include=/k8s/***"
+      - "--include=/otp_monitor/***"
+      - "--include=/otp_relay/***"
+      - "--include=/scripts/***"
+
+      # Explicitly protect secrets, runtime files, generated artifacts, and dev junk.
       - "--exclude=.git/"
+      - "--exclude=.github/"
       - "--exclude=.installer-venv/"
+      - "--exclude=.pytest_cache/"
+      - "--exclude=.mypy_cache/"
+      - "--exclude=.ruff_cache/"
+      - "--exclude=__pycache__/"
       - "--exclude=node_modules/"
+      - "--exclude=venv/"
+      - "--exclude=.venv/"
+      - "--exclude=release/"
       - "--exclude=automation/libvirt/build/"
       - "--exclude=automation/ansible/inventory.generated.ini"
+
+      # Runtime configuration and secrets must stay operator-owned on prod.
       - "--exclude=.env"
+      - "--exclude=.env.*"
+      - "--exclude=secret.env"
+      - "--exclude=users.xlsx"
+      - "--exclude=admin_auth.json"
+      - "--exclude=admin_config.json"
+      - "--exclude=wizard_progress.json"
+      - "--exclude=audit.log"
+      - "--exclude=install-report.txt"
+      - "--exclude=k3s.yaml"
+      - "--exclude=kubeconfig"
+      - "--exclude=*.kubeconfig"
+      - "--exclude=*.pem"
+      - "--exclude=*.key"
+      - "--exclude=*.crt"
+
+      # Build outputs and logs.
+      - "--exclude=*.log"
+      - "--exclude=*.tar"
+      - "--exclude=*.tar.gz"
+      - "--exclude=*.tgz"
+      - "--exclude=*.zip"
+
+      # Anything not explicitly included above stays out.
+      - "--exclude=*"
   delegate_to: localhost
   when: not otp_relay_control_plane_is_local | bool
 
