@@ -1,6 +1,6 @@
-name: Sync k8s-ansible repo to server
+name: Sync k8s-ansible DEVtoPROD repo to server
 
-run-name: "sync/deploy @ ${{ github.ref_name }}"
+run-name: "sync/deploy DEVtoPROD @ ${{ github.ref_name }}"
 
 permissions:
   contents: read
@@ -8,7 +8,7 @@ permissions:
 on:
   push:
     branches:
-      - main
+      - k8s-ansible-DEVtoPROD
   workflow_dispatch:
     inputs:
       deploy_mode:
@@ -26,15 +26,16 @@ on:
           - full
 
 concurrency:
-  group: sync-k8s-ansible-to-server-${{ github.ref }}
+  group: sync-k8s-ansible-devtoprod-to-server-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  DEPLOY_REPO_DIR: /opt/k8s-ansible
+  DEPLOY_BRANCH: k8s-ansible-DEVtoPROD
+  DEPLOY_REPO_DIR: /opt/k8s-ansible-DEVtoPROD
 
 jobs:
   sync:
-    name: Sync repository and deploy changed components
+    name: Sync DEVtoPROD repository and deploy changed components
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
 
@@ -43,9 +44,35 @@ jobs:
         shell: bash
 
     steps:
+      - name: Refuse wrong branch
+        run: |
+          set -Eeuo pipefail
+
+          echo "Expected branch: ${DEPLOY_BRANCH}"
+          echo "Current branch:  ${GITHUB_REF_NAME}"
+          echo "Git ref:         ${GITHUB_REF}"
+          echo "Target dir:      ${DEPLOY_REPO_DIR}"
+
+          if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
+            echo "[ERROR] Refusing to sync/deploy from branch '${GITHUB_REF_NAME}'."
+            echo "[ERROR] This workflow is only allowed from '${DEPLOY_BRANCH}'."
+            exit 1
+          fi
+
+          case "${DEPLOY_REPO_DIR}" in
+            *DEVtoPROD*)
+              echo "Target directory safety check passed."
+              ;;
+            *)
+              echo "[ERROR] DEPLOY_REPO_DIR does not look like a DEVtoPROD path: ${DEPLOY_REPO_DIR}"
+              exit 1
+              ;;
+          esac
+
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
+          ref: ${{ env.DEPLOY_BRANCH }}
           fetch-depth: 0
           clean: true
           persist-credentials: false
@@ -143,7 +170,7 @@ jobs:
           echo "deploy_mode=${DEPLOY_MODE}" >> "$GITHUB_OUTPUT"
           echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
 
-      - name: Sync checkout to active server repo
+      - name: Sync checkout to DEVtoPROD server repo
         run: |
           set -Eeuo pipefail
 
@@ -152,9 +179,15 @@ jobs:
           echo "Runner arch: ${RUNNER_ARCH:-unknown}"
           echo "Workspace: ${GITHUB_WORKSPACE}"
           echo "Target: ${DEPLOY_REPO_DIR}"
+          echo "Branch: ${GITHUB_REF_NAME}"
           echo "Commit: ${GITHUB_SHA}"
           echo "Detected deploy mode: ${{ steps.detect.outputs.deploy_mode }}"
           echo "Detection reason: ${{ steps.detect.outputs.reason }}"
+
+          if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
+            echo "[ERROR] Branch changed unexpectedly. Refusing sync."
+            exit 1
+          fi
 
           if ! command -v rsync >/dev/null 2>&1; then
             echo "rsync is missing; installing it now."
@@ -167,8 +200,19 @@ jobs:
 
           rsync -a --delete \
             --exclude '.env' \
+            --exclude '.env.*' \
             --exclude 'automation/ansible/inventory.generated.ini' \
             --exclude 'automation/libvirt/build/' \
+            --exclude '*.log' \
+            --exclude '*.tar' \
+            --exclude '*.tar.gz' \
+            --exclude '*.tgz' \
+            --exclude '*.zip' \
+            --exclude 'users.xlsx' \
+            --exclude 'admin_auth.json' \
+            --exclude 'admin_config.json' \
+            --exclude 'wizard_progress.json' \
+            --exclude 'audit.log' \
             "${GITHUB_WORKSPACE}/" \
             "${DEPLOY_REPO_DIR}/"
 
@@ -180,6 +224,7 @@ jobs:
           echo "Synced repo status:"
           cd "${DEPLOY_REPO_DIR}"
           git status --short || true
+          git branch --show-current || true
           git log --oneline -1 || true
 
           echo
@@ -206,10 +251,16 @@ jobs:
 
           DEPLOY_MODE="${{ steps.detect.outputs.deploy_mode }}"
 
-          echo "Starting deployment after sync"
+          echo "Starting DEVtoPROD deployment after sync"
           echo "Deploy mode: ${DEPLOY_MODE}"
           echo "Reason: ${{ steps.detect.outputs.reason }}"
           echo "Repo: ${DEPLOY_REPO_DIR}"
+          echo "Branch: ${GITHUB_REF_NAME}"
+
+          if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
+            echo "[ERROR] Refusing deployment from wrong branch: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
 
           cd "${DEPLOY_REPO_DIR}"
 
@@ -239,4 +290,4 @@ jobs:
         run: |
           set -Eeuo pipefail
           echo "No deployable app, monitor, manifest, observability, or requirements change detected."
-          echo "Repository sync completed only."
+          echo "DEVtoPROD repository sync completed only."
