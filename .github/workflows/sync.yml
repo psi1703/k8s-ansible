@@ -115,28 +115,22 @@ jobs:
           MANIFESTS_CHANGED=0
           OBSERVABILITY_CHANGED=0
 
-          # requirements.txt affects both app and monitor runtime images.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^requirements\.txt$'; then
             FULL_CHANGED=1
           fi
 
-          # App/backend/frontend files require app image rebuild and rollout.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_relay/|main\.py$|frontend/|docs/help/|scripts/build_help_docs\.py$|k8s/Dockerfile$|package\.json$|package-lock\.json$)'; then
             APP_CHANGED=1
           fi
 
-          # Monitor files require monitor image rebuild and rollout.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_monitor/|monitor\.py$|k8s/Dockerfile\.monitor$)'; then
             MONITOR_CHANGED=1
           fi
 
-          # Raw OTP Relay Kubernetes manifest changes can be applied without rebuilding images.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/manifests/)'; then
             MANIFESTS_CHANGED=1
           fi
 
-          # Observability-only changes are handled by the installer in observability mode.
-          # Keep the workflow as a dispatcher only; do not duplicate Helm/kubectl logic here.
           if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/observability/|scripts/build_grafana_dashboard_configmap\.py$)'; then
             OBSERVABILITY_CHANGED=1
           fi
@@ -199,6 +193,7 @@ jobs:
           sudo chown -R "$(id -un):$(id -gn)" "${DEPLOY_REPO_DIR}"
 
           rsync -a --delete \
+            --exclude '.git/' \
             --exclude '.env' \
             --exclude '.env.*' \
             --exclude 'automation/ansible/inventory.generated.ini' \
@@ -216,16 +211,18 @@ jobs:
             "${GITHUB_WORKSPACE}/" \
             "${DEPLOY_REPO_DIR}/"
 
-          chmod +x "${DEPLOY_REPO_DIR}"/automation/libvirt/*.sh 2>/dev/null || true
-          chmod +x "${DEPLOY_REPO_DIR}"/automation/ansible/*.sh 2>/dev/null || true
-          chmod +x "${DEPLOY_REPO_DIR}/install-otp-relay-k8s.sh" 2>/dev/null || true
-
           echo
           echo "Synced repo status:"
           cd "${DEPLOY_REPO_DIR}"
-          git status --short || true
-          git branch --show-current || true
-          git log --oneline -1 || true
+
+          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git status --short || true
+            git branch --show-current || true
+            git log --oneline -1 || true
+          else
+            echo "Synced directory is not a git work tree because .git is intentionally excluded."
+            echo "Current deployed commit: ${GITHUB_SHA}"
+          fi
 
           echo
           echo "Preserved server-local files:"
