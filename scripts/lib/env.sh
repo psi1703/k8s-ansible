@@ -430,7 +430,7 @@ _env_set_default REDIS_NODE_SELECTOR_VALUE "true"
 
 _env_set_default PHONE_PING_INTERVAL "10"
 _env_set_default PHONE_OFFLINE_THRESHOLD "30"
-_env_set_default OBSERVABILITY_NAMESPACE "observability"
+_env_set_default OBSERVABILITY_NAMESPACE "observability-devprod"
 _env_set_default OBSERVABILITY_INSTALL_STACK "1"
 _env_set_default OBSERVABILITY_STACK_CHART_VERSION "85.0.1"
 _env_set_default GRAFANA_HOST "grafana-devprod.init-db.lan"
