@@ -32,9 +32,10 @@ _preflight_require_root() {
 _preflight_retry() {
   local attempts="${1:-3}"
   local delay="${2:-5}"
+  local i=1
+
   shift 2
 
-  local i=1
   while true; do
     if "$@"; then
       return 0
@@ -84,7 +85,8 @@ detect_host_environment() {
   esac
 
   IS_RPI=0
-  if grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null || grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null; then
+  if grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null ||
+    grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null; then
     IS_RPI=1
   fi
 
@@ -158,6 +160,18 @@ require_build_tool() {
   _preflight_cmd_exists "$tool" || fatal "required build tool is missing: $tool"
 }
 
+repo_sync_or_cleanliness_needs_git() {
+  if [ "${SKIP_REPO_SYNC:-auto}" != "1" ]; then
+    return 0
+  fi
+
+  if [ "${GIT_CLEAN:-1}" = "1" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
 check_bundle_builder_tools() {
   log "checking required local build tools"
 
@@ -173,14 +187,22 @@ check_bundle_builder_tools() {
   require_build_tool sha256sum
   require_build_tool python3
 
-  if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+  if repo_sync_or_cleanliness_needs_git; then
+    require_build_tool git
+  else
+    log "git is not required because SKIP_REPO_SYNC=1 and GIT_CLEAN=0"
+  fi
+
+  if requires_app_image 2>/dev/null; then
     require_build_tool npm
   fi
 
-  if [ "${DEPLOY_MODE:-full}" != "none" ]; then
+  if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
     if ! _preflight_cmd_exists docker; then
-      warn "Docker CLI is not installed; image export phase will fail if image artifacts are required"
+      warn "Docker CLI is not installed; image export phase will fail because image artifacts are required"
     fi
+  else
+    log "Docker CLI is not required for DEPLOY_MODE=${DEPLOY_MODE:-full}"
   fi
 
   log "required local build tool check completed"
