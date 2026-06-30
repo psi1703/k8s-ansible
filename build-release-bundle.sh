@@ -12,6 +12,7 @@ set -Eeuo pipefail
 #   - It does not import images into a live cluster.
 #   - It does not apply manifests.
 #   - It does not restart deployments.
+#   - It does not validate a live cluster.
 #
 # Output:
 #   dist/otp-relay-k8s-release-YYYYMMDD-HHMMSS-<gitsha>.tar.gz
@@ -35,20 +36,33 @@ INSTALLER_LIBS=(
   summary.sh
 )
 
-_bootstrap_log() { printf '[otp-relay-k8s] %s\n' "$*"; }
-_bootstrap_warn() { printf '[otp-relay-k8s] WARNING: %s\n' "$*" >&2; }
-_bootstrap_fatal() { printf '[otp-relay-k8s] ERROR: %s\n' "$*" >&2; exit 1; }
+_bootstrap_log() {
+  printf '[otp-relay-k8s] %s\n' "$*"
+}
+
+_bootstrap_warn() {
+  printf '[otp-relay-k8s] WARNING: %s\n' "$*" >&2
+}
+
+_bootstrap_fatal() {
+  printf '[otp-relay-k8s] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
 validate_launcher_layout() {
   local installer_lib installer_lib_path
 
-  [ -d "$SCRIPT_DIR/scripts/lib" ] || _bootstrap_fatal "missing installer library directory: $SCRIPT_DIR/scripts/lib"
+  [ -d "$SCRIPT_DIR/scripts/lib" ] ||
+    _bootstrap_fatal "missing installer library directory: $SCRIPT_DIR/scripts/lib"
 
   for installer_lib in "${INSTALLER_LIBS[@]}"; do
     installer_lib_path="$SCRIPT_DIR/scripts/lib/$installer_lib"
 
-    [ -f "$installer_lib_path" ] || _bootstrap_fatal "missing installer library: $installer_lib_path"
-    bash -n "$installer_lib_path" >/dev/null 2>&1 || _bootstrap_fatal "installer library has shell syntax errors: $installer_lib_path"
+    [ -f "$installer_lib_path" ] ||
+      _bootstrap_fatal "missing installer library: $installer_lib_path"
+
+    bash -n "$installer_lib_path" >/dev/null 2>&1 ||
+      _bootstrap_fatal "installer library has shell syntax errors: $installer_lib_path"
   done
 }
 
@@ -65,13 +79,13 @@ source_installer_libraries() {
 require_function() {
   local fn="$1"
 
-  declare -F "$fn" >/dev/null 2>&1 || _bootstrap_fatal "required bundle-builder function is missing after loading libraries: $fn"
+  declare -F "$fn" >/dev/null 2>&1 ||
+    _bootstrap_fatal "required bundle-builder function is missing after loading libraries: $fn"
 }
 
 require_bundle_builder_functions() {
   local fn
   local required_functions=(
-    need_root
     log
     warn
     fatal
@@ -96,11 +110,11 @@ require_bundle_builder_functions() {
 }
 
 normalize_bundle_mode_inputs() {
-  # DEPLOY_MODE is kept only as a packaging selector:
+  # DEPLOY_MODE is retained only as an artifact selector:
   #   full    -> package app + monitor runtime artifacts
   #   app     -> package app runtime artifacts
   #   monitor -> package monitor runtime artifacts
-  #   none    -> validate environment only, no artifacts
+  #   none    -> validate build inputs only, no runtime artifacts
   #
   # It no longer means "deploy".
   DEPLOY_MODE="${DEPLOY_MODE:-full}"
@@ -115,6 +129,12 @@ normalize_bundle_mode_inputs() {
   SKIP_KUBECTL_APPLY="1"
   SKIP_IMAGE_IMPORT="1"
   SKIP_ROLLOUT_RESTART="1"
+  SKIP_LIVE_CLUSTER_VALIDATE="1"
+  SKIP_GITHUB_RUNNER_INSTALL="1"
+  SKIP_VM_PROVISIONING="1"
+
+  DEPLOY_OTP_RELAY="0"
+  VALIDATE_OTP_RELAY="0"
 
   export SKIP_CLUSTER_DEPLOY
   export SKIP_K3S_INSTALL
@@ -122,14 +142,71 @@ normalize_bundle_mode_inputs() {
   export SKIP_KUBECTL_APPLY
   export SKIP_IMAGE_IMPORT
   export SKIP_ROLLOUT_RESTART
+  export SKIP_LIVE_CLUSTER_VALIDATE
+  export SKIP_GITHUB_RUNNER_INSTALL
+  export SKIP_VM_PROVISIONING
+  export DEPLOY_OTP_RELAY
+  export VALIDATE_OTP_RELAY
+}
+
+assert_bundle_only_runtime_contract() {
+  case "${RELEASE_MODE:-}" in
+    bundle) ;;
+    *)
+      _bootstrap_fatal "RELEASE_MODE must be bundle; got: ${RELEASE_MODE:-unset}"
+      ;;
+  esac
+
+  [ "${SKIP_CLUSTER_DEPLOY:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_CLUSTER_DEPLOY must be 1 in bundle-only mode"
+
+  [ "${SKIP_K3S_INSTALL:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_K3S_INSTALL must be 1 in bundle-only mode"
+
+  [ "${SKIP_HELM_INSTALL:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_HELM_INSTALL must be 1 in bundle-only mode"
+
+  [ "${SKIP_KUBECTL_APPLY:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_KUBECTL_APPLY must be 1 in bundle-only mode"
+
+  [ "${SKIP_IMAGE_IMPORT:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_IMAGE_IMPORT must be 1 in bundle-only mode"
+
+  [ "${SKIP_ROLLOUT_RESTART:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_ROLLOUT_RESTART must be 1 in bundle-only mode"
+
+  [ "${SKIP_LIVE_CLUSTER_VALIDATE:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_LIVE_CLUSTER_VALIDATE must be 1 in bundle-only mode"
+
+  [ "${SKIP_GITHUB_RUNNER_INSTALL:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_GITHUB_RUNNER_INSTALL must be 1 in bundle-only mode"
+
+  [ "${SKIP_VM_PROVISIONING:-0}" = "1" ] ||
+    _bootstrap_fatal "SKIP_VM_PROVISIONING must be 1 in bundle-only mode"
+
+  [ "${DEPLOY_OTP_RELAY:-0}" = "0" ] ||
+    _bootstrap_fatal "DEPLOY_OTP_RELAY must be 0 in bundle-only mode"
+
+  [ "${VALIDATE_OTP_RELAY:-0}" = "0" ] ||
+    _bootstrap_fatal "VALIDATE_OTP_RELAY must be 0 in bundle-only mode"
+}
+
+validate_artifact_selector() {
+  case "${DEPLOY_MODE:-full}" in
+    full|app|monitor|none) ;;
+    *)
+      _bootstrap_fatal "invalid artifact selector DEPLOY_MODE=${DEPLOY_MODE}; expected full, app, monitor, or none"
+      ;;
+  esac
 }
 
 print_bundle_mode_summary() {
   log "release mode: bundle-only"
   log "bundle behavior: build, render, export, checksum, and package final runtime artifacts"
   log "cluster behavior: disabled"
-  log "K3s install/import/apply/rollout: disabled"
-  log "deploy mode selector: ${DEPLOY_MODE:-full}"
+  log "K3s install/import/apply/rollout/live validation: disabled"
+  log "VM provisioning and GitHub runner installation: disabled"
+  log "artifact selector: ${DEPLOY_MODE:-full}"
 }
 
 print_failure_context() {
@@ -137,7 +214,7 @@ print_failure_context() {
   _bootstrap_warn "script directory: $SCRIPT_DIR"
   _bootstrap_warn "env file: ${ENV_FILE:-$SCRIPT_DIR/.env}"
   _bootstrap_warn "release mode: bundle-only"
-  _bootstrap_warn "deploy mode selector: ${DEPLOY_MODE:-full}"
+  _bootstrap_warn "artifact selector: ${DEPLOY_MODE:-full}"
   _bootstrap_warn "namespace default: ${NAMESPACE:-otp-relay}"
   _bootstrap_warn "cluster diagnostics skipped because this builder must not deploy anywhere"
 }
@@ -161,8 +238,14 @@ run_phase() {
   INSTALLER_CURRENT_PHASE="$phase_name"
   export INSTALLER_CURRENT_PHASE
 
+  assert_bundle_only_runtime_contract
+
   log "starting: $phase_name"
   "$@"
+
+  normalize_bundle_mode_inputs
+  assert_bundle_only_runtime_contract
+
   log "completed: $phase_name"
 }
 
@@ -173,8 +256,7 @@ main() {
   source_installer_libraries
   normalize_bundle_mode_inputs
   require_bundle_builder_functions
-
-  need_root
+  assert_bundle_only_runtime_contract
 
   export DEBIAN_FRONTEND=noninteractive
   export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
@@ -192,12 +274,15 @@ main() {
     export DEPLOY_MODE
   fi
 
+  validate_artifact_selector
+  normalize_bundle_mode_inputs
+  assert_bundle_only_runtime_contract
+
   run_phase "load or create installer environment" load_or_create_env
   normalize_bundle_mode_inputs
   run_phase "validate artifact selector" validate_deploy_mode
-  explain_deploy_mode
-
-  run_phase "detect host environment" detect_host_environment
+  run_phase "explain artifact selector" explain_deploy_mode
+  run_phase "detect build host environment" detect_host_environment
   run_phase "sync source tree if configured" sync_deployment_repo
   run_phase "validate source tree" validate_source_tree
   run_phase "build app assets if required" build_app_assets_if_required
@@ -209,6 +294,7 @@ main() {
 
   INSTALLER_CURRENT_PHASE="completed"
   log "OTP Relay Kubernetes release bundle completed successfully"
+  log "production server receives only the finished bundle"
 }
 
 main "$@"
