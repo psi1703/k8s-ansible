@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# App/frontend build, generated staging directory, and dry-run validation.
+# App/frontend build, generated staging directory, and bundle-only staging validation.
+#
+# Bundle-only rule:
+#   This library must never contact, mutate, validate, or depend on a live
+#   Kubernetes cluster.
+#
+# Forbidden here:
+#   - k3s kubectl apply
+#   - kubectl apply
+#   - kubectl rollout
+#   - namespace creation
+#   - live PVC inspection
+#   - live TLS secret inspection/creation
+#   - live observability validation
+#
+# The production server receives only the finished bundle.
 
 _run_checked() {
   local description="$1"
@@ -19,40 +34,62 @@ _dump_manifest_on_failure() {
   fi
 }
 
-_kubectl_dry_run_or_fatal() {
+_bundle_manifest_lint_or_fatal() {
   local file="$1"
   local label="${2:-$file}"
 
-  [ -f "$file" ] || fatal "cannot dry-run missing manifest: $file"
+  [ -f "$file" ] || fatal "cannot validate missing manifest: $file"
+  [ -s "$file" ] || fatal "manifest exists but is empty: $file"
 
-  log "dry-run validating $label"
-  if ! k3s kubectl apply --dry-run=client -f "$file" >/dev/null; then
+  log "bundle-only validating manifest file: $label"
+
+  if grep -n $'\r' "$file" >/dev/null 2>&1; then
+    fatal "manifest contains CRLF line endings: $label"
+  fi
+
+  if ! grep -Eq '^[[:space:]]*apiVersion:[[:space:]]*' "$file"; then
     _dump_manifest_on_failure "$file"
-    fatal "Kubernetes dry-run validation failed for $label"
+    fatal "manifest is missing apiVersion: $label"
+  fi
+
+  if ! grep -Eq '^[[:space:]]*kind:[[:space:]]*' "$file"; then
+    _dump_manifest_on_failure "$file"
+    fatal "manifest is missing kind: $label"
   fi
 }
 
+_forbidden_live_cluster_guard() {
+  local action="$1"
+
+  fatal "forbidden live-cluster action attempted in bundle-only build-stage.sh: $action"
+}
+
+_kubectl_dry_run_or_fatal() {
+  _forbidden_live_cluster_guard "kubectl dry-run"
+}
+
 _kubectl_apply_or_fatal() {
-  local file="$1"
-  local label="${2:-$file}"
-
-  [ -f "$file" ] || fatal "cannot apply missing manifest: $file"
-
-  log "applying $label"
-  if ! k3s kubectl apply -f "$file"; then
-    _dump_manifest_on_failure "$file"
-    fatal "Kubernetes apply failed for $label"
-  fi
+  _forbidden_live_cluster_guard "kubectl apply"
 }
 
 _validate_required_source_file() {
   local file="$1"
+
   [ -f "$file" ] || fatal "required source file is missing: $file"
 }
 
 _validate_required_source_dir() {
   local dir="$1"
+
   [ -d "$dir" ] || fatal "required source directory is missing: $dir"
+}
+
+requires_app_artifacts() {
+  requires_app_image
+}
+
+requires_monitor_artifacts() {
+  requires_monitor_image
 }
 
 validate_frontend_source_tree() {
@@ -76,20 +113,20 @@ validate_frontend_source_tree() {
 }
 
 build_app_assets_if_required() {
-  if requires_app_image; then
+  if requires_app_artifacts; then
     log "preparing installer Python environment for app validation/help docs"
     _validate_required_source_file requirements.txt
 
-    log "creating/updating .installer-venv; this may take a moment"
+    log "creating/updating .installer-venv"
     python3 -m venv .installer-venv
 
     _run_checked "upgrading installer Python packaging tools" \
       .installer-venv/bin/python -m pip install --upgrade pip setuptools wheel
 
-    _run_checked "installing Python requirements from requirements.txt; this may take a few minutes" \
+    _run_checked "installing Python requirements from requirements.txt" \
       .installer-venv/bin/python -m pip install -r requirements.txt
 
-    if [ "$SKIP_HELP_DOCS_BUILD" = "1" ]; then
+    if [ "${SKIP_HELP_DOCS_BUILD:-0}" = "1" ]; then
       log "skipping help docs build because SKIP_HELP_DOCS_BUILD=1"
     else
       _validate_required_source_file scripts/build_help_docs.py
@@ -103,7 +140,7 @@ build_app_assets_if_required() {
     log "removing stale generated frontend bundle before rebuild"
     rm -f frontend/app.js frontend/app.raw.js
 
-    _run_checked "installing frontend build dependencies from committed package-lock.json; npm ci may take a few minutes" \
+    _run_checked "installing frontend build dependencies from committed package-lock.json" \
       npm ci
     log "frontend dependencies installed"
 
@@ -127,7 +164,7 @@ build_app_assets_if_required() {
 
     log "frontend production bundle generated and validated: frontend/app.js"
   else
-    log "DEPLOY_MODE=$DEPLOY_MODE does not require app help-doc/frontend build; skipping installer venv and npm build"
+    log "artifact selector DEPLOY_MODE=${DEPLOY_MODE:-full} does not require app help-doc/frontend build; skipping"
   fi
 
   if [ -f k8s/observability/dashboards/otp-relay-live.json ]; then
@@ -148,11 +185,11 @@ validate_dockerfile_packaging() {
   [ -f "$APP_DOCKERFILE" ] || fatal "app Dockerfile is missing: $APP_DOCKERFILE"
   [ -f "$MONITOR_DOCKERFILE" ] || fatal "monitor Dockerfile is missing: $MONITOR_DOCKERFILE"
 
-  if requires_app_image; then
+  if requires_app_artifacts; then
     log "validating app Dockerfile includes otp_relay package and generated frontend"
     _validate_required_source_dir otp_relay
     _validate_required_source_file main.py
-    [ -f frontend/app.js ] || fatal "frontend/app.js must exist before Docker image build"
+    [ -f frontend/app.js ] || fatal "frontend/app.js must exist before Docker image build/export"
 
     grep -Eq 'COPY[[:space:]].*otp_relay' "$APP_DOCKERFILE" || \
       fatal "$APP_DOCKERFILE must copy otp_relay/ into the image because main.py imports otp_relay.routes"
@@ -165,7 +202,7 @@ validate_dockerfile_packaging() {
     fi
   fi
 
-  if requires_monitor_image; then
+  if requires_monitor_artifacts; then
     log "validating monitor Dockerfile includes otp_monitor package"
     _validate_required_source_dir otp_monitor
     _validate_required_source_file monitor.py
@@ -215,12 +252,12 @@ validate_staging_source_layout() {
 }
 
 copy_manifests_to_staging() {
-  log "copying base Kubernetes manifests into staging directory"
+  log "copying base Kubernetes manifests into release staging directory"
   cp "$SOURCE_MANIFEST_DIR"/*.yaml "$MANIFEST_DIR"/
   rm -f "$MANIFEST_DIR/secret-example.env"
 
   if [ -d "$SOURCE_OBSERVABILITY_DIR" ]; then
-    log "copying observability manifests into staging directory"
+    log "copying observability manifests into release staging directory"
     mkdir -p "$OBSERVABILITY_DIR"
     find "$SOURCE_OBSERVABILITY_DIR" -maxdepth 1 -type f -name '*.yaml' -exec cp {} "$OBSERVABILITY_DIR"/ \;
   else
@@ -231,12 +268,12 @@ copy_manifests_to_staging() {
 validate_python_sources() {
   log "validating Python syntax"
 
-  if requires_app_image; then
+  if requires_app_artifacts; then
     log "checking Python syntax for app sources"
     python3 -m py_compile main.py otp_relay/*.py
   fi
 
-  if requires_monitor_image; then
+  if requires_monitor_artifacts; then
     log "checking Python syntax for monitor sources"
     python3 -m py_compile monitor.py otp_monitor/*.py
   fi
@@ -244,32 +281,34 @@ validate_python_sources() {
   log "Python syntax validation completed"
 }
 
-validate_existing_app_pvc_storage_class() {
-  local existing_pvc_storage_class=""
+configure_bundle_storage_class() {
+  log "configuring bundle storage class values without live PVC inspection"
 
-  log "checking existing otp-relay-data PVC storage class"
-  existing_pvc_storage_class="$(k3s kubectl get pvc otp-relay-data -n "$NAMESPACE" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
-  existing_pvc_storage_class="$(printf '%s' "$existing_pvc_storage_class" | xargs)"
+  if [ "${NFS_ENABLED:-0}" = "1" ]; then
+    [ -n "${NFS_STORAGE_CLASS:-}" ] || fatal "NFS_ENABLED=1 but NFS_STORAGE_CLASS is not set"
 
-  if [ "$NFS_ENABLED" = "1" ]; then
-    log "NFS storage enabled; ensuring PVC_STORAGE_CLASS uses $NFS_STORAGE_CLASS"
     if [ -z "${PVC_STORAGE_CLASS:-}" ]; then
       PVC_STORAGE_CLASS="$NFS_STORAGE_CLASS"
       export PVC_STORAGE_CLASS
+      log "PVC_STORAGE_CLASS not set; using NFS_STORAGE_CLASS=$NFS_STORAGE_CLASS"
     fi
-  elif [ -n "$existing_pvc_storage_class" ] && [ -z "${PVC_STORAGE_CLASS:-}" ]; then
-    warn "PVC otp-relay-data already exists with storageClassName=$existing_pvc_storage_class; preserving it"
-    PVC_STORAGE_CLASS="$existing_pvc_storage_class"
-    export PVC_STORAGE_CLASS
-  fi
-
-  if [ -n "$existing_pvc_storage_class" ] && [ -n "${PVC_STORAGE_CLASS:-}" ] && [ "$PVC_STORAGE_CLASS" != "$existing_pvc_storage_class" ]; then
-    fatal "PVC otp-relay-data already exists with storageClassName=$existing_pvc_storage_class; refusing to change immutable storageClassName to $PVC_STORAGE_CLASS"
   fi
 }
 
-dry_run_core_otp_relay_manifests() {
-  log "dry-run validating core OTP Relay manifests"
+validate_existing_app_pvc_storage_class() {
+  configure_bundle_storage_class
+}
+
+validate_rendered_manifest_files() {
+  log "validating rendered manifest files without contacting a cluster"
+
+  [ -d "$MANIFEST_DIR" ] || fatal "rendered manifest directory is missing: $MANIFEST_DIR"
+
+  _bundle_manifest_lint_or_fatal "$MANIFEST_DIR/namespace.yaml" "namespace.yaml"
+
+  if [ "${NFS_ENABLED:-0}" = "1" ] && [ -f "$MANIFEST_DIR/pv-nfs.yaml" ]; then
+    _bundle_manifest_lint_or_fatal "$MANIFEST_DIR/pv-nfs.yaml" "pv-nfs.yaml"
+  fi
 
   for core_manifest in \
     configmap.yaml \
@@ -278,42 +317,56 @@ dry_run_core_otp_relay_manifests() {
     service.yaml \
     deployment-monitor.yaml \
     monitor-service.yaml; do
-    _kubectl_dry_run_or_fatal "$MANIFEST_DIR/$core_manifest" "$core_manifest"
+    _bundle_manifest_lint_or_fatal "$MANIFEST_DIR/$core_manifest" "$core_manifest"
   done
 
-  if [ "$INGRESS_ENABLED" = "1" ] && [ -f "$MANIFEST_DIR/ingress.yaml" ]; then
-    _kubectl_dry_run_or_fatal "$MANIFEST_DIR/ingress.yaml" "ingress.yaml"
+  if [ "${INGRESS_ENABLED:-0}" = "1" ] && [ -f "$MANIFEST_DIR/ingress.yaml" ]; then
+    _bundle_manifest_lint_or_fatal "$MANIFEST_DIR/ingress.yaml" "ingress.yaml"
   fi
+
+  if [ "${REDIS_ENABLED:-0}" = "1" ]; then
+    for redis_manifest in \
+      redis-nfs-pv.yaml \
+      redis-service.yaml \
+      redis-configmap.yaml \
+      redis-statefulset.yaml \
+      redis-sentinel-configmap.yaml \
+      redis-sentinel-deployment.yaml \
+      redis-sentinel-service.yaml \
+      redis-haproxy-configmap.yaml \
+      redis-haproxy-deployment.yaml \
+      otp-relay-pdb.yaml \
+      redis-pdb.yaml \
+      redis-sentinel-pdb.yaml \
+      redis-haproxy-pdb.yaml; do
+      if [ -f "$MANIFEST_DIR/$redis_manifest" ]; then
+        _bundle_manifest_lint_or_fatal "$MANIFEST_DIR/$redis_manifest" "$redis_manifest"
+      fi
+    done
+  fi
+
+  if [ -d "${OBSERVABILITY_DIR:-}" ]; then
+    find "$OBSERVABILITY_DIR" -maxdepth 1 -type f -name '*.yaml' -print0 |
+      while IFS= read -r -d '' observability_manifest; do
+        _bundle_manifest_lint_or_fatal "$observability_manifest" "observability/$(basename "$observability_manifest")"
+      done
+  fi
+
+  log "rendered manifest file validation completed"
+}
+
+dry_run_core_otp_relay_manifests() {
+  validate_rendered_manifest_files
 }
 
 dry_run_redis_manifests() {
-  [ "$REDIS_ENABLED" = "1" ] || return 0
-
-  log "dry-run validating Redis manifests"
-  for redis_manifest in \
-    redis-nfs-pv.yaml \
-    redis-service.yaml \
-    redis-configmap.yaml \
-    redis-statefulset.yaml \
-    redis-sentinel-configmap.yaml \
-    redis-sentinel-deployment.yaml \
-    redis-sentinel-service.yaml \
-    redis-haproxy-configmap.yaml \
-    redis-haproxy-deployment.yaml \
-    otp-relay-pdb.yaml \
-    redis-pdb.yaml \
-    redis-sentinel-pdb.yaml \
-    redis-haproxy-pdb.yaml; do
-    if [ -f "$MANIFEST_DIR/$redis_manifest" ]; then
-      _kubectl_dry_run_or_fatal "$MANIFEST_DIR/$redis_manifest" "$redis_manifest"
-    fi
-  done
+  validate_rendered_manifest_files
 }
 
 stage_and_validate_manifests() {
-  log "staging repository Dockerfiles and Kubernetes manifests for deployment"
+  log "staging repository Dockerfiles and Kubernetes manifests for release bundle"
 
-  GENERATED_DIR="$(mktemp -d /tmp/otp-relay-k8s.XXXXXX)"
+  GENERATED_DIR="$(mktemp -d /tmp/otp-relay-k8s-bundle.XXXXXX)"
   SOURCE_MANIFEST_DIR="k8s/manifests"
   SOURCE_OBSERVABILITY_DIR="k8s/observability"
   MANIFEST_DIR="$GENERATED_DIR/manifests"
@@ -327,17 +380,23 @@ stage_and_validate_manifests() {
 
   trap cleanup_generated_assets EXIT
 
-  export GENERATED_DIR SOURCE_MANIFEST_DIR SOURCE_OBSERVABILITY_DIR MANIFEST_DIR OBSERVABILITY_DIR APP_DOCKERFILE MONITOR_DOCKERFILE
+  export GENERATED_DIR
+  export SOURCE_MANIFEST_DIR
+  export SOURCE_OBSERVABILITY_DIR
+  export MANIFEST_DIR
+  export OBSERVABILITY_DIR
+  export APP_DOCKERFILE
+  export MONITOR_DOCKERFILE
 
-  log "generated staging directory: $GENERATED_DIR"
+  log "generated release staging directory: $GENERATED_DIR"
   mkdir -p "$MANIFEST_DIR"
 
   validate_staging_source_layout
   validate_dockerfile_packaging
   copy_manifests_to_staging
-  validate_existing_app_pvc_storage_class
+  configure_bundle_storage_class
 
-  log "rendering Kubernetes manifests from .env configuration"
+  log "rendering Kubernetes manifests from .env configuration for bundle"
   render_manifests
   log "manifest rendering completed"
 
@@ -346,25 +405,10 @@ stage_and_validate_manifests() {
   fi
 
   validate_python_sources
+  validate_rendered_manifest_files
 
-  _kubectl_dry_run_or_fatal "$MANIFEST_DIR/namespace.yaml" "namespace.yaml"
+  log "TLS secret creation/check is skipped in bundle-only mode"
+  log "production TLS material must be handled by the approved production-side procedure"
 
-  if [ "$NFS_ENABLED" = "1" ] && [ -f "$MANIFEST_DIR/pv-nfs.yaml" ]; then
-    _kubectl_dry_run_or_fatal "$MANIFEST_DIR/pv-nfs.yaml" "pv-nfs.yaml"
-  fi
-
-  log "ensuring namespace exists before secret/TLS validation"
-  _kubectl_apply_or_fatal "$MANIFEST_DIR/namespace.yaml" "namespace.yaml"
-
-  log "checking TLS secret requirements"
-  ensure_tls_secret_if_requested
-  ensure_tls_secret_available_if_required
-
-  dry_run_core_otp_relay_manifests
-  dry_run_redis_manifests
-
-  log "dry-run validating observability manifests if present"
-  dry_run_observability_manifests
-
-  log "manifest staging and validation completed"
+  log "manifest staging and bundle-only validation completed"
 }
