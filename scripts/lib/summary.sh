@@ -118,8 +118,8 @@ check_working_tree_cleanliness() {
 
 write_install_report() {
   local report_file="${INSTALL_REPORT_PATH:-}"
-  local namespace="${NAMESPACE:-otp-relay}"
-  local observability_namespace="${OBSERVABILITY_NAMESPACE:-observability}"
+  local namespace="${NAMESPACE:-otp-relay-devprod}"
+  local observability_namespace="${OBSERVABILITY_NAMESPACE:-observability-devprod}"
 
   if [ -z "$report_file" ]; then
     report_file="$(summary_install_report_path)"
@@ -156,7 +156,7 @@ App node selector:       $(summary_value "${APP_NODE_SELECTOR_KEY:-}" "none")=${
 Monitor node selector:   $(summary_value "${MONITOR_NODE_SELECTOR_KEY:-}" "none")=${MONITOR_NODE_SELECTOR_VALUE:-}
 Redis node selector:     $(summary_value "${REDIS_NODE_SELECTOR_KEY:-}" "none")=${REDIS_NODE_SELECTOR_VALUE:-}
 PVC storage:             ${PVC_STORAGE_CLASS:-default} / ${PVC_SIZE:-unknown}
-NFS app storage:         $(summary_bool_enabled "${NFS_ENABLED:-0}") server=$(summary_value "${NFS_SERVER:-}" "none") path=$(summary_value "${NFS_PATH:-}" "none") class=${NFS_STORAGE_CLASS:-nfs-client} pv=${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}
+NFS app storage:         $(summary_bool_enabled "${NFS_ENABLED:-0}") server=$(summary_value "${NFS_SERVER:-}" "none") path=$(summary_value "${NFS_PATH:-}" "none") class=${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs} pv=${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}
 Redis:                   enabled=${REDIS_ENABLED:-0} required=${REDIS_REQUIRED:-0} url=${REDIS_URL:-none} storage=${REDIS_STORAGE_CLASS:-default}/${REDIS_SIZE:-unknown} spread_recreate_pvcs=${REDIS_SPREAD_RECREATE_PVCS:-0}
 Image distribution:      enabled=${DISTRIBUTE_IMAGES_TO_NODES:-0} importer=${IMAGE_IMPORTER_IMAGE:-none} port=${IMAGE_DISTRIBUTION_PORT:-none}
 Observability:           namespace=$observability_namespace install_stack=${OBSERVABILITY_INSTALL_STACK:-1} grafana_host=${GRAFANA_HOST:-grafana-devprod.init-db.lan} chart=${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}
@@ -187,10 +187,9 @@ EOF_REPORT
 }
 
 print_deployment_summary() {
-  local namespace="${NAMESPACE:-otp-relay}"
-  local observability_namespace="${OBSERVABILITY_NAMESPACE:-observability}"
+  local namespace="${NAMESPACE:-otp-relay-devprod}"
+  local observability_namespace="${OBSERVABILITY_NAMESPACE:-observability-devprod}"
   local traefik_address=""
-  local tls_readyz_command=""
   local portal_url_summary=""
 
   NODEPORT_SUMMARY="disabled"
@@ -243,7 +242,7 @@ App node selector:     ${APP_NODE_SELECTOR_KEY:-none}=${APP_NODE_SELECTOR_VALUE:
 Monitor node selector: ${MONITOR_NODE_SELECTOR_KEY:-none}=${MONITOR_NODE_SELECTOR_VALUE:-}
 Redis node selector:   ${REDIS_NODE_SELECTOR_KEY:-none}=${REDIS_NODE_SELECTOR_VALUE:-}
 PVC storage:           ${PVC_STORAGE_CLASS:-default} / ${PVC_SIZE:-unknown}
-NFS app storage:       enabled=${NFS_ENABLED:-0} server=${NFS_SERVER:-none} path=${NFS_PATH:-none} class=${NFS_STORAGE_CLASS:-nfs-client} pv=${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}
+NFS app storage:       enabled=${NFS_ENABLED:-0} server=${NFS_SERVER:-none} path=${NFS_PATH:-none} class=${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs} pv=${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}
 Redis:                 enabled=${REDIS_ENABLED:-0} required=${REDIS_REQUIRED:-0} url=${REDIS_URL:-none} storage=${REDIS_STORAGE_CLASS:-default}/${REDIS_SIZE:-unknown} spread_recreate_pvcs=${REDIS_SPREAD_RECREATE_PVCS:-0}
 Image distribution:    enabled=${DISTRIBUTE_IMAGES_TO_NODES:-0} importer=${IMAGE_IMPORTER_IMAGE:-none} port=${IMAGE_DISTRIBUTION_PORT:-none}
 Observability:         namespace=$observability_namespace install_stack=${OBSERVABILITY_INSTALL_STACK:-1} grafana_host=${GRAFANA_HOST:-grafana-devprod.init-db.lan} chart=${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}
