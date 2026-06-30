@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Shared image artifact helpers for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Build/export image archives only.
+#   - Do not import images into a live cluster.
+#   - Do not query Kubernetes nodes.
+#   - Do not create Kubernetes DaemonSets.
+#   - Do not run kubectl/k3s kubectl.
+#   - Do not start temporary HTTP image distribution servers for cluster nodes.
+#
+# The production server receives only the finished bundle.
 
 image_distribution_server_ip() {
+  # Kept only for compatibility with older references.
+  # Bundle-only release builds must not distribute images to cluster nodes.
   if [ -n "${IMAGE_DISTRIBUTION_HOST:-}" ]; then
     printf '%s\n' "$IMAGE_DISTRIBUTION_HOST"
     return 0
@@ -22,249 +35,145 @@ sanitize_k8s_name() {
     | cut -c1-48
 }
 
+_forbid_live_image_distribution() {
+  local action="$1"
+
+  fatal "forbidden live image operation in bundle-only mode: $action"
+}
+
 wait_for_importer_logs() {
-  local namespace="$1"
-  local selector="$2"
-  local expected="$3"
-  local timeout_seconds="$4"
-  local start_ts
-  local now_ts
-  local elapsed=0
-  local last_progress=0
-
-  start_ts="$(date +%s)"
-  log "waiting for image importer completion on $expected node(s); timeout=${timeout_seconds}s"
-
-  while true; do
-    local pod_rows=""
-    local completed_nodes=""
-    local completed_count=0
-
-    pod_rows="$(
-      k3s kubectl get pods -n "$namespace" -l "$selector" \
-        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{" "}{.status.phase}{"\n"}{end}' 2>/dev/null || true
-    )"
-
-    while read -r pod node phase; do
-      [ -n "$pod" ] || continue
-      if k3s kubectl logs -n "$namespace" "$pod" -c importer --tail=-1 2>/dev/null | grep -q 'IMAGE_IMPORT_DONE'; then
-        completed_nodes="${completed_nodes}${node} "
-        completed_count=$((completed_count + 1))
-      fi
-    done <<EOF_IMPORTER_ROWS
-$pod_rows
-EOF_IMPORTER_ROWS
-
-    completed_nodes="$(printf '%s' "$completed_nodes" | xargs || true)"
-
-    if [ "$completed_count" -ge "$expected" ]; then
-      log "image importer completed on $completed_count/$expected node(s): ${completed_nodes:-unknown}"
-      return 0
-    fi
-
-    now_ts="$(date +%s)"
-    elapsed=$((now_ts - start_ts))
-
-    if [ "$elapsed" -ge "$timeout_seconds" ]; then
-      warn "image importer completed on $completed_count/$expected node(s): ${completed_nodes:-none}"
-      warn "image importer pod status:"
-      k3s kubectl get pods -n "$namespace" -l "$selector" -o wide >&2 || true
-
-      warn "image importer logs by pod:"
-      while read -r pod node phase; do
-        [ -n "$pod" ] || continue
-        warn "----- importer pod=$pod node=${node:-unknown} phase=${phase:-unknown} -----"
-        k3s kubectl logs -n "$namespace" "$pod" -c importer --tail=160 >&2 || true
-      done <<EOF_IMPORTER_ROWS
-$pod_rows
-EOF_IMPORTER_ROWS
-
-      return 1
-    fi
-
-    if [ $((elapsed - last_progress)) -ge 30 ]; then
-      last_progress="$elapsed"
-      log "still waiting for image importer completion after ${elapsed}s: $completed_count/$expected node(s) done"
-      k3s kubectl get pods -n "$namespace" -l "$selector" -o wide || true
-    fi
-
-    sleep 3
-  done
+  _forbid_live_image_distribution "waiting for Kubernetes image importer pod logs"
 }
 
 distribute_image_tar_to_all_nodes() {
+  _forbid_live_image_distribution "distributing image tar to live K3s nodes"
+}
+
+validate_image_archive_file() {
   local image_name="$1"
   local tar_path="$2"
-  local label_suffix="$3"
 
-  [ "$DISTRIBUTE_IMAGES_TO_NODES" = "1" ] || {
-    log "DISTRIBUTE_IMAGES_TO_NODES=0; skipping cross-node image distribution for $image_name"
+  [ -n "$image_name" ] || fatal "image name is empty"
+  [ -n "$tar_path" ] || fatal "image archive path is empty for $image_name"
+  [ -f "$tar_path" ] || fatal "image archive does not exist for $image_name: $tar_path"
+  [ -s "$tar_path" ] || fatal "image archive is empty for $image_name: $tar_path"
+
+  case "$tar_path" in
+    *.tar|*.tar.gz|*.tgz|*.oci|*.oci.tar|*.oci.tar.gz) ;;
+    *)
+      warn "image archive has an unusual extension for $image_name: $tar_path"
+      ;;
+  esac
+}
+
+image_archive_checksum() {
+  local tar_path="$1"
+
+  [ -f "$tar_path" ] || fatal "cannot checksum missing image archive: $tar_path"
+  sha256sum "$tar_path" | awk '{print $1}'
+}
+
+write_image_archive_metadata() {
+  local image_name="$1"
+  local tar_path="$2"
+  local metadata_file="$3"
+  local checksum
+
+  validate_image_archive_file "$image_name" "$tar_path"
+  checksum="$(image_archive_checksum "$tar_path")"
+
+  mkdir -p "$(dirname "$metadata_file")"
+
+  {
+    printf 'IMAGE_NAME=%s\n' "$image_name"
+    printf 'IMAGE_ARCHIVE=%s\n' "$(basename "$tar_path")"
+    printf 'IMAGE_ARCHIVE_SHA256=%s\n' "$checksum"
+    printf 'BUNDLE_ONLY=1\n'
+    printf 'IMPORTED_TO_CLUSTER=0\n'
+  } > "$metadata_file"
+}
+
+copy_image_archive_to_release_dir() {
+  local image_name="$1"
+  local tar_path="$2"
+  local release_image_dir="$3"
+  local dest_path
+  local metadata_file
+
+  validate_image_archive_file "$image_name" "$tar_path"
+
+  mkdir -p "$release_image_dir"
+  dest_path="$release_image_dir/$(basename "$tar_path")"
+
+  log "copying image archive for bundle: $image_name -> $dest_path"
+  cp -f "$tar_path" "$dest_path"
+
+  metadata_file="$release_image_dir/$(basename "$tar_path").metadata.env"
+  write_image_archive_metadata "$image_name" "$dest_path" "$metadata_file"
+
+  log "image archive staged for bundle: $dest_path"
+}
+
+collect_existing_image_archives() {
+  local output_file="$1"
+  local search_dir
+
+  : > "$output_file"
+
+  for search_dir in \
+    "${GENERATED_DIR:-}/images" \
+    "${GENERATED_DIR:-}/image-archives" \
+    "${SCRIPT_DIR:-.}/images" \
+    "${SCRIPT_DIR:-.}/image-archives" \
+    "${SCRIPT_DIR:-.}/artifacts/images" \
+    "${SCRIPT_DIR:-.}/artifacts/image-archives" \
+    "${SCRIPT_DIR:-.}/dist/images" \
+    "${SCRIPT_DIR:-.}/dist/image-archives"; do
+    [ -n "$search_dir" ] || continue
+    [ -d "$search_dir" ] || continue
+
+    find "$search_dir" -maxdepth 1 -type f \( \
+      -name '*.tar' -o \
+      -name '*.tar.gz' -o \
+      -name '*.tgz' -o \
+      -name '*.oci' -o \
+      -name '*.oci.tar' -o \
+      -name '*.oci.tar.gz' \
+    \) -print >> "$output_file"
+  done
+
+  sort -u "$output_file" -o "$output_file"
+}
+
+stage_existing_image_archives_for_bundle() {
+  local release_image_dir="$1"
+  local archive_list
+  local archive
+  local image_name
+
+  archive_list="$(mktemp /tmp/otp-relay-image-archives.XXXXXX)"
+  collect_existing_image_archives "$archive_list"
+
+  if [ ! -s "$archive_list" ]; then
+    rm -f "$archive_list"
+    warn "no existing image archives found to stage"
+    warn "image build/export may be handled by scripts/lib/docker.sh or another bundle phase"
     return 0
-  }
-
-  [ -f "$tar_path" ] || fatal "image tar does not exist: $tar_path"
-
-  local node_count
-  node_count="$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 == "Ready" {count++} END {print count+0}')"
-  node_count="$(printf '%s' "$node_count" | xargs)"
-  node_count="${node_count:-0}"
-
-  if [ "$node_count" -le 1 ]; then
-    log "single ready node detected; no cross-node image distribution needed for $image_name"
-    return 0
   fi
 
-  local serve_ip
-  serve_ip="$(image_distribution_server_ip | xargs)"
-  [ -n "$serve_ip" ] || fatal "could not determine image distribution host IP"
+  while IFS= read -r archive; do
+    [ -n "$archive" ] || continue
+    image_name="$(basename "$archive")"
+    copy_image_archive_to_release_dir "$image_name" "$archive" "$release_image_dir"
+  done < "$archive_list"
 
-  local serve_dir
-  local tar_name
-  local ds_name
-  local app_label
-  local http_pid
-  local http_log
+  rm -f "$archive_list"
+}
 
-  serve_dir="$(dirname "$tar_path")"
-  tar_name="$(basename "$tar_path")"
-  ds_name="image-importer-$(sanitize_k8s_name "$label_suffix")"
-  app_label="otp-relay-image-importer-${label_suffix}"
-  http_log="$GENERATED_DIR/${ds_name}-http.log"
+assert_image_distribution_disabled() {
+  [ "${DISTRIBUTE_IMAGES_TO_NODES:-0}" != "1" ] ||
+    fatal "DISTRIBUTE_IMAGES_TO_NODES=1 is forbidden in bundle-only mode"
 
-  local selected_port
-
-  selected_port="$(
-    python3 - "$IMAGE_DISTRIBUTION_PORT" <<'PY'
-import socket
-import sys
-
-start = int(sys.argv[1])
-end = start + 50
-
-for port in range(start, end):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("0.0.0.0", port))
-        print(port)
-        sys.exit(0)
-    except OSError:
-        pass
-    finally:
-        sock.close()
-
-sys.exit(1)
-PY
-  )" || fatal "could not find a free image distribution port starting at $IMAGE_DISTRIBUTION_PORT"
-
-  if [ "$selected_port" != "$IMAGE_DISTRIBUTION_PORT" ]; then
-    log "IMAGE_DISTRIBUTION_PORT=$IMAGE_DISTRIBUTION_PORT is busy; using free port $selected_port"
-    IMAGE_DISTRIBUTION_PORT="$selected_port"
-  fi
-  
-  log "distributing image $image_name to $node_count ready K3s node(s) without a registry"
-  log "image tar path: $tar_path"
-  log "temporary image tar URL: http://${serve_ip}:${IMAGE_DISTRIBUTION_PORT}/${tar_name}"
-  log "starting temporary image tar server on ${serve_ip}:${IMAGE_DISTRIBUTION_PORT}"
-
-  python3 -m http.server "$IMAGE_DISTRIBUTION_PORT" --bind 0.0.0.0 --directory "$serve_dir" >"$http_log" 2>&1 &
-  http_pid="$!"
-
-  sleep 2
-
-  if ! kill -0 "$http_pid" >/dev/null 2>&1; then
-    cat "$http_log" >&2 || true
-    fatal "failed to start temporary image distribution server on port $IMAGE_DISTRIBUTION_PORT"
-  fi
-
-  log "temporary image tar server started with pid $http_pid; log=$http_log"
-
-  cleanup_image_importer() {
-    log "cleaning up image importer resources for $image_name"
-    k3s kubectl delete daemonset "$ds_name" -n "$NAMESPACE" --ignore-not-found=true >/dev/null 2>&1 || true
-
-    if [ -n "${http_pid:-}" ]; then
-      kill "$http_pid" >/dev/null 2>&1 || true
-      wait "$http_pid" >/dev/null 2>&1 || true
-    fi
-  }
-
-  log "removing any previous image importer DaemonSet: $NAMESPACE/$ds_name"
-  k3s kubectl delete daemonset "$ds_name" -n "$NAMESPACE" --ignore-not-found=true >/dev/null 2>&1 || true
-
-  log "creating image importer DaemonSet $NAMESPACE/$ds_name"
-  cat <<EOF_IMPORTER | k3s kubectl apply -f -
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: $ds_name
-  namespace: $NAMESPACE
-  labels:
-    app: $app_label
-spec:
-  selector:
-    matchLabels:
-      app: $app_label
-  template:
-    metadata:
-      labels:
-        app: $app_label
-    spec:
-      hostNetwork: true
-      tolerations:
-        - operator: Exists
-      restartPolicy: Always
-      containers:
-        - name: importer
-          image: $IMAGE_IMPORTER_IMAGE
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            privileged: true
-          command:
-            - sh
-            - -c
-            - |
-              set -eu
-              echo "Downloading image tar for $image_name from http://$serve_ip:$IMAGE_DISTRIBUTION_PORT/$tar_name"
-              wget -O /tmp/image.tar "http://$serve_ip:$IMAGE_DISTRIBUTION_PORT/$tar_name"
-              /host-bin/k3s ctr images import /tmp/image.tar
-              rm -f /tmp/image.tar
-              echo IMAGE_IMPORT_DONE
-              sleep 3600
-          volumeMounts:
-            - name: k3s-bin
-              mountPath: /host-bin/k3s
-              readOnly: true
-            - name: containerd-sock
-              mountPath: /run/k3s/containerd/containerd.sock
-      volumes:
-        - name: k3s-bin
-          hostPath:
-            path: /usr/local/bin/k3s
-            type: File
-        - name: containerd-sock
-          hostPath:
-            path: /run/k3s/containerd/containerd.sock
-            type: Socket
-EOF_IMPORTER
-
-  log "waiting for image importer DaemonSet rollout; this can take a few minutes on fresh worker nodes"
-  if ! k3s kubectl rollout status daemonset/"$ds_name" -n "$NAMESPACE" --timeout=180s; then
-    warn "image importer DaemonSet did not become ready; dumping diagnostics"
-    k3s kubectl get pods -n "$NAMESPACE" -l "app=$app_label" -o wide || true
-    k3s kubectl describe daemonset "$ds_name" -n "$NAMESPACE" || true
-    cleanup_image_importer
-    fatal "image importer DaemonSet did not become ready"
-  fi
-  log "image importer DaemonSet rollout completed"
-
-  if ! wait_for_importer_logs "$NAMESPACE" "app=$app_label" "$node_count" 180; then
-    warn "image import did not complete on every expected importer pod; dumping logs"
-    k3s kubectl get pods -n "$NAMESPACE" -l "app=$app_label" -o wide || true
-    k3s kubectl logs -n "$NAMESPACE" -l "app=$app_label" --tail=100 --prefix=true || true
-    cleanup_image_importer
-    fatal "image import did not complete on every expected importer pod for $image_name; see node-specific importer logs above"
-  fi
-
-  cleanup_image_importer
-  log "image $image_name imported on all ready K3s nodes"
+  [ "${SKIP_IMAGE_IMPORT:-1}" = "1" ] ||
+    fatal "SKIP_IMAGE_IMPORT must be 1 in bundle-only mode"
 }
