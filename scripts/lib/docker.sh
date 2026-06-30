@@ -122,7 +122,7 @@ build_and_export_image_archive() {
   local dockerfile="$2"
   local output_tar="$3"
   local context_dir="${4:-.}"
-  local metadata_file
+  local metadata_file=""
 
   docker_build_image "$image_ref" "$dockerfile" "$context_dir"
   docker_save_image_archive "$image_ref" "$output_tar"
@@ -137,32 +137,25 @@ build_and_export_image_archive() {
   log "image archive metadata written: $metadata_file"
 }
 
-release_image_tag() {
-  local base_ref="$1"
-  local fallback_name="$2"
-  local release_tag="${RELEASE_TAG:-${GIT_SHORT_SHA:-bundle}}"
+release_image_ref_or_fatal() {
+  local image_ref="$1"
+  local label="$2"
 
-  if [ -n "$base_ref" ]; then
-    case "$base_ref" in
-      *:*)
-        printf '%s\n' "$base_ref"
-        ;;
-      *)
-        printf '%s:%s\n' "$base_ref" "$release_tag"
-        ;;
-    esac
-    return 0
-  fi
+  [ -n "$image_ref" ] || fatal "$label image reference is empty"
 
-  printf 'otp-relay/%s:%s\n' "$fallback_name" "$release_tag"
+  case "$image_ref" in
+    *[[:space:]]*) fatal "$label image reference must not contain whitespace: $image_ref" ;;
+  esac
+
+  printf '%s\n' "$image_ref"
 }
 
 export_release_images_if_required() {
-  local image_output_dir
-  local app_image_ref
-  local monitor_image_ref
-  local app_archive_name
-  local monitor_archive_name
+  local image_output_dir=""
+  local app_image_ref=""
+  local monitor_image_ref=""
+  local app_archive_name=""
+  local monitor_archive_name=""
 
   if [ "${DEPLOY_MODE:-full}" = "none" ]; then
     log "artifact selector DEPLOY_MODE=none; skipping release image archive export"
@@ -182,9 +175,7 @@ export_release_images_if_required() {
     [ -n "${APP_DOCKERFILE:-}" ] || fatal "APP_DOCKERFILE is not set"
     [ -f "$APP_DOCKERFILE" ] || fatal "app Dockerfile is missing: $APP_DOCKERFILE"
 
-    app_image_ref="$(release_image_tag "${APP_IMAGE:-}" "otp-relay-app")"
-    APP_IMAGE="$app_image_ref"
-    export APP_IMAGE
+    app_image_ref="$(release_image_ref_or_fatal "${APP_IMAGE:-}" "app")"
 
     app_archive_name="$(image_ref_for_archive_name "$app_image_ref").tar"
     build_and_export_image_archive \
@@ -202,9 +193,7 @@ export_release_images_if_required() {
     [ -n "${MONITOR_DOCKERFILE:-}" ] || fatal "MONITOR_DOCKERFILE is not set"
     [ -f "$MONITOR_DOCKERFILE" ] || fatal "monitor Dockerfile is missing: $MONITOR_DOCKERFILE"
 
-    monitor_image_ref="$(release_image_tag "${MONITOR_IMAGE:-}" "otp-relay-monitor")"
-    MONITOR_IMAGE="$monitor_image_ref"
-    export MONITOR_IMAGE
+    monitor_image_ref="$(release_image_ref_or_fatal "${MONITOR_IMAGE:-}" "monitor")"
 
     monitor_archive_name="$(image_ref_for_archive_name "$monitor_image_ref").tar"
     build_and_export_image_archive \
