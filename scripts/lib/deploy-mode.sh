@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# Shared deployment-mode helpers for install-otp-relay-k8s.sh.
+# Shared artifact-selector helpers for the OTP Relay bundle-only release builder.
 # Source this file; do not execute it directly.
-
-# Supported DEPLOY_MODE values:
-#   full          - build/import app and monitor images, apply all manifests
-#   app           - build/import app image, apply app-related manifests
-#   monitor       - build/import monitor image, apply monitor-related manifests
-#   manifests     - apply rendered Kubernetes manifests only; do not build images
-#   observability - apply observability Helm stacks/manifests only
-#   none          - load/validate environment and exit before deployment work
+#
+# Historical note:
+#   DEPLOY_MODE is retained only for .env/backward compatibility.
+#   In this project it no longer means "deploy".
+#
+# Supported DEPLOY_MODE values as bundle artifact selectors:
+#   full    - build/export app and monitor image archives, render/package manifests
+#   app     - build/export app image archive, render/package app runtime manifests
+#   monitor - build/export monitor image archive, render/package monitor runtime manifests
+#   none    - load/validate environment and package metadata only
+#
+# Forbidden old meanings:
+#   - no image import into a live cluster
+#   - no kubectl apply
+#   - no Helm install/upgrade
+#   - no rollout restart
+#   - no live validation
+#
+# The production server receives only the finished bundle.
 
 current_deploy_mode() {
   local mode="${DEPLOY_MODE:-full}"
@@ -25,7 +36,7 @@ current_deploy_mode() {
 
 valid_deploy_mode() {
   case "${1:-}" in
-    full|app|monitor|manifests|observability|none) return 0 ;;
+    full|app|monitor|none) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -35,13 +46,47 @@ validate_deploy_mode() {
   mode="$(current_deploy_mode)"
 
   if ! valid_deploy_mode "$mode"; then
-    fatal "unsupported DEPLOY_MODE=$mode. Use one of: full, app, monitor, manifests, observability, none."
+    fatal "unsupported DEPLOY_MODE artifact selector: $mode. Use one of: full, app, monitor, none."
   fi
 
   DEPLOY_MODE="$mode"
   export DEPLOY_MODE
 
-  log "deployment mode validated: $DEPLOY_MODE"
+  enforce_bundle_only_deploy_mode_flags
+
+  log "artifact selector validated: $DEPLOY_MODE"
+}
+
+enforce_bundle_only_deploy_mode_flags() {
+  RELEASE_MODE="bundle"
+  SKIP_CLUSTER_DEPLOY="1"
+  SKIP_K3S_INSTALL="1"
+  SKIP_HELM_INSTALL="1"
+  SKIP_KUBECTL_APPLY="1"
+  SKIP_IMAGE_IMPORT="1"
+  SKIP_ROLLOUT_RESTART="1"
+  SKIP_LIVE_CLUSTER_VALIDATE="1"
+  SKIP_GITHUB_RUNNER_INSTALL="1"
+  SKIP_VM_PROVISIONING="1"
+  DEPLOY_OTP_RELAY="0"
+  VALIDATE_OTP_RELAY="0"
+  DISTRIBUTE_IMAGES_TO_NODES="0"
+  INSTALL_GITHUB_RUNNER="0"
+
+  export RELEASE_MODE
+  export SKIP_CLUSTER_DEPLOY
+  export SKIP_K3S_INSTALL
+  export SKIP_HELM_INSTALL
+  export SKIP_KUBECTL_APPLY
+  export SKIP_IMAGE_IMPORT
+  export SKIP_ROLLOUT_RESTART
+  export SKIP_LIVE_CLUSTER_VALIDATE
+  export SKIP_GITHUB_RUNNER_INSTALL
+  export SKIP_VM_PROVISIONING
+  export DEPLOY_OTP_RELAY
+  export VALIDATE_OTP_RELAY
+  export DISTRIBUTE_IMAGES_TO_NODES
+  export INSTALL_GITHUB_RUNNER
 }
 
 requires_docker() {
@@ -66,34 +111,49 @@ requires_monitor_image() {
 }
 
 requires_manifests_apply() {
+  # Kept for backward compatibility with older function names.
+  # In bundle-only mode this means "requires rendered manifests to be packaged",
+  # never "apply manifests".
   case "$(current_deploy_mode)" in
-    full|app|monitor|manifests) return 0 ;;
+    full|app|monitor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+requires_manifests_package() {
+  case "$(current_deploy_mode)" in
+    full|app|monitor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+requires_observability_package() {
+  case "$(current_deploy_mode)" in
+    full) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 explain_deploy_mode() {
+  enforce_bundle_only_deploy_mode_flags
+
   case "$(current_deploy_mode)" in
     full)
-      log "DEPLOY_MODE=full: build/import app and monitor images, render/apply manifests, deploy all components"
+      log "DEPLOY_MODE=full artifact selector: build/export app and monitor image archives, render/package runtime manifests, and include bundle metadata"
       ;;
     app)
-      log "DEPLOY_MODE=app: build/import app image and apply app-related manifests"
+      log "DEPLOY_MODE=app artifact selector: build/export app image archive and render/package app runtime artifacts"
       ;;
     monitor)
-      log "DEPLOY_MODE=monitor: build/import monitor image and apply monitor-related manifests"
-      ;;
-    manifests)
-      log "DEPLOY_MODE=manifests: render/apply Kubernetes manifests without rebuilding images"
-      ;;
-    observability)
-      log "DEPLOY_MODE=observability: install/update Prometheus, Grafana, Loki, Alloy, dashboard, ServiceMonitor, and Grafana ingress only"
+      log "DEPLOY_MODE=monitor artifact selector: build/export monitor image archive and render/package monitor runtime artifacts"
       ;;
     none)
-      log "DEPLOY_MODE=none: validate environment only; no Docker, K3s, image, or manifest work"
+      log "DEPLOY_MODE=none artifact selector: validate build inputs and package metadata only; no image archives or runtime manifests"
       ;;
     *)
-      warn "DEPLOY_MODE=$(current_deploy_mode): invalid mode; validation should fail before deployment work"
+      warn "DEPLOY_MODE=$(current_deploy_mode): invalid artifact selector; validation should fail before bundle work"
       ;;
   esac
+
+  log "bundle-only enforcement: no K3s install, no Helm install/upgrade, no kubectl apply, no image import, no rollout restart, no live validation"
 }
