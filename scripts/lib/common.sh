@@ -1,15 +1,42 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Shared common helpers for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - no root requirement
+#   - no package installation
+#   - no K3s installation
+#   - no Kubernetes apply
+#   - no Helm install/upgrade
+#   - no image import into a live cluster
+#   - no VM provisioning
+#
+# The production server receives only the finished bundle.
 
-log() { printf '[otp-relay-k8s] %s\n' "$*"; }
+log() {
+  printf '[otp-relay-k8s] %s\n' "$*"
+}
 
-warn() { printf '[otp-relay-k8s] WARNING: %s\n' "$*" >&2; }
+warn() {
+  printf '[otp-relay-k8s] WARNING: %s\n' "$*" >&2
+}
 
-fatal() { printf '[otp-relay-k8s] ERROR: %s\n' "$*" >&2; exit 1; }
+fatal() {
+  printf '[otp-relay-k8s] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
-cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+cmd_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
 
-need_root() { [ "$(id -u)" -eq 0 ] || fatal "run as root: sudo bash $0"; }
+need_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    warn "running as root is not required for bundle creation"
+  else
+    log "root privileges are not required for bundle creation"
+  fi
+}
 
 log_wait() {
   log "$1"
