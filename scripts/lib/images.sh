@@ -77,7 +77,7 @@ write_image_archive_metadata() {
   local image_name="$1"
   local tar_path="$2"
   local metadata_file="$3"
-  local checksum
+  local checksum=""
 
   validate_image_archive_file "$image_name" "$tar_path"
   checksum="$(image_archive_checksum "$tar_path")"
@@ -97,16 +97,25 @@ copy_image_archive_to_release_dir() {
   local image_name="$1"
   local tar_path="$2"
   local release_image_dir="$3"
-  local dest_path
-  local metadata_file
+  local dest_path=""
+  local metadata_file=""
+  local source_real=""
+  local dest_real=""
 
   validate_image_archive_file "$image_name" "$tar_path"
 
   mkdir -p "$release_image_dir"
   dest_path="$release_image_dir/$(basename "$tar_path")"
 
-  log "copying image archive for bundle: $image_name -> $dest_path"
-  cp -f "$tar_path" "$dest_path"
+  source_real="$(cd "$(dirname "$tar_path")" && pwd)/$(basename "$tar_path")"
+  dest_real="$(cd "$(dirname "$dest_path")" && pwd)/$(basename "$dest_path")"
+
+  if [ "$source_real" != "$dest_real" ]; then
+    log "copying image archive for bundle: $image_name -> $dest_path"
+    cp -f "$tar_path" "$dest_path"
+  else
+    log "image archive already staged for bundle: $dest_path"
+  fi
 
   metadata_file="$release_image_dir/$(basename "$tar_path").metadata.env"
   write_image_archive_metadata "$image_name" "$dest_path" "$metadata_file"
@@ -116,7 +125,7 @@ copy_image_archive_to_release_dir() {
 
 collect_existing_image_archives() {
   local output_file="$1"
-  local search_dir
+  local search_dir=""
 
   : > "$output_file"
 
@@ -147,9 +156,9 @@ collect_existing_image_archives() {
 
 stage_existing_image_archives_for_bundle() {
   local release_image_dir="$1"
-  local archive_list
-  local archive
-  local image_name
+  local archive_list=""
+  local archive=""
+  local image_name=""
 
   archive_list="$(mktemp /tmp/otp-relay-image-archives.XXXXXX)"
   collect_existing_image_archives "$archive_list"
