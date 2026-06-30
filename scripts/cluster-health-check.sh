@@ -3,7 +3,7 @@ set +e
 set -o pipefail
 
 LOG="${1:-/tmp/k8s-ansible-health-check-$(date +%Y%m%d-%H%M%S).log}"
-REPO="${REPO:-/opt/k8s-ansible}"
+REPO="${REPO:-/opt/k8s-ansible-DEVtoPROD}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-/etc/rancher/k3s/k3s.yaml}"
 KPS_CHART_VERSION="${KPS_CHART_VERSION:-85.0.1}"
 LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-}"
@@ -324,8 +324,8 @@ else
   APP_ACCESS="$(kubectl -n "$NAMESPACE" get pvc otp-relay-data -o jsonpath='{.spec.accessModes[*]}' 2>/dev/null || true)"
   echo "otp-relay-data PV=$APP_PV storageClass=$APP_SC accessModes=$APP_ACCESS"
 
-  if [ "$APP_SC" != "otp-relay-nfs" ]; then
-    problem "otp-relay-data is not using otp-relay-nfs; storageClass=$APP_SC"
+  if [ "$APP_SC" != "otp-relay-devprod-nfs" ]; then
+    problem "otp-relay-data is not using otp-relay-devprod-nfs; storageClass=$APP_SC"
   fi
 
   if ! printf '%s\n' "$APP_ACCESS" | grep -q "ReadWriteMany"; then
