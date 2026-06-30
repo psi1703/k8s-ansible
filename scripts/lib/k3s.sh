@@ -1,284 +1,180 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Shared Kubernetes runtime-setting validators for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Validate values that will be rendered into manifests.
+#   - Do not query Kubernetes nodes.
+#   - Do not restart deployments.
+#   - Do not wait for LoadBalancer assignment.
+#   - Do not update live ConfigMaps.
+#
+# The production server receives only the finished bundle.
 
 validate_k8s_topology_settings() {
-  log "validating Kubernetes topology settings"
+  log "validating Kubernetes runtime settings for bundle rendering"
 
-  case "$SERVICE_TYPE" in
+  case "${SERVICE_TYPE:-}" in
     ClusterIP|NodePort|LoadBalancer) ;;
-    *) fatal "unsupported SERVICE_TYPE=$SERVICE_TYPE. Use ClusterIP, NodePort, or LoadBalancer." ;;
+    *) fatal "unsupported SERVICE_TYPE=${SERVICE_TYPE:-}. Use ClusterIP, NodePort, or LoadBalancer." ;;
   esac
 
-  case "$INGRESS_ENABLED" in
+  case "${INGRESS_ENABLED:-}" in
     0|1) ;;
-    *) fatal "unsupported INGRESS_ENABLED=$INGRESS_ENABLED. Use 0 or 1." ;;
+    *) fatal "unsupported INGRESS_ENABLED=${INGRESS_ENABLED:-}. Use 0 or 1." ;;
   esac
 
-  case "$TLS_ENABLED" in
+  case "${TLS_ENABLED:-}" in
     0|1) ;;
-    *) fatal "unsupported TLS_ENABLED=$TLS_ENABLED. Use 0 or 1." ;;
+    *) fatal "unsupported TLS_ENABLED=${TLS_ENABLED:-}. Use 0 or 1." ;;
   esac
 
-  case "$TLS_SELF_SIGNED" in
+  case "${TLS_SELF_SIGNED:-}" in
     0|1) ;;
-    *) fatal "unsupported TLS_SELF_SIGNED=$TLS_SELF_SIGNED. Use 0 or 1." ;;
+    *) fatal "unsupported TLS_SELF_SIGNED=${TLS_SELF_SIGNED:-}. Use 0 or 1." ;;
   esac
 
-  case "$NFS_ENABLED" in
+  case "${NFS_ENABLED:-}" in
     0|1) ;;
     *) fatal "NFS_ENABLED must be 0 or 1" ;;
   esac
 
-  case "$REDIS_ENABLED" in
+  case "${REDIS_ENABLED:-}" in
     0|1) ;;
-    *) fatal "unsupported REDIS_ENABLED=$REDIS_ENABLED. Use 0 or 1." ;;
+    *) fatal "unsupported REDIS_ENABLED=${REDIS_ENABLED:-}. Use 0 or 1." ;;
   esac
 
-  case "$REDIS_REQUIRED" in
+  case "${REDIS_REQUIRED:-}" in
     0|1) ;;
-    *) fatal "unsupported REDIS_REQUIRED=$REDIS_REQUIRED. Use 0 or 1." ;;
+    *) fatal "unsupported REDIS_REQUIRED=${REDIS_REQUIRED:-}. Use 0 or 1." ;;
   esac
 
-  case "$REDIS_SPREAD_RECREATE_PVCS" in
+  case "${REDIS_SPREAD_RECREATE_PVCS:-auto}" in
     auto|0|1) ;;
     *) fatal "REDIS_SPREAD_RECREATE_PVCS must be auto, 0, or 1" ;;
   esac
 
-  case "$DISTRIBUTE_IMAGES_TO_NODES" in
-    0|1) ;;
-    *) fatal "DISTRIBUTE_IMAGES_TO_NODES must be 0 or 1" ;;
+  case "${DISTRIBUTE_IMAGES_TO_NODES:-0}" in
+    0) ;;
+    1) fatal "DISTRIBUTE_IMAGES_TO_NODES must be 0 in bundle-only mode" ;;
+    *) fatal "DISTRIBUTE_IMAGES_TO_NODES must be 0 in bundle-only mode" ;;
   esac
 
-  case "${K3S_DISABLE_SERVICELB:-1}" in
-    0|1) ;;
-    *) fatal "K3S_DISABLE_SERVICELB must be 0 or 1" ;;
-  esac
-
-  case "${K3S_DISABLE_TRAEFIK:-0}" in
-    0|1) ;;
-    *) fatal "K3S_DISABLE_TRAEFIK must be 0 or 1" ;;
-  esac
-
-  case "$IMAGE_DISTRIBUTION_PORT" in
+  case "${IMAGE_DISTRIBUTION_PORT:-18080}" in
     ''|*[!0-9]*) fatal "IMAGE_DISTRIBUTION_PORT must be numeric" ;;
   esac
 
-  if [ "$IMAGE_DISTRIBUTION_PORT" -lt 1024 ] || [ "$IMAGE_DISTRIBUTION_PORT" -gt 65535 ]; then
+  if [ "${IMAGE_DISTRIBUTION_PORT:-18080}" -lt 1024 ] || [ "${IMAGE_DISTRIBUTION_PORT:-18080}" -gt 65535 ]; then
     fatal "IMAGE_DISTRIBUTION_PORT must be between 1024 and 65535"
   fi
 
-  if [ "$NFS_ENABLED" = "1" ]; then
-    log "validating external NFS storage settings"
-    [ -n "$NFS_SERVER" ] || fatal "NFS_ENABLED=1 requires NFS_SERVER"
-    [ -n "$NFS_PATH" ] || fatal "NFS_ENABLED=1 requires NFS_PATH"
+  if [ "${NFS_ENABLED:-0}" = "1" ]; then
+    log "validating external NFS storage values for rendered manifests"
+    [ -n "${NFS_SERVER:-}" ] || fatal "NFS_ENABLED=1 requires NFS_SERVER"
+    [ -n "${NFS_PATH:-}" ] || fatal "NFS_ENABLED=1 requires NFS_PATH"
 
-    if [ -z "$PVC_STORAGE_CLASS" ]; then
-      PVC_STORAGE_CLASS="$NFS_STORAGE_CLASS"
+    if [ -z "${PVC_STORAGE_CLASS:-}" ]; then
+      PVC_STORAGE_CLASS="${NFS_STORAGE_CLASS:-}"
       export PVC_STORAGE_CLASS
     fi
 
-    if [ "$PVC_STORAGE_CLASS" != "$NFS_STORAGE_CLASS" ]; then
+    if [ -n "${NFS_STORAGE_CLASS:-}" ] && [ "${PVC_STORAGE_CLASS:-}" != "${NFS_STORAGE_CLASS:-}" ]; then
       fatal "NFS_ENABLED=1 requires PVC_STORAGE_CLASS=$NFS_STORAGE_CLASS or an empty PVC_STORAGE_CLASS"
     fi
   fi
 
-  if [ "$TLS_ENABLED" = "1" ]; then
-    log "validating TLS settings"
-    [ "$INGRESS_ENABLED" = "1" ] || fatal "TLS_ENABLED=1 requires INGRESS_ENABLED=1"
-    [ -n "$TLS_HOST" ] || fatal "TLS_ENABLED=1 requires TLS_HOST"
-    [ -n "$TLS_SECRET_NAME" ] || fatal "TLS_ENABLED=1 requires TLS_SECRET_NAME"
+  if [ "${TLS_ENABLED:-0}" = "1" ]; then
+    log "validating TLS values for rendered manifests"
+    [ "${INGRESS_ENABLED:-0}" = "1" ] || fatal "TLS_ENABLED=1 requires INGRESS_ENABLED=1"
+    [ -n "${TLS_HOST:-}" ] || fatal "TLS_ENABLED=1 requires TLS_HOST"
+    [ -n "${TLS_SECRET_NAME:-}" ] || fatal "TLS_ENABLED=1 requires TLS_SECRET_NAME"
   fi
 
-  if [ "$INGRESS_ENABLED" = "1" ] && [ "${K3S_DISABLE_TRAEFIK:-0}" = "1" ]; then
-    warn "INGRESS_ENABLED=1 but K3S_DISABLE_TRAEFIK=1. Ensure another Ingress controller is installed."
-  fi
+  if [ "${SERVICE_TYPE:-}" = "NodePort" ]; then
+    log "validating NodePort service value for rendered manifest"
 
-  if [ "$SERVICE_TYPE" = "NodePort" ]; then
-    log "validating NodePort service settings"
-
-    case "$SERVICE_NODE_PORT" in
+    case "${SERVICE_NODE_PORT:-}" in
       ''|*[!0-9]*) fatal "SERVICE_NODE_PORT must be numeric for SERVICE_TYPE=NodePort" ;;
     esac
 
-    if [ "$SERVICE_NODE_PORT" -lt 30000 ] || [ "$SERVICE_NODE_PORT" -gt 32767 ]; then
+    if [ "${SERVICE_NODE_PORT:-0}" -lt 30000 ] || [ "${SERVICE_NODE_PORT:-0}" -gt 32767 ]; then
       fatal "SERVICE_NODE_PORT must be between 30000 and 32767"
     fi
   fi
 
-  if [ "$SERVICE_TYPE" = "LoadBalancer" ] && [ "$INGRESS_ENABLED" = "1" ]; then
-    warn "SERVICE_TYPE=LoadBalancer and INGRESS_ENABLED=1 are both enabled. Usually one exposure path is enough. Official design uses SERVICE_TYPE=ClusterIP with Ingress enabled."
+  if [ "${SERVICE_TYPE:-}" = "LoadBalancer" ] && [ "${INGRESS_ENABLED:-0}" = "1" ]; then
+    warn "SERVICE_TYPE=LoadBalancer and INGRESS_ENABLED=1 are both enabled. Usually one exposure path is enough."
   fi
 
-  if [ "$SERVICE_TYPE" = "LoadBalancer" ] && [ "${K3S_DISABLE_SERVICELB:-1}" = "1" ] && [ "${INSTALL_METALLB:-0}" != "1" ] && [ "${REQUIRE_METALLB:-0}" = "1" ]; then
-    fatal "SERVICE_TYPE=LoadBalancer with servicelb disabled requires INSTALL_METALLB=1 or an existing load balancer"
+  if [ "${SERVICE_TYPE:-}" = "LoadBalancer" ] && [ "${REQUIRE_METALLB:-0}" = "1" ] && [ "${INSTALL_METALLB:-0}" != "1" ] && [ -z "${LOADBALANCER_IP:-}" ]; then
+    warn "LoadBalancer service requested without INSTALL_METALLB=1 or LOADBALANCER_IP. Bundle will render this intent only."
   fi
 
-  case "$REPLICA_COUNT" in
+  case "${REPLICA_COUNT:-}" in
     ''|*[!0-9]*) fatal "REPLICA_COUNT must be a positive integer" ;;
   esac
 
-  [ "$REPLICA_COUNT" -ge 1 ] || fatal "REPLICA_COUNT must be at least 1"
+  [ "${REPLICA_COUNT:-0}" -ge 1 ] || fatal "REPLICA_COUNT must be at least 1"
 
-  if [ "$REPLICA_COUNT" -gt 1 ]; then
-    warn "REPLICA_COUNT=$REPLICA_COUNT selected. Confirm OTP validation across multiple app pods before treating this as production-final."
+  if [ "${REPLICA_COUNT:-1}" -gt 1 ]; then
+    warn "REPLICA_COUNT=$REPLICA_COUNT selected. Confirm OTP validation across multiple app pods during production-side validation."
   fi
 
-  if { [ -n "$APP_NODE_SELECTOR_KEY" ] && [ -z "$APP_NODE_SELECTOR_VALUE" ]; } || { [ -z "$APP_NODE_SELECTOR_KEY" ] && [ -n "$APP_NODE_SELECTOR_VALUE" ]; }; then
+  if { [ -n "${APP_NODE_SELECTOR_KEY:-}" ] && [ -z "${APP_NODE_SELECTOR_VALUE:-}" ]; } || { [ -z "${APP_NODE_SELECTOR_KEY:-}" ] && [ -n "${APP_NODE_SELECTOR_VALUE:-}" ]; }; then
     fatal "APP_NODE_SELECTOR_KEY and APP_NODE_SELECTOR_VALUE must be set together"
   fi
 
-  if { [ -n "$MONITOR_NODE_SELECTOR_KEY" ] && [ -z "$MONITOR_NODE_SELECTOR_VALUE" ]; } || { [ -z "$MONITOR_NODE_SELECTOR_KEY" ] && [ -n "$MONITOR_NODE_SELECTOR_VALUE" ]; }; then
+  if { [ -n "${MONITOR_NODE_SELECTOR_KEY:-}" ] && [ -z "${MONITOR_NODE_SELECTOR_VALUE:-}" ]; } || { [ -z "${MONITOR_NODE_SELECTOR_KEY:-}" ] && [ -n "${MONITOR_NODE_SELECTOR_VALUE:-}" ]; }; then
     fatal "MONITOR_NODE_SELECTOR_KEY and MONITOR_NODE_SELECTOR_VALUE must be set together"
   fi
 
-  if { [ -n "$REDIS_NODE_SELECTOR_KEY" ] && [ -z "$REDIS_NODE_SELECTOR_VALUE" ]; } || { [ -z "$REDIS_NODE_SELECTOR_KEY" ] && [ -n "$REDIS_NODE_SELECTOR_VALUE" ]; }; then
+  if { [ -n "${REDIS_NODE_SELECTOR_KEY:-}" ] && [ -z "${REDIS_NODE_SELECTOR_VALUE:-}" ]; } || { [ -z "${REDIS_NODE_SELECTOR_KEY:-}" ] && [ -n "${REDIS_NODE_SELECTOR_VALUE:-}" ]; }; then
     fatal "REDIS_NODE_SELECTOR_KEY and REDIS_NODE_SELECTOR_VALUE must be set together"
   fi
 
-  log "Kubernetes topology settings validated"
+  log "Kubernetes runtime settings for bundle rendering validated"
 }
 
 validate_selected_node() {
-  local label_key="$1"
-  local label_value="$2"
-  local label_name="$3"
+  local label_key="${1:-}"
+  local label_value="${2:-}"
+  local label_name="${3:-node selector}"
 
-  [ -n "$label_key" ] || return 0
-
-  log "validating node selector for $label_name: $label_key=$label_value"
-
-  if ! k3s kubectl get node -l "$label_key=$label_value" -o name | grep -q .; then
-    fatal "$label_name node selector did not match any node: $label_key=$label_value"
+  if [ -z "$label_key" ] && [ -z "$label_value" ]; then
+    log "no $label_name node selector configured"
+    return 0
   fi
 
-  log "node selector matched at least one node for $label_name"
+  [ -n "$label_key" ] || fatal "$label_name node selector value is set but key is empty"
+  [ -n "$label_value" ] || fatal "$label_name node selector key is set but value is empty"
+
+  log "validated $label_name node selector syntax for rendered manifest: $label_key=$label_value"
 }
 
 mark_deployment_restart_required() {
-  local deployment_name="$1"
-
-  case "$deployment_name" in
-    otp-relay) RESTART_APP_REQUIRED=1 ;;
-    otp-monitor) RESTART_MONITOR_REQUIRED=1 ;;
-    *) fatal "unknown deployment restart request: $deployment_name" ;;
-  esac
+  fatal "mark_deployment_restart_required is forbidden in bundle-only mode"
 }
 
 rollout_restart_deployment_if_exists() {
-  local deployment_name="$1"
-
-  if ! k3s kubectl get deployment "$deployment_name" -n "$NAMESPACE" >/dev/null 2>&1; then
-    warn "deployment/$deployment_name does not exist yet; skipping rollout restart"
-    return 0
-  fi
-
-  for attempt in 1 2 3; do
-    log "triggering rollout restart for deployment/$deployment_name, attempt $attempt"
-
-    if k3s kubectl rollout restart "deployment/$deployment_name" -n "$NAMESPACE"; then
-      log "rollout restart accepted for deployment/$deployment_name"
-      return 0
-    fi
-
-    if [ "$attempt" -lt 3 ]; then
-      warn "rollout restart for deployment/$deployment_name was rejected or raced; retrying"
-      sleep 2
-    fi
-  done
-
-  fatal "failed to trigger rollout restart for deployment/$deployment_name"
+  fatal "rollout_restart_deployment_if_exists is forbidden in bundle-only mode"
 }
 
 perform_pending_rollout_restarts() {
-  if [ "$RESTART_APP_REQUIRED" = "1" ]; then
-    log "restarting app deployment otp-relay"
-    rollout_restart_deployment_if_exists otp-relay
-
-    log "waiting for app deployment rollout; this can take a few minutes while pods restart"
-    k3s kubectl rollout status deployment/otp-relay -n "$NAMESPACE" --timeout=240s
-    log "app deployment rollout completed"
-
-    RESTART_APP_REQUIRED=0
-    export RESTART_APP_REQUIRED
-  fi
-
-  if [ "$RESTART_MONITOR_REQUIRED" = "1" ]; then
-    log "restarting monitor deployment otp-monitor"
-    rollout_restart_deployment_if_exists otp-monitor
-
-    log "waiting for monitor deployment rollout; this can take a few minutes while pods restart"
-    k3s kubectl rollout status deployment/otp-monitor -n "$NAMESPACE" --timeout=180s
-    log "monitor deployment rollout completed"
-
-    RESTART_MONITOR_REQUIRED=0
-    export RESTART_MONITOR_REQUIRED
-  fi
+  log "skipping rollout restarts in bundle-only mode"
 }
 
 resolve_portal_url_from_service() {
+  log "skipping live LoadBalancer service lookup in bundle-only mode"
+
   PORTAL_URL_CONFIG_REFRESHED=0
+  ASSIGNED_LOADBALANCER_ADDRESS="${LOADBALANCER_IP:-}"
 
-  [ "$SERVICE_TYPE" = "LoadBalancer" ] || return 0
-
-  if [ "$PORTAL_URL_EXPLICIT" = "1" ]; then
-    log "PORTAL_URL was explicitly provided; leaving it as $PORTAL_URL"
-    return 0
-  fi
-
-  if [ -n "$LOADBALANCER_IP" ]; then
-    ASSIGNED_LOADBALANCER_ADDRESS="$LOADBALANCER_IP"
-    PORTAL_URL="http://$LOADBALANCER_IP"
+  if [ "${SERVICE_TYPE:-}" = "LoadBalancer" ] && [ "${PORTAL_URL_EXPLICIT:-0}" != "1" ] && [ -n "${LOADBALANCER_IP:-}" ]; then
+    PORTAL_URL="http://${LOADBALANCER_IP}"
     SERVER_IP="$LOADBALANCER_IP"
-    log "using requested LoadBalancer IP for PORTAL_URL: $PORTAL_URL"
-    apply_runtime_configmap
-    PORTAL_URL_CONFIG_REFRESHED=1
-    export ASSIGNED_LOADBALANCER_ADDRESS PORTAL_URL SERVER_IP PORTAL_URL_CONFIG_REFRESHED
-    return 0
+    export PORTAL_URL SERVER_IP
+    log "using configured LOADBALANCER_IP for rendered PORTAL_URL: $PORTAL_URL"
   fi
 
-  log "waiting for LoadBalancer address assignment for service $NAMESPACE/otp-relay"
-  log "this can take up to 120s depending on MetalLB and service reconciliation"
-
-  for i in $(seq 1 60); do
-    local assigned_address
-    local elapsed
-
-    elapsed=$((i * 2))
-
-    assigned_address="$({
-      k3s kubectl get svc otp-relay \
-        -n "$NAMESPACE" \
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true
-    })"
-    assigned_address="$(printf '%s' "$assigned_address" | xargs)"
-
-    if [ -z "$assigned_address" ]; then
-      assigned_address="$({
-        k3s kubectl get svc otp-relay \
-          -n "$NAMESPACE" \
-          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true
-      })"
-      assigned_address="$(printf '%s' "$assigned_address" | xargs)"
-    fi
-
-    if [ -n "$assigned_address" ]; then
-      ASSIGNED_LOADBALANCER_ADDRESS="$assigned_address"
-      PORTAL_URL="http://$assigned_address"
-      SERVER_IP="$assigned_address"
-      log "using assigned LoadBalancer address for PORTAL_URL: $PORTAL_URL"
-      apply_runtime_configmap
-      PORTAL_URL_CONFIG_REFRESHED=1
-      export ASSIGNED_LOADBALANCER_ADDRESS PORTAL_URL SERVER_IP PORTAL_URL_CONFIG_REFRESHED
-      return 0
-    fi
-
-    if [ $((elapsed % 30)) -eq 0 ]; then
-      log "still waiting for LoadBalancer address after ${elapsed}s"
-      k3s kubectl get svc otp-relay -n "$NAMESPACE" -o wide || true
-    fi
-
-    sleep 2
-  done
-
-  warn "LoadBalancer address was not assigned within timeout; keeping PORTAL_URL=$PORTAL_URL"
+  export PORTAL_URL_CONFIG_REFRESHED ASSIGNED_LOADBALANCER_ADDRESS
 }
