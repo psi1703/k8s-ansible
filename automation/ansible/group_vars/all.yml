@@ -1,12 +1,14 @@
 ---
 # Keep deployment-specific values in the repository root .env file.
-# The Ansible workflow copies the repo to the control-plane and runs the same
-# installer, which loads .env and renders Kubernetes manifests from it.
-cluster_name: otp-relay-prod
+# The Ansible workflow runs the installer from INSTALL_DIR and passes the
+# matching .env file to the control-plane deployment role.
+
+cluster_name: otp-relay-devprod
 
 k3s_disable_servicelb: true
 k3s_disable_traefik: false
 
-otp_namespace: otp-relay
-otp_install_dir: /opt/k8s-ansible
-otp_env_file: /opt/k8s-ansible/.env
+otp_namespace: "{{ lookup('env', 'NAMESPACE') | default('otp-relay', true) }}"
+otp_install_dir: "{{ lookup('env', 'INSTALL_DIR') | default('/opt/k8s-ansible-DEVtoPROD', true) }}"
+otp_env_file: "{{ otp_install_dir }}/.env"
+otp_source_dir: "{{ otp_install_dir }}"
