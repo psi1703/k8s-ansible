@@ -1,66 +1,117 @@
 #!/usr/bin/env bash
-# Shared TLS helpers for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# TLS helpers for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Validate TLS/Ingress values used for rendered manifests.
+#   - Optionally stage certificate material as handoff files only when already provided.
+#   - Do not create Kubernetes secrets.
+#   - Do not apply Kubernetes resources.
+#   - Do not query a live cluster.
+#
+# The production server receives only the finished bundle.
 
-ensure_tls_secret_available_if_required() {
-  [ "${TLS_ENABLED:-0}" = "1" ] || return 0
-  [ "${TLS_SELF_SIGNED:-1}" = "0" ] || return 0
+_tls_forbid_live_action() {
+  local action="$1"
 
-  if k3s kubectl get secret "$TLS_SECRET_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    log "TLS secret $TLS_SECRET_NAME already exists in namespace $NAMESPACE"
+  fatal "forbidden TLS live-cluster action in bundle-only mode: $action"
+}
+
+validate_tls_settings_for_bundle() {
+  log "validating TLS settings for bundle rendering"
+
+  case "${TLS_ENABLED:-0}" in
+    0|1) ;;
+    *) fatal "TLS_ENABLED must be 0 or 1" ;;
+  esac
+
+  case "${TLS_SELF_SIGNED:-0}" in
+    0|1) ;;
+    *) fatal "TLS_SELF_SIGNED must be 0 or 1" ;;
+  esac
+
+  if [ "${TLS_ENABLED:-0}" = "1" ]; then
+    [ "${INGRESS_ENABLED:-0}" = "1" ] || fatal "TLS_ENABLED=1 requires INGRESS_ENABLED=1"
+    [ -n "${TLS_HOST:-}" ] || fatal "TLS_ENABLED=1 requires TLS_HOST"
+    [ -n "${TLS_SECRET_NAME:-}" ] || fatal "TLS_ENABLED=1 requires TLS_SECRET_NAME"
+
+    if [ "${TLS_HOST:-}" = "CHANGE_ME_TLS_HOST" ] || [ "${TLS_HOST:-}" = "otp-relay.local" ]; then
+      fatal "TLS_HOST must be changed from the default when TLS_ENABLED=1"
+    fi
+
+    log "TLS will be referenced in rendered manifests: host=${TLS_HOST} secret=${TLS_SECRET_NAME}"
+  else
+    log "TLS disabled for rendered ingress"
+  fi
+}
+
+stage_tls_handoff_if_requested() {
+  local tls_stage_dir=""
+
+  validate_tls_settings_for_bundle
+
+  if [ "${TLS_ENABLED:-0}" != "1" ]; then
     return 0
   fi
 
-  fatal "TLS_ENABLED=1 with TLS_SELF_SIGNED=0 requires an existing Kubernetes TLS secret named $TLS_SECRET_NAME in namespace $NAMESPACE. Create the TLS secret first, or set TLS_SELF_SIGNED=1 so the installer can create a self-signed secret."
+  [ -n "${GENERATED_DIR:-}" ] || fatal "GENERATED_DIR is not set; cannot stage TLS handoff note"
+
+  tls_stage_dir="$GENERATED_DIR/tls"
+  mkdir -p "$tls_stage_dir"
+
+  cat > "$tls_stage_dir/README.md" <<EOF_TLS
+# TLS production handoff
+
+TLS was enabled during bundle rendering.
+
+Rendered values:
+
+- TLS_HOST: ${TLS_HOST:-}
+- TLS_SECRET_NAME: ${TLS_SECRET_NAME:-}
+- TLS_SELF_SIGNED: ${TLS_SELF_SIGNED:-0}
+
+The bundle builder does not create Kubernetes TLS secrets.
+
+Production-side secret creation must be handled by the approved production
+procedure before or during manifest application.
+
+Expected Kubernetes secret name:
+
+\`\`\`text
+${TLS_SECRET_NAME:-otp-relay-tls}
+\`\`\`
+
+Expected namespace:
+
+\`\`\`text
+${NAMESPACE:-otp-relay-devprod}
+\`\`\`
+EOF_TLS
+
+  chmod 0644 "$tls_stage_dir/README.md" 2>/dev/null || true
+  log "TLS handoff note staged: $tls_stage_dir/README.md"
 }
 
 ensure_tls_secret_if_requested() {
-  [ "${TLS_ENABLED:-0}" = "1" ] || return 0
-  [ "${TLS_SELF_SIGNED:-1}" = "1" ] || return 0
+  stage_tls_handoff_if_requested
 
-  local tls_tmp_dir=""
-  local tls_key=""
-  local tls_crt=""
-  local rotate_self_signed="${TLS_ROTATE_SELF_SIGNED:-0}"
-
-  if k3s kubectl get secret "$TLS_SECRET_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    if [ "$rotate_self_signed" != "1" ]; then
-      log "self-signed TLS secret $TLS_SECRET_NAME already exists in namespace $NAMESPACE; keeping existing certificate"
-      log "set TLS_ROTATE_SELF_SIGNED=1 only when you intentionally want to replace the certificate"
-      return 0
-    fi
-
-    warn "TLS_ROTATE_SELF_SIGNED=1; replacing existing self-signed TLS secret $TLS_SECRET_NAME in namespace $NAMESPACE"
+  if [ "${TLS_ENABLED:-0}" = "1" ]; then
+    log "skipping Kubernetes TLS secret creation in bundle-only mode"
   fi
+}
 
-  [ -n "${TLS_HOST:-}" ] || fatal "TLS_HOST is required when TLS_ENABLED=1 and TLS_SELF_SIGNED=1"
-  [ -n "${TLS_SECRET_NAME:-}" ] || fatal "TLS_SECRET_NAME is required when TLS_ENABLED=1"
-  [ -n "${NAMESPACE:-}" ] || fatal "NAMESPACE is required when TLS_ENABLED=1"
+create_self_signed_tls_secret() {
+  _tls_forbid_live_action "create self-signed Kubernetes TLS secret"
+}
 
-  tls_tmp_dir="$(mktemp -d /tmp/otp-relay-tls.XXXXXX)"
-  tls_key="$tls_tmp_dir/tls.key"
-  tls_crt="$tls_tmp_dir/tls.crt"
+apply_tls_secret_manifest() {
+  _tls_forbid_live_action "apply TLS secret manifest"
+}
 
-  cleanup_tls_tmp_dir() {
-    if [ -n "${tls_tmp_dir:-}" ] && [ -d "$tls_tmp_dir" ]; then
-      rm -rf "$tls_tmp_dir"
-    fi
-  }
-  trap cleanup_tls_tmp_dir RETURN
+tls_secret_exists() {
+  _tls_forbid_live_action "query TLS secret existence"
+}
 
-  log "creating self-signed TLS secret $TLS_SECRET_NAME for $TLS_HOST; IT Group Policy must trust/distribute this cert for users"
-
-  openssl req -x509 -nodes -newkey rsa:2048 \
-    -keyout "$tls_key" \
-    -out "$tls_crt" \
-    -days 825 \
-    -subj "/CN=$TLS_HOST" \
-    -addext "subjectAltName=DNS:$TLS_HOST"
-
-  k3s kubectl create secret tls "$TLS_SECRET_NAME" \
-    --namespace "$NAMESPACE" \
-    --cert="$tls_crt" \
-    --key="$tls_key" \
-    --dry-run=client -o yaml | k3s kubectl apply -f -
-
-  log "self-signed TLS secret $TLS_SECRET_NAME is available in namespace $NAMESPACE"
+print_tls_diagnostics() {
+  log "skipping TLS diagnostics in bundle-only mode"
 }
