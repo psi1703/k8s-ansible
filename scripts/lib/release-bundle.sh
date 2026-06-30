@@ -75,20 +75,22 @@ _release_forbid_live_tooling_in_path() {
 
   [ -d "$scan_dir" ] || return 0
 
+  # Scan executable-like payloads only.
+  # Do not scan .md/.txt handoff documents; those intentionally explain which
+  # live operations are outside the build path.
   found="$(
     grep -RInE \
       '(^|[^A-Za-z0-9_-])(k3s[[:space:]]+kubectl|kubectl[[:space:]]+apply|kubectl[[:space:]]+rollout|helm[[:space:]]+(install|upgrade|repo|dependency)|k3s[[:space:]]+ctr[[:space:]]+images[[:space:]]+import|ansible-playbook|virsh|virt-install|get\.k3s\.io)([^A-Za-z0-9_-]|$)' \
       "$scan_dir" \
       --include='*.sh' \
-      --include='*.md' \
-      --include='*.txt' \
+      --include='*.bash' \
       --include='*.yaml' \
       --include='*.yml' \
       2>/dev/null || true
   )"
 
   if [ -n "$found" ]; then
-    warn "release bundle staging contains live-deploy command references:"
+    warn "release bundle staging contains live-deploy command references in executable or YAML payloads:"
     printf '%s\n' "$found" >&2
     fatal "release bundle must not package live-deploy executable paths"
   fi
@@ -313,14 +315,13 @@ _release_validate_bundle_tree() {
 }
 
 stage_release_bundle_if_required() {
-  local dist_dir
-  local release_stamp
-  local git_sha
-  local safe_namespace
-  local bundle_name
-  local bundle_root
-  local bundle_tar
-  local checksum_path
+  local dist_dir=""
+  local release_stamp=""
+  local git_sha=""
+  local safe_namespace=""
+  local bundle_root=""
+  local bundle_tar=""
+  local checksum_path=""
 
   [ -n "${GENERATED_DIR:-}" ] || fatal "GENERATED_DIR is not set; stage manifests before creating release bundle"
 
