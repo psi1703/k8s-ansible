@@ -6,8 +6,8 @@ set -Eeuo pipefail
 # New target design:
 #   - The physical/server host is the K3s control-plane and Ansible runner.
 #   - This provisioner creates only two Debian cloud-image worker VMs:
-#       otp-worker1
-#       otp-worker2
+#       otp-devprod-worker1
+#       otp-devprod-worker2
 #   - NFS is external and is not provisioned here.
 #
 # Default behavior:
@@ -58,8 +58,8 @@ OS_VARIANT="${OS_VARIANT:-debian12}"
 
 ANSIBLE_INVENTORY="${REPO_ROOT}/automation/ansible/inventory.generated.ini"
 
-WORKER1_NAME="${WORKER1_NAME:-otp-worker1}"
-WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
+WORKER1_NAME="${WORKER1_NAME:-otp-devprod-worker1}"
+WORKER2_NAME="${WORKER2_NAME:-otp-devprod-worker2}"
 
 AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
 IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-}"
