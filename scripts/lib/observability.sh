@@ -10,7 +10,7 @@
 #   - Treats k8s/observability/*values.yaml as Helm values, not raw Kubernetes manifests.
 #   - Fails fast when observability is enabled but the requested stack cannot be made usable.
 
-OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
+OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability-devprod}"
 OBSERVABILITY_INSTALL_STACK="${OBSERVABILITY_INSTALL_STACK:-1}"
 
 OBSERVABILITY_STACK_RELEASE="${OBSERVABILITY_STACK_RELEASE:-kube-prometheus-stack}"
@@ -220,8 +220,82 @@ _update_helm_repos() {
   helm_k3s repo update || fatal_observability "Helm repo update failed"
 }
 
+_delete_wrong_namespace_helm_owned_resources() {
+  local release_name="$1"
+  local resource_type item_name item_release item_namespace
+  local jsonpath
+
+  jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-namespace}{"\n"}{end}'
+
+  for resource_type in clusterrole clusterrolebinding mutatingwebhookconfiguration validatingwebhookconfiguration; do
+    while IFS=$'\t' read -r item_name item_release item_namespace; do
+      [ -n "$item_name" ] || continue
+      [ "$item_release" = "$release_name" ] || continue
+      [ -n "$item_namespace" ] || continue
+      [ "$item_namespace" != "$OBSERVABILITY_NAMESPACE" ] || continue
+
+      warn "deleting stale Helm-owned $resource_type/$item_name from old release namespace $item_namespace before reinstalling $release_name into $OBSERVABILITY_NAMESPACE"
+      k3s kubectl delete "$resource_type" "$item_name" --ignore-not-found=true || \
+        fatal_observability "failed to delete stale Helm-owned $resource_type/$item_name"
+    done < <(k3s kubectl get "$resource_type" -o jsonpath="$jsonpath" 2>/dev/null || true)
+  done
+}
+
+cleanup_observability_helm_namespace_conflicts() {
+  if [ "$OBSERVABILITY_INSTALL_STACK" != "1" ]; then
+    return 0
+  fi
+
+  ensure_helm_kubeconfig
+  log "checking for stale Helm-owned cluster-scoped observability resources"
+  _delete_wrong_namespace_helm_owned_resources "$OBSERVABILITY_STACK_RELEASE"
+  _delete_wrong_namespace_helm_owned_resources "$OBSERVABILITY_LOKI_RELEASE"
+  _delete_wrong_namespace_helm_owned_resources "$OBSERVABILITY_ALLOY_RELEASE"
+}
+
+_render_observability_file_common() {
+  local rendered_file="$1"
+
+  sed -i \
+    -e "s/namespace: observability/namespace: ${OBSERVABILITY_NAMESPACE}/g" \
+    -e "s/searchNamespace: observability/searchNamespace: ${OBSERVABILITY_NAMESPACE}/g" \
+    -e "s/loki\.observability\.svc\.cluster\.local/loki.${OBSERVABILITY_NAMESPACE}.svc.cluster.local/g" \
+    -e "s/grafana\.init-db\.lan/${GRAFANA_HOST}/g" \
+    -e "s/grafana-devprod\.init-db\.lan/${GRAFANA_HOST}/g" \
+    "$rendered_file"
+}
+
+_render_observability_values_file() {
+  local source_file="$1"
+  local rendered_file="$2"
+
+  cp "$source_file" "$rendered_file"
+  _render_observability_file_common "$rendered_file"
+
+  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >/dev/null 2>&1; then
+    warn "unresolved placeholder or stale observability namespace detected in rendered Helm values from $(basename "$source_file")"
+    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >&2 || true
+    return 1
+  fi
+}
+
+_prepare_observability_values_file() {
+  local source_file="$1"
+  local rendered_file
+
+  [ -f "$source_file" ] || fatal "missing Helm values file: $source_file"
+
+  rendered_file="$(mktemp)"
+  if ! _render_observability_values_file "$source_file" "$rendered_file"; then
+    rm -f "$rendered_file"
+    fatal "failed to render Helm values file: $source_file"
+  fi
+
+  printf '%s\n' "$rendered_file"
+}
+
 install_kube_prometheus_stack() {
-  local source_dir values_file
+  local source_dir values_file rendered_values_file
 
   source_dir="$(_observability_source_dir)"
   [ -n "$source_dir" ] || {
@@ -243,24 +317,29 @@ install_kube_prometheus_stack() {
 
   ensure_observability_namespace
   ensure_helm_available
+  cleanup_observability_helm_namespace_conflicts
   _add_or_update_helm_repo "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL"
   _update_helm_repos
+  rendered_values_file="$(_prepare_observability_values_file "$values_file")"
 
   log "installing/upgrading kube-prometheus-stack release $OBSERVABILITY_STACK_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
   log "Helm chart: $OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART version $OBSERVABILITY_STACK_CHART_VERSION"
   log "Values file: $values_file"
+  log "Rendered values file: $rendered_values_file"
 
   if ! helm_k3s upgrade --install "$OBSERVABILITY_STACK_RELEASE" \
     "$OBSERVABILITY_STACK_REPO_NAME/$OBSERVABILITY_STACK_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
     --create-namespace \
     --version "$OBSERVABILITY_STACK_CHART_VERSION" \
-    -f "$values_file" \
+    -f "$rendered_values_file" \
     --wait \
     --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
+    rm -f "$rendered_values_file"
     fatal_observability "kube-prometheus-stack Helm install/upgrade failed"
   fi
 
+  rm -f "$rendered_values_file"
   log "kube-prometheus-stack Helm install/upgrade completed"
 
   wait_with_progress "waiting for ServiceMonitor CRD from kube-prometheus-stack" 180 5 _service_monitor_crd_available || \
@@ -272,7 +351,7 @@ install_kube_prometheus_stack() {
 }
 
 install_loki_stack_if_available() {
-  local source_dir values_file
+  local source_dir values_file rendered_values_file
   local loki_version_args=()
 
   source_dir="$(_observability_source_dir)"
@@ -292,8 +371,10 @@ install_loki_stack_if_available() {
 
   ensure_observability_namespace
   ensure_helm_available
+  cleanup_observability_helm_namespace_conflicts
   _add_or_update_helm_repo "$OBSERVABILITY_LOKI_REPO_NAME" "$OBSERVABILITY_LOKI_REPO_URL"
   _update_helm_repos
+  rendered_values_file="$(_prepare_observability_values_file "$values_file")"
 
   log "installing/upgrading Loki release $OBSERVABILITY_LOKI_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
 
@@ -305,18 +386,21 @@ install_loki_stack_if_available() {
   fi
 
   log "Values file: $values_file"
+  log "Rendered values file: $rendered_values_file"
 
   if ! helm_k3s upgrade --install "$OBSERVABILITY_LOKI_RELEASE" \
     "$OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
     --create-namespace \
     "${loki_version_args[@]}" \
-    -f "$values_file" \
+    -f "$rendered_values_file" \
     --wait \
     --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
+    rm -f "$rendered_values_file"
     fatal_observability "Loki Helm install/upgrade failed"
   fi
 
+  rm -f "$rendered_values_file"
   wait_with_progress "waiting for Loki service" 180 5 _loki_service_available || \
     fatal_observability "Loki service did not become available after Helm install"
 
@@ -324,7 +408,7 @@ install_loki_stack_if_available() {
 }
 
 install_alloy_stack_if_available() {
-  local source_dir values_file
+  local source_dir values_file rendered_values_file
 
   source_dir="$(_observability_source_dir)"
   [ -n "$source_dir" ] || return 0
@@ -343,24 +427,29 @@ install_alloy_stack_if_available() {
 
   ensure_observability_namespace
   ensure_helm_available
+  cleanup_observability_helm_namespace_conflicts
   _add_or_update_helm_repo "$OBSERVABILITY_ALLOY_REPO_NAME" "$OBSERVABILITY_ALLOY_REPO_URL"
   _update_helm_repos
+  rendered_values_file="$(_prepare_observability_values_file "$values_file")"
 
   log "installing/upgrading Alloy release $OBSERVABILITY_ALLOY_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
   log "Helm chart: $OBSERVABILITY_ALLOY_REPO_NAME/$OBSERVABILITY_ALLOY_CHART version $OBSERVABILITY_ALLOY_CHART_VERSION"
   log "Values file: $values_file"
+  log "Rendered values file: $rendered_values_file"
 
   if ! helm_k3s upgrade --install "$OBSERVABILITY_ALLOY_RELEASE" \
     "$OBSERVABILITY_ALLOY_REPO_NAME/$OBSERVABILITY_ALLOY_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
     --create-namespace \
     --version "$OBSERVABILITY_ALLOY_CHART_VERSION" \
-    -f "$values_file" \
+    -f "$rendered_values_file" \
     --wait \
     --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
+    rm -f "$rendered_values_file"
     fatal_observability "Alloy Helm install/upgrade failed"
   fi
 
+  rm -f "$rendered_values_file"
   wait_with_progress "waiting for Alloy DaemonSet" 180 5 _alloy_daemonset_available || \
     fatal_observability "Alloy DaemonSet did not become available after Helm install"
 
@@ -381,14 +470,11 @@ _render_observability_manifest() {
 
   # The source files are kept readable in git with observability/grafana defaults.
   # Render runtime namespace/host here so .env remains the operator source of truth.
-  sed -i \
-    -e "s/namespace: observability/namespace: ${OBSERVABILITY_NAMESPACE}/g" \
-    -e "s/grafana\.init-db\.lan/${GRAFANA_HOST}/g" \
-    "$rendered_file"
+  _render_observability_file_common "$rendered_file"
 
-  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan' "$rendered_file" >/dev/null 2>&1; then
-    warn "unresolved placeholder detected in rendered observability manifest from $(basename "$source_file")"
-    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan' "$rendered_file" >&2 || true
+  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >/dev/null 2>&1; then
+    warn "unresolved placeholder or stale observability namespace detected in rendered observability manifest from $(basename "$source_file")"
+    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >&2 || true
     return 1
   fi
 }
