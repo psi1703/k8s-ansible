@@ -1,875 +1,409 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
-# Normal use: bash setup.sh
+# Bundle-only release entrypoint for OTP Relay Kubernetes / Ansible artifacts.
 #
-# If started with sudo, this script repairs repo ownership and re-runs itself
-# as the original sudo user. The repo working tree must be owned by the
-# normal operator user, while privileged operations are performed via sudo.
+# Normal use:
+#   bash setup.sh
 #
-# Current design:
-#   - This server is the K3s control-plane and Ansible runner.
-#   - The libvirt provisioner creates only worker1 and worker2 VMs.
-#   - External NFS is managed separately and is not joined to Kubernetes.
+# This script intentionally DOES NOT deploy anything.
 #
-# This script:
-#   - creates/reuses .env
-#   - prompts for VM/network values when needed
-#   - provisions/repairs worker VMs when needed
-#   - repairs repo/.ssh/key ownership problems caused by accidental sudo runs
-#   - runs Ansible cluster setup using localhost as control-plane
-#   - can still run local-only installer path with --local for development
+# Bundle-only policy:
+#   - No K3s install
+#   - No Kubernetes apply
+#   - No kubectl live-cluster validation
+#   - No Helm install/upgrade
+#   - No image import into a live cluster
+#   - No Ansible cluster execution
+#   - No worker VM provisioning
+#   - No GitHub runner installation
+#
+# The production server receives only the finished bundle.
+#
+# Output:
+#   releases/<release-name>.tar.gz
+#   releases/<release-name>.tar.gz.sha256
+#
+# The bundle contains:
+#   - sanitized repository snapshot
+#   - release metadata
+#   - checksum manifest
+#   - production handoff runbook
+#   - optional image/archive files if present in known artifact directories
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-ORIGINAL_ARGS=("$@")
+RELEASE_ROOT="${RELEASE_ROOT:-$SCRIPT_DIR/releases}"
+RELEASE_NAME="${RELEASE_NAME:-otp-relay-prod-release-$(date -u +%Y%m%dT%H%M%SZ)}"
+WORK_ROOT=""
+STAGE_DIR=""
+BUNDLE_FILE=""
+CHECKSUM_FILE=""
 
-FORCE_ENV_MENU="0"
-NONINTERACTIVE="${NONINTERACTIVE:-0}"
 DRY_RUN="0"
-FORCE_LOCAL="0"
-FORCE_REPROVISION_VMS="0"
-SKIP_ANSIBLE="0"
+NONINTERACTIVE="${NONINTERACTIVE:-0}"
+INCLUDE_IMAGE_ARCHIVES="${INCLUDE_IMAGE_ARCHIVES:-1}"
 
-DEPLOY_OTP_RELAY="${DEPLOY_OTP_RELAY:-1}"
-VALIDATE_OTP_RELAY="${VALIDATE_OTP_RELAY:-0}"
+log() {
+  printf '[build-release] %s\n' "$*"
+}
 
-log() { printf '[setup] %s\n' "$*"; }
-warn() { printf '[setup] WARNING: %s\n' "$*" >&2; }
-fatal() { printf '[setup] ERROR: %s\n' "$*" >&2; exit 1; }
+warn() {
+  printf '[build-release] WARNING: %s\n' "$*" >&2
+}
+
+fatal() {
+  printf '[build-release] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
 usage() {
   cat <<'USAGE'
 Usage:
-  bash setup.sh
+  bash setup.sh [options]
 
-Optional overrides:
-  --edit-env           Open the saved .env change menu before continuing.
-  --dry-run            Detect state and print planned action without changing the system.
-  --local              Force local-only K3s/app installer path for this run.
-  --reprovision-vms    Force worker VM recreation/repair even if inventory/VMs already exist.
-  --no-ansible         Provision/update worker VMs only; skip Ansible cluster setup.
-  --noninteractive     Do not prompt where supported; requires complete .env/exported env.
-  -h, --help           Show this help.
+Bundle-only options:
+  --release-name NAME       Set release name. Default: otp-relay-prod-release-<UTC timestamp>
+  --output-dir DIR          Set output directory. Default: ./releases
+  --skip-image-archives     Do not copy existing image/archive artifacts into the bundle.
+  --dry-run                 Print what would be created without writing a bundle.
+  --noninteractive          Reserved for CI compatibility; no prompts are used.
+  -h, --help                Show this help.
 
-Default behavior:
-  bash setup.sh creates or reuses .env, validates real runtime state, provisions
-  worker VMs when required, and runs Ansible using this server as the K3s
-  control-plane.
+Forbidden old deployment options:
+  --local
+  --reprovision-vms
+  --no-ansible
+  --edit-env
 
-Current design:
-  - server/real host = K3s control-plane + Ansible runner
-  - worker1 VM + worker2 VM = K3s workers
-  - NFS = external storage, not a Kubernetes node
+This entrypoint is now bundle-only. It does not provision VMs, run Ansible,
+install K3s, apply Kubernetes resources, run Helm, import images, install
+GitHub runners, or validate a live cluster.
+
+The production server receives only the finished bundle.
 USAGE
 }
 
-bootstrap_operator_execution() {
+forbidden_old_option() {
+  local opt="$1"
+
+  fatal "$opt belongs to the old deploy/provision flow and is intentionally disabled. Use this entrypoint only to build a sealed release bundle."
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --release-name)
+        [ "$#" -ge 2 ] || fatal "--release-name requires a value"
+        RELEASE_NAME="$2"
+        shift 2
+        ;;
+      --output-dir)
+        [ "$#" -ge 2 ] || fatal "--output-dir requires a value"
+        RELEASE_ROOT="$2"
+        shift 2
+        ;;
+      --skip-image-archives)
+        INCLUDE_IMAGE_ARCHIVES="0"
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN="1"
+        shift
+        ;;
+      --noninteractive)
+        NONINTERACTIVE="1"
+        export NONINTERACTIVE
+        shift
+        ;;
+      --local|--reprovision-vms|--no-ansible|--edit-env)
+        forbidden_old_option "$1"
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fatal "unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+require_command() {
+  local cmd="$1"
+
+  command -v "$cmd" >/dev/null 2>&1 || fatal "required command missing: $cmd"
+}
+
+require_base_tools() {
+  require_command awk
+  require_command date
+  require_command find
+  require_command mkdir
+  require_command sed
+  require_command sha256sum
+  require_command sort
+  require_command tar
+}
+
+validate_release_name() {
+  case "$RELEASE_NAME" in
+    ""|.*|*/*|*\\*|*" "*)
+      fatal "release name must be non-empty and must not contain spaces, slashes, or start with dot"
+      ;;
+  esac
+
+  if ! printf '%s' "$RELEASE_NAME" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    fatal "release name contains unsupported characters: $RELEASE_NAME"
+  fi
+}
+
+absolute_dir() {
+  local input="$1"
+  local parent
+  local leaf
+
+  parent="$(dirname "$input")"
+  leaf="$(basename "$input")"
+
+  mkdir -p "$parent"
+  parent="$(cd "$parent" && pwd)"
+
+  printf '%s/%s\n' "$parent" "$leaf"
+}
+
+initialize_paths() {
+  RELEASE_ROOT="$(absolute_dir "$RELEASE_ROOT")"
+  WORK_ROOT="$RELEASE_ROOT/.build/$RELEASE_NAME"
+  STAGE_DIR="$WORK_ROOT/$RELEASE_NAME"
+  BUNDLE_FILE="$RELEASE_ROOT/$RELEASE_NAME.tar.gz"
+  CHECKSUM_FILE="$BUNDLE_FILE.sha256"
+}
+
+print_plan() {
+  log "bundle-only release build"
+  log "  source repo: $SCRIPT_DIR"
+  log "  release name: $RELEASE_NAME"
+  log "  output dir: $RELEASE_ROOT"
+  log "  bundle: $BUNDLE_FILE"
+  log "  checksum: $CHECKSUM_FILE"
+  log "  include image/archive artifacts: $INCLUDE_IMAGE_ARCHIVES"
+  log "  deploy/provision/live validation: disabled"
+}
+
+assert_not_root_required() {
   if [ "$(id -u)" -eq 0 ]; then
-    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-root}" != "root" ]; then
-      local operator_user operator_group operator_home
-
-      operator_user="$SUDO_USER"
-      operator_group="$(id -gn "$operator_user")"
-      operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
-
-      [ -n "$operator_home" ] || fatal "could not determine home directory for $operator_user"
-
-      log "setup.sh was started with sudo"
-      log "repairing repo ownership: $SCRIPT_DIR -> $operator_user:$operator_group"
-      chown -R "$operator_user:$operator_group" "$SCRIPT_DIR"
-
-      if [ -d "$operator_home/.ssh" ]; then
-        log "repairing SSH directory ownership: $operator_home/.ssh -> $operator_user:$operator_group"
-        chown -R "$operator_user:$operator_group" "$operator_home/.ssh" || true
-      fi
-
-      log "re-running setup.sh as $operator_user"
-      exec sudo -H -u "$operator_user" env \
-        HOME="$operator_home" \
-        USER="$operator_user" \
-        LOGNAME="$operator_user" \
-        PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" \
-        NONINTERACTIVE="$NONINTERACTIVE" \
-        DEPLOY_OTP_RELAY="$DEPLOY_OTP_RELAY" \
-        VALIDATE_OTP_RELAY="$VALIDATE_OTP_RELAY" \
-        bash "$SCRIPT_DIR/setup.sh" "${ORIGINAL_ARGS[@]}"
-    fi
-
-    fatal "setup.sh was run as root directly. Run it with sudo from the operator user, or run it as the operator user."
-  fi
-
-  command -v sudo >/dev/null 2>&1 || fatal "sudo is required. Install sudo or run from a user with sudo access."
-}
-
-ensure_repo_writable() {
-  if [ -w "$SCRIPT_DIR" ]; then
-    return 0
-  fi
-
-  warn "$SCRIPT_DIR is not writable by $(id -un). Attempting to repair ownership with sudo."
-  sudo chown -R "$(id -un):$(id -gn)" "$SCRIPT_DIR"
-
-  if [ ! -w "$SCRIPT_DIR" ]; then
-    fatal "$SCRIPT_DIR is still not writable after ownership repair."
-  fi
-
-  log "repaired repository ownership for $(id -un):$(id -gn)"
-}
-
-ensure_operator_ssh_key_permissions() {
-  local operator_user operator_group operator_home ssh_dir key pub known_hosts
-
-  operator_user="$(id -un)"
-  operator_group="$(id -gn)"
-  operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
-  [ -n "$operator_home" ] || fatal "could not determine home directory for $operator_user"
-
-  ssh_dir="$operator_home/.ssh"
-  key="${SSH_KEY:-$ssh_dir/otp-relay-cluster}"
-  pub="${key}.pub"
-  known_hosts="$ssh_dir/known_hosts"
-
-  if [ -d "$ssh_dir" ]; then
-    log "repairing SSH directory ownership/permissions: $ssh_dir"
-    sudo chown -R "$operator_user:$operator_group" "$ssh_dir"
-  else
-    log "creating SSH directory: $ssh_dir"
-    mkdir -p "$ssh_dir"
-  fi
-
-  chmod 700 "$ssh_dir" || true
-
-  if [ -f "$key" ]; then
-    log "repairing SSH private key ownership/permissions: $key"
-    sudo chown "$operator_user:$operator_group" "$key"
-    chmod 600 "$key"
-  fi
-
-  if [ -f "$pub" ]; then
-    log "repairing SSH public key ownership/permissions: $pub"
-    sudo chown "$operator_user:$operator_group" "$pub"
-    chmod 644 "$pub"
-  fi
-
-  if [ -f "$known_hosts" ]; then
-    log "repairing known_hosts ownership/permissions: $known_hosts"
-    sudo chown "$operator_user:$operator_group" "$known_hosts"
-    chmod 644 "$known_hosts" || true
+    warn "running as root is not required for bundle creation"
   fi
 }
 
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --edit-env) FORCE_ENV_MENU="1" ;;
-    --dry-run) DRY_RUN="1" ;;
-    --local) FORCE_LOCAL="1" ;;
-    --reprovision-vms) FORCE_REPROVISION_VMS="1" ;;
-    --no-ansible) SKIP_ANSIBLE="1" ;;
-    --noninteractive) NONINTERACTIVE="1"; export NONINTERACTIVE ;;
-    -h|--help) usage; exit 0 ;;
-    *) fatal "unknown argument: $1" ;;
-  esac
-  shift
-done
+assert_repo_shape() {
+  if [ ! -d "$SCRIPT_DIR" ]; then
+    fatal "script directory does not exist: $SCRIPT_DIR"
+  fi
 
-restore_setup_logging() {
-  eval 'log() { printf '\''[setup] %s\n'\'' "$*"; }'
-  eval 'warn() { printf '\''[setup] WARNING: %s\n'\'' "$*" >&2; }'
-  eval 'fatal() { printf '\''[setup] ERROR: %s\n'\'' "$*" >&2; exit 1; }'
-}
+  if [ ! -f "$SCRIPT_DIR/setup.sh" ]; then
+    fatal "setup.sh not found in script directory: $SCRIPT_DIR"
+  fi
 
-source_installer_env_libs() {
-  [ -f "$SCRIPT_DIR/scripts/lib/common.sh" ] || fatal "missing scripts/lib/common.sh"
-  [ -f "$SCRIPT_DIR/scripts/lib/env.sh" ] || fatal "missing scripts/lib/env.sh"
-
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/scripts/lib/common.sh"
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/scripts/lib/env.sh"
-  restore_setup_logging
-}
-
-chown_env_to_original_user() {
-  local file="${ENV_FILE:-$SCRIPT_DIR/.env}"
-
-  if [ -f "$file" ]; then
-    chmod 0600 "$file" || true
+  if [ ! -d "$SCRIPT_DIR/automation" ] && [ ! -d "$SCRIPT_DIR/scripts" ] && [ ! -d "$SCRIPT_DIR/manifests" ] && [ ! -d "$SCRIPT_DIR/k8s" ]; then
+    warn "no common project directories found: automation, scripts, manifests, or k8s"
+    warn "continuing because a sanitized repository snapshot can still be bundled"
   fi
 }
 
-source_env_if_present() {
-  local file="${ENV_FILE:-$SCRIPT_DIR/.env}"
-  local forced_noninteractive="0"
+prepare_stage() {
+  rm -rf "$WORK_ROOT"
+  mkdir -p "$STAGE_DIR"
+  mkdir -p "$STAGE_DIR/metadata"
+  mkdir -p "$STAGE_DIR/source"
+  mkdir -p "$STAGE_DIR/artifacts"
+  mkdir -p "$STAGE_DIR/runbooks"
+}
 
-  [ -f "$file" ] || return 0
+git_value() {
+  local args=("$@")
 
-  # Keep command-line/runtime noninteractive mode from being overwritten by
-  # NONINTERACTIVE=0 persisted in .env. Other persisted values remain sourced.
-  if [ "${NONINTERACTIVE:-0}" = "1" ]; then
-    forced_noninteractive="1"
-  fi
-
-  if declare -F source_env_file >/dev/null 2>&1; then
-    source_env_file "$file"
-  else
-    bash -n "$file" >/dev/null 2>&1 || fatal "$file contains invalid shell syntax; repair or remove it before continuing"
-    set -a
-    # shellcheck disable=SC1090
-    . "$file"
-    set +a
-  fi
-
-  if [ "$forced_noninteractive" = "1" ]; then
-    NONINTERACTIVE="1"
-    export NONINTERACTIVE
-  fi
-
-  if declare -F normalize_loaded_env >/dev/null 2>&1; then
-    normalize_loaded_env
+  if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$SCRIPT_DIR" "${args[@]}" 2>/dev/null || true
   fi
 }
 
-run_as_original_user() {
-  "$@"
-}
+write_metadata() {
+  local commit
+  local branch
+  local dirty
+  local created_utc
 
-run_with_sudo_or_root() {
-  local cmd=("$@")
-  sudo "${cmd[@]}"
-}
+  created_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  commit="$(git_value rev-parse HEAD)"
+  branch="$(git_value rev-parse --abbrev-ref HEAD)"
 
-ensure_base_env() {
-  source_installer_env_libs
-  export SCRIPT_DIR ENV_FILE NONINTERACTIVE
-  ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
-
-  load_or_create_env
-
-  if [ "$FORCE_ENV_MENU" = "1" ]; then
-    change_env_menu
-    source_env_file "$ENV_FILE"
-    normalize_loaded_env
-    validate_env_required
-  fi
-
-  chown_env_to_original_user
-}
-
-_env_escape_sed() {
-  printf '%s' "$1" | sed 's/[\\&]/\\&/g'
-}
-
-quote_env_value() {
-  local value="${1:-}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "$value"
-}
-
-set_env_key() {
-  local key="$1"
-  local value="$2"
-  local file="${ENV_FILE:-$SCRIPT_DIR/.env}"
-  local quoted escaped
-
-  quoted="$(quote_env_value "$value")"
-  escaped="$(_env_escape_sed "$key=$quoted")"
-
-  touch "$file"
-  chmod 0600 "$file" || true
-  chown_env_to_original_user
-
-  if grep -qE "^${key}=" "$file"; then
-    sed -i "s|^${key}=.*|${escaped}|" "$file"
-  else
-    printf '%s=%s\n' "$key" "$quoted" >> "$file"
-  fi
-
-  printf -v "$key" '%s' "$value"
-  export "$key"
-}
-
-prompt_value() {
-  local key="$1"
-  local label="$2"
-  local required="${3:-1}"
-  local secret="${4:-0}"
-  local default="${!key:-}"
-  local input=""
-
-  if [ "$NONINTERACTIVE" = "1" ]; then
-    if [ "$required" = "1" ] && [ -z "$default" ]; then
-      fatal "$key is required; set it in .env or export it"
-    fi
-    set_env_key "$key" "$default"
-    return 0
-  fi
-
-  while true; do
-    if [ "$secret" = "1" ]; then
-      if [ -n "$default" ]; then
-        read -r -s -p "$label [currently set, press Enter to keep]: " input || input=""
-      else
-        read -r -s -p "$label: " input || input=""
-      fi
-      printf '\n'
+  dirty="unknown"
+  if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if git -C "$SCRIPT_DIR" diff --quiet -- . && git -C "$SCRIPT_DIR" diff --cached --quiet -- .; then
+      dirty="no"
     else
-      if [ -n "$default" ]; then
-        read -r -p "$label [$default]: " input || input=""
-      else
-        read -r -p "$label: " input || input=""
-      fi
+      dirty="yes"
     fi
-
-    input="${input:-$default}"
-
-    if [ -n "$input" ] || [ "$required" != "1" ]; then
-      set_env_key "$key" "$input"
-      return 0
-    fi
-
-    warn "$key is required"
-  done
-}
-
-default_gateway() {
-  ip route show default 2>/dev/null | awk '{print $3; exit}'
-}
-
-default_iface() {
-  ip route show default 2>/dev/null | awk '{print $5; exit}'
-}
-
-default_dns() {
-  local dns=""
-
-  dns="$(awk '/^nameserver / {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
-
-  case "$dns" in
-    ""|127.*|::1)
-      dns="$(default_gateway)"
-      ;;
-  esac
-
-  case "$dns" in
-    ""|127.*|::1)
-      dns="1.1.1.1"
-      ;;
-  esac
-
-  printf '%s\n' "$dns"
-}
-
-sanitize_dns_value() {
-  local dns="${1:-}"
-
-  case "$dns" in
-    ""|127.*|::1)
-      dns="$(default_gateway)"
-      ;;
-  esac
-
-  case "$dns" in
-    ""|127.*|::1)
-      dns="1.1.1.1"
-      ;;
-  esac
-
-  printf '%s\n' "$dns"
-}
-
-default_host_cidr() {
-  local iface="${HOST_IFACE:-}"
-
-  [ -n "$iface" ] || iface="$(default_iface)"
-  [ -n "$iface" ] || return 0
-
-  ip -o -4 addr show dev "$iface" 2>/dev/null | awk '{print $4; exit}'
-}
-
-default_scan_prefix() {
-  local cidr="${HOST_IP_CIDR:-}"
-  local ip="${cidr%%/*}"
-
-  if printf '%s' "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-    printf '%s.%s.%s' \
-      "$(printf '%s' "$ip" | cut -d. -f1)" \
-      "$(printf '%s' "$ip" | cut -d. -f2)" \
-      "$(printf '%s' "$ip" | cut -d. -f3)"
-  fi
-}
-
-ensure_vm_env() {
-  source_env_if_present
-
-  BRIDGE_NAME="${BRIDGE_NAME:-br0}"
-  HOST_IFACE="${HOST_IFACE:-$(default_iface)}"
-  HOST_IP_CIDR="${HOST_IP_CIDR:-$(default_host_cidr)}"
-  GATEWAY="${GATEWAY:-$(default_gateway)}"
-  DNS="$(sanitize_dns_value "${DNS:-$(default_dns)}")"
-  PREFIX="${PREFIX:-24}"
-  IP_SCAN_PREFIX="${IP_SCAN_PREFIX:-$(default_scan_prefix)}"
-  IP_SCAN_START="${IP_SCAN_START:-100}"
-  IP_SCAN_END="${IP_SCAN_END:-249}"
-  VM_USER="${VM_USER:-otp-relay}"
-  VM_PASSWORD="${VM_PASSWORD:-}"
-  VM_RAM_MB="${VM_RAM_MB:-3072}"
-  VM_VCPUS="${VM_VCPUS:-2}"
-  VM_DISK_GB="${VM_DISK_GB:-20}"
-  AUTO_ASSIGN_IPS="${AUTO_ASSIGN_IPS:-1}"
-
-  cat <<'EOF_VM_INFO'
-
-VM provisioning settings
-EOF_VM_INFO
-
-  prompt_value BRIDGE_NAME "Libvirt bridge name" 1 0
-  prompt_value HOST_IFACE "Host interface to bridge for worker VMs" 1 0
-  prompt_value HOST_IP_CIDR "Host bridge IP/CIDR" 1 0
-  prompt_value GATEWAY "Network gateway" 1 0
-  prompt_value DNS "DNS server for worker VMs" 1 0
-  prompt_value PREFIX "Network prefix length" 1 0
-  prompt_value IP_SCAN_PREFIX "IP scan prefix for worker VM auto assignment, for example 172.31.11" 1 0
-  prompt_value IP_SCAN_START "IP scan start octet" 1 0
-  prompt_value IP_SCAN_END "IP scan end octet" 1 0
-  prompt_value VM_USER "Worker VM login user" 1 0
-  prompt_value VM_PASSWORD "Worker VM login password" 1 1
-
-  if [ "${VM_PASSWORD:-}" = "otp-relay" ] || [ "${VM_PASSWORD:-}" = "CHANGE_ME_VM_PASSWORD" ]; then
-  fatal "VM_PASSWORD must be changed from the default before provisioning worker VMs"
   fi
 
-  prompt_value VM_RAM_MB "Worker VM RAM MB" 1 0
-  prompt_value VM_VCPUS "Worker VM vCPUs" 1 0
-  prompt_value VM_DISK_GB "Worker VM disk GB" 1 0
-  prompt_value AUTO_ASSIGN_IPS "Auto assign free worker VM IPs? 1=yes, 0=no" 1 0
+  cat > "$STAGE_DIR/metadata/release.env" <<EOF_METADATA
+RELEASE_NAME="$RELEASE_NAME"
+CREATED_UTC="$created_utc"
+SOURCE_DIR="$SCRIPT_DIR"
+GIT_BRANCH="${branch:-unknown}"
+GIT_COMMIT="${commit:-unknown}"
+GIT_DIRTY="$dirty"
+BUNDLE_ONLY="1"
+DEPLOYMENT_EXECUTED="0"
+ANSIBLE_EXECUTED="0"
+K3S_INSTALLED="0"
+KUBECTL_APPLIED="0"
+HELM_EXECUTED="0"
+IMAGES_IMPORTED_TO_CLUSTER="0"
+LIVE_CLUSTER_VALIDATED="0"
+PRODUCTION_SERVER_RECEIVES_ONLY_FINISHED_BUNDLE="1"
+EOF_METADATA
 
-  if [ "${AUTO_ASSIGN_IPS:-1}" != "1" ]; then
-    prompt_value WORKER1_IP "Worker 1 VM IP" 1 0
-    prompt_value WORKER2_IP "Worker 2 VM IP" 1 0
+  cat > "$STAGE_DIR/metadata/policy.txt" <<'EOF_POLICY'
+Bundle-only release policy
+
+This release was produced as a sealed handoff bundle.
+
+The build path must not:
+- install K3s
+- apply Kubernetes resources
+- import images into a live cluster
+- run Helm install/upgrade against a cluster
+- roll out deployments
+- install GitHub runners
+- provision worker VMs
+- validate a live cluster
+
+The production server receives only the finished bundle.
+EOF_POLICY
+}
+
+copy_repo_snapshot() {
+  log "copying sanitized repository snapshot"
+
+  (
+    cd "$SCRIPT_DIR"
+
+    tar \
+      --exclude='./.git' \
+      --exclude='./.github/actions-runner' \
+      --exclude='./.env' \
+      --exclude='./.env.*' \
+      --exclude='./*.env' \
+      --exclude='./releases' \
+      --exclude='./dist' \
+      --exclude='./build' \
+      --exclude='./tmp' \
+      --exclude='./.cache' \
+      --exclude='./__pycache__' \
+      --exclude='./*.pyc' \
+      --exclude='./*.qcow2' \
+      --exclude='./*.iso' \
+      --exclude='./*.img' \
+      --exclude='./*.pem' \
+      --exclude='./*.key' \
+      --exclude='./id_rsa' \
+      --exclude='./id_ed25519' \
+      --exclude='./otp-relay-cluster' \
+      --exclude='./kubeconfig' \
+      --exclude='./kubeconfig.*' \
+      --exclude='./admin.conf' \
+      -cf - .
+  ) | (
+    cd "$STAGE_DIR/source"
+    tar -xf -
+  )
+}
+
+copy_existing_image_archives() {
+  local src
+  local dest="$STAGE_DIR/artifacts/image-archives"
+  local copied="0"
+
+  if [ "$INCLUDE_IMAGE_ARCHIVES" != "1" ]; then
+    log "skipping image/archive artifact copy"
+    return 0
   fi
 
-  source_env_if_present
-}
+  mkdir -p "$dest"
 
-provisioner_path() {
-  local p="$SCRIPT_DIR/automation/libvirt/provision-vms.sh"
-  [ -f "$p" ] && printf '%s\n' "$p"
-}
-
-ansible_runner_path() {
-  local candidate
-
-  for candidate in \
-    "$SCRIPT_DIR/automation/ansible/run-cluster" \
-    "$SCRIPT_DIR/automation/ansible/run-cluster.sh"; do
-    if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
+  for src in \
+    "$SCRIPT_DIR/images" \
+    "$SCRIPT_DIR/image-archives" \
+    "$SCRIPT_DIR/release-images" \
+    "$SCRIPT_DIR/artifacts/images" \
+    "$SCRIPT_DIR/artifacts/image-archives" \
+    "$SCRIPT_DIR/output/images" \
+    "$SCRIPT_DIR/output/image-archives"; do
+    if [ -d "$src" ]; then
+      log "copying existing image/archive artifacts from: $src"
+      find "$src" -type f \( \
+        -name '*.tar' -o \
+        -name '*.tar.gz' -o \
+        -name '*.tgz' -o \
+        -name '*.oci' -o \
+        -name '*.oci.tar' -o \
+        -name '*.oci.tar.gz' \
+      \) -print0 |
+        while IFS= read -r -d '' file; do
+          cp -f "$file" "$dest/"
+          copied="1"
+        done
     fi
   done
 
-  return 1
-}
-
-ansible_inventory_path() {
-  local candidate
-
-  for candidate in \
-    "$SCRIPT_DIR/automation/ansible/inventory.generated.ini"; do
-    if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-inventory_worker_hosts() {
-  local inventory="$1"
-
-  awk '
-    BEGIN { in_workers=0 }
-    /^[[:space:]]*$/ { next }
-    /^[[:space:]]*#/ { next }
-    /^\[/ {
-      in_workers = ($0 == "[workers]")
-      next
-    }
-    in_workers {
-      host=$1
-      ip=""
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ /^ansible_host=/) {
-          split($i, a, "=")
-          ip=a[2]
-        }
-      }
-      if (host != "" && ip != "") {
-        print host, ip
-      }
-    }
-  ' "$inventory"
-}
-
-ssh_ready_for_inventory_host() {
-  local host="$1"
-  local ip="$2"
-  local user="${VM_USER:-otp-relay}"
-  local operator_user
-  local operator_home
-  local key
-  local known_hosts
-
-  operator_user="$(id -un)"
-  operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
-  key="${SSH_KEY:-${operator_home}/.ssh/otp-relay-cluster}"
-  known_hosts="${operator_home}/.ssh/known_hosts"
-
-  [ -n "$host" ] || return 1
-  [ -n "$ip" ] || return 1
-  [ -f "$key" ] || return 1
-  [ -r "$key" ] || return 1
-
-  ssh-keygen -f "$known_hosts" -R "$ip" >/dev/null 2>&1 || true
-
-  ssh \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="$known_hosts" \
-    -o ConnectTimeout=5 \
-    -i "$key" \
-    "${user}@${ip}" \
-    'hostname >/dev/null 2>&1' >/dev/null 2>&1
-}
-
-inventory_workers_ssh_ready() {
-  local inventory="$1"
-  local host ip
-  local count=0
-
-  [ -f "$inventory" ] || return 1
-
-  while read -r host ip; do
-    [ -n "$host" ] || continue
-    count=$((count + 1))
-
-    if ! ssh_ready_for_inventory_host "$host" "$ip"; then
-      return 1
-    fi
-  done <<EOF_INVENTORY_HOSTS
-$(inventory_worker_hosts "$inventory")
-EOF_INVENTORY_HOSTS
-
-  [ "$count" -gt 0 ]
-}
-
-print_inventory_reachability() {
-  local inventory="$1"
-  local host ip
-
-  [ -f "$inventory" ] || return 0
-
-  while read -r host ip; do
-    [ -n "$host" ] || continue
-
-    if ssh_ready_for_inventory_host "$host" "$ip"; then
-      log "  worker ${host} (${ip}): ssh reachable"
-    else
-      log "  worker ${host} (${ip}): ssh unreachable"
-    fi
-  done <<EOF_INVENTORY_HOSTS
-$(inventory_worker_hosts "$inventory")
-EOF_INVENTORY_HOSTS
-}
-
-local_kubectl() {
-  if command -v k3s >/dev/null 2>&1; then
-    sudo k3s kubectl "$@"
-  elif command -v kubectl >/dev/null 2>&1; then
-    kubectl "$@"
-  else
-    return 127
+  if ! find "$dest" -type f | grep -q .; then
+    rmdir "$dest"
+    warn "no existing image/archive artifacts found to copy"
+    warn "this script does not build or import images; add image archives before release if required"
+  elif [ "$copied" = "1" ]; then
+    log "image/archive artifacts copied"
   fi
 }
 
-local_k3s_reachable() {
-  local_kubectl get nodes >/dev/null 2>&1
-}
+write_prod_runbook() {
+  cat > "$STAGE_DIR/runbooks/PROD_HANDOFF.md" <<'EOF_RUNBOOK'
+# OTP Relay Production Release Handoff
 
-local_k3s_installed() {
-  command -v k3s >/dev/null 2>&1 && return 0
-  systemctl list-unit-files k3s.service >/dev/null 2>&1 && return 0
-  [ -d /var/lib/rancher/k3s ] && return 0
-  return 1
-}
+This is a sealed production release bundle.
 
-namespace_exists() {
-  local ns="${NAMESPACE:-otp-relay}"
-  local_kubectl get namespace "$ns" >/dev/null 2>&1
-}
+## Important boundary
 
-app_deployed() {
-  local ns="${NAMESPACE:-otp-relay}"
-  local_kubectl get deploy otp-relay -n "$ns" >/dev/null 2>&1
-}
+This bundle was built without deploying anything.
 
-redis_deployed() {
-  local ns="${NAMESPACE:-otp-relay}"
-  local_kubectl get statefulset otp-redis -n "$ns" >/dev/null 2>&1
-}
+The build path did not:
 
-virsh_cmd() {
-  if command -v virsh >/dev/null 2>&1; then
-    if virsh list --all >/dev/null 2>&1; then
-      virsh "$@"
-    else
-      sudo virsh "$@"
-    fi
-  else
-    return 127
-  fi
-}
+- install K3s
+- apply Kubernetes resources
+- import images into a live cluster
+- run Helm install/upgrade
+- roll out deployments
+- install GitHub runners
+- provision worker VMs
+- validate a live cluster
 
-libvirt_worker_vm_exists() {
-  command -v virsh >/dev/null 2>&1 || return 1
+The production server receives only this finished bundle.
 
-  local w1_name="${WORKER1_NAME:-otp-worker1}"
-  local w2_name="${WORKER2_NAME:-otp-worker2}"
+## Files
 
-  virsh_cmd list --all --name 2>/dev/null | grep -Eq "^(${w1_name}|${w2_name})$"
-}
+- `metadata/release.env` contains release identity and source metadata.
+- `metadata/policy.txt` records the bundle-only policy.
+- `source/` contains the sanitized source snapshot used to build the handoff.
+- `artifacts/` may contain prebuilt image/archive artifacts if they existed before bundling.
+- `CHECKSUMS.sha256` contains checksums for all files inside the expanded bundle.
 
-detect_setup_path() {
-  local provisioner=""
-  local runner=""
-  local inventory=""
+## Verification on production
 
-  provisioner="$(provisioner_path || true)"
-  runner="$(ansible_runner_path || true)"
-  inventory="$(ansible_inventory_path || true)"
+After copying the bundle to production, verify the tarball checksum before extracting:
 
-  if [ "$FORCE_LOCAL" = "1" ]; then
-    printf '%s\n' "local-forced"
-    return 0
-  fi
-
-  if [ "$FORCE_REPROVISION_VMS" = "1" ]; then
-    [ -n "$provisioner" ] || fatal "--reprovision-vms requested but automation/libvirt/provision-vms.sh is missing"
-    [ -n "$runner" ] || fatal "--reprovision-vms requested but no Ansible runner was found"
-    printf '%s\n' "vm-provision"
-    return 0
-  fi
-
-  if [ -n "$inventory" ] && [ -n "$runner" ]; then
-    if inventory_workers_ssh_ready "$inventory"; then
-      printf '%s\n' "ansible-existing"
-      return 0
-    fi
-
-    warn "generated inventory exists, but one or more worker VMs are not SSH reachable"
-
-    if [ -n "$provisioner" ]; then
-      printf '%s\n' "vm-provision"
-      return 0
-    fi
-
-    fatal "worker inventory is unreachable and VM provisioner is missing"
-  fi
-
-  if [ -n "$provisioner" ] && [ -n "$runner" ]; then
-    printf '%s\n' "vm-provision"
-    return 0
-  fi
-
-  if local_k3s_reachable; then
-    warn "Ansible/provisioner path not available; falling back to local existing cluster"
-    printf '%s\n' "local-existing"
-    return 0
-  fi
-
-  warn "Ansible/provisioner path not available; falling back to local fresh installer"
-  printf '%s\n' "local-fresh"
-}
-
-print_detected_state() {
-  local provisioner
-  local runner
-  local inventory
-
-  provisioner="$(provisioner_path || true)"
-  runner="$(ansible_runner_path || true)"
-  inventory="$(ansible_inventory_path || true)"
-
-  log "detected state:"
-  log "  .env: $([ -f "$SCRIPT_DIR/.env" ] && echo present || echo missing)"
-  log "  provisioner: ${provisioner:-missing}"
-  log "  ansible runner: ${runner:-missing}"
-  log "  ansible inventory: ${inventory:-missing}"
-  log "  control-plane: localhost / this server"
-
-  if [ -n "$inventory" ]; then
-    print_inventory_reachability "$inventory"
-  fi
-
-  if local_k3s_reachable; then
-    log "  local cluster: reachable"
-  elif local_k3s_installed; then
-    log "  local cluster: installed but not reachable"
-  else
-    log "  local cluster: missing"
-  fi
-
-  if libvirt_worker_vm_exists; then
-    log "  libvirt worker VMs: present"
-  else
-    log "  libvirt worker VMs: missing or virsh unavailable"
-  fi
-
-  if local_k3s_reachable && namespace_exists; then
-    log "  namespace ${NAMESPACE:-otp-relay}: present"
-  else
-    log "  namespace ${NAMESPACE:-otp-relay}: not detected locally"
-  fi
-
-  if local_k3s_reachable && app_deployed; then
-    log "  app deployment: present locally"
-  else
-    log "  app deployment: not detected locally"
-  fi
-
-  if local_k3s_reachable && redis_deployed; then
-    log "  redis: present locally"
-  else
-    log "  redis: not detected locally"
-  fi
-}
-
-run_local_install() {
-  [ -f "$SCRIPT_DIR/install-otp-relay-k8s.sh" ] || fatal "install-otp-relay-k8s.sh is missing"
-
-  log "running local-only installer: install-otp-relay-k8s.sh"
-  warn "local-only mode bypasses worker VM provisioning and Ansible cluster setup"
-  run_with_sudo_or_root bash "$SCRIPT_DIR/install-otp-relay-k8s.sh"
-}
-
-run_vm_provisioner() {
-  local provisioner inventory
-
-  provisioner="$(provisioner_path || true)"
-  [ -n "$provisioner" ] || fatal "missing VM provisioner: automation/libvirt/provision-vms.sh"
-
-  ensure_vm_env
-  chown_env_to_original_user
-  ensure_operator_ssh_key_permissions
-
-  inventory="$(ansible_inventory_path || true)"
-
-  if [ "$FORCE_REPROVISION_VMS" = "1" ]; then
-    export RECREATE_VMS="1"
-  elif [ -n "$inventory" ] && ! inventory_workers_ssh_ready "$inventory"; then
-    warn "existing worker inventory is not reachable; forcing worker VM recreation/repair"
-    export RECREATE_VMS="1"
-  fi
-
-  log "running worker VM provisioner: automation/libvirt/provision-vms.sh"
-  run_as_original_user env RECREATE_VMS="${RECREATE_VMS:-0}" bash "$provisioner"
-
-  ensure_operator_ssh_key_permissions
-}
-
-run_ansible_cluster() {
-  local runner inventory
-  local elapsed=0
-
-  runner="$(ansible_runner_path || true)"
-  inventory="$(ansible_inventory_path || true)"
-
-  [ -n "$runner" ] || fatal "missing Ansible runner: automation/ansible/run-cluster or run-cluster.sh"
-  [ -n "$inventory" ] || fatal "missing generated inventory; run worker VM provisioning first"
-
-  ensure_operator_ssh_key_permissions
-
-  log "waiting for worker VMs to become SSH reachable (up to 180s)..."
-
-  until inventory_workers_ssh_ready "$inventory"; do
-    if [ "$elapsed" -ge 180 ]; then
-      fatal "worker VMs are not SSH reachable after ${elapsed}s; check VM console or rerun setup"
-    fi
-
-    ensure_operator_ssh_key_permissions
-    log "  worker VMs not yet reachable, retrying in 10s (${elapsed}s elapsed)..."
-    sleep 10
-    elapsed=$((elapsed + 10))
-  done
-
-  log "worker VMs are SSH reachable"
-
-  if [ "$SKIP_ANSIBLE" = "1" ]; then
-    log "Ansible cluster setup skipped by --no-ansible"
-    return 0
-  fi
-
-  log "running Ansible cluster setup with inventory: $inventory"
-
-  run_as_original_user env \
-    INVENTORY="$inventory" \
-    DEPLOY_OTP_RELAY="$DEPLOY_OTP_RELAY" \
-    VALIDATE_OTP_RELAY="$VALIDATE_OTP_RELAY" \
-    bash "$runner"
-}
-
-print_final_status() {
-  log "final local status, if available"
-
-  if local_k3s_reachable; then
-    local_kubectl get nodes -o wide || true
-    local_kubectl get pods -n "${NAMESPACE:-otp-relay}" -o wide || true
-    local_kubectl get svc -n "${NAMESPACE:-otp-relay}" || true
-    local_kubectl get ingress -n "${NAMESPACE:-otp-relay}" || true
-  else
-    log "no local kubectl/k3s cluster reachable from this host"
-  fi
-}
-
-main() {
-  local path
-
-  bootstrap_operator_execution
-  ensure_repo_writable
-
-  ensure_base_env
-  ensure_operator_ssh_key_permissions
-  print_detected_state
-  path="$(detect_setup_path)"
-  log "selected setup path: $path"
-
-  if [ "$DRY_RUN" = "1" ]; then
-    log "dry-run requested; no changes will be made"
-    return 0
-  fi
-
-  case "$path" in
-    vm-provision)
-      run_vm_provisioner
-      run_ansible_cluster
-      ;;
-    ansible-existing)
-      run_ansible_cluster
-      ;;
-    local-existing|local-fresh|local-forced)
-      run_local_install
-      ;;
-    *)
-      fatal "unsupported detected setup path: $path"
-      ;;
-  esac
-
-  print_final_status
-}
-
-main "$@"
+```bash
+sha256sum -c otp-relay-prod-release-*.tar.gz.sha256
