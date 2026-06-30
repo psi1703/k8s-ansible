@@ -258,7 +258,7 @@ _storage_jsonpath() {
 
 apply_app_storage_resources() {
   local pvc_name="otp-relay-data"
-  local pv_name="${NFS_PV_NAME:-otp-relay-data-nfs-pv}"
+  local pv_name="${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}"
   local existing_server=""
   local existing_path=""
   local existing_sc=""
@@ -364,7 +364,13 @@ apply_redis_resources_if_required() {
   fi
 
   log "applying Redis HA shared-state resources"
-  apply_manifest_if_exists "$MANIFEST_DIR/redis-nfs-pv.yaml" "Redis NFS PersistentVolume"
+
+  if [ "${REDIS_STORAGE_CLASS:-}" = "local-path" ]; then
+    log "REDIS_STORAGE_CLASS=local-path; skipping Redis NFS PersistentVolume"
+  else
+    apply_manifest_if_exists "$MANIFEST_DIR/redis-nfs-pv.yaml" "Redis NFS PersistentVolume"
+  fi
+
   apply_manifest_if_exists "$MANIFEST_DIR/redis-configmap.yaml" "Redis ConfigMap"
   apply_manifest_if_exists "$MANIFEST_DIR/redis-service.yaml" "Redis Service"
   apply_manifest_if_exists "$MANIFEST_DIR/redis-statefulset.yaml" "Redis StatefulSet"
