@@ -1,81 +1,77 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# GitHub Actions runner helpers for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Do not install GitHub Actions runners.
+#   - Do not configure runner services.
+#   - Do not register runners.
+#   - Do not download runner packages.
+#   - Do not create runner users.
+#
+# The production server receives only the finished bundle.
 
-write_runner_sudoers() {
-  [ -n "${GITHUB_RUNNER_USER:-}" ] || fatal "GITHUB_RUNNER_USER is required before writing runner sudoers."
-  [ -n "${GITHUB_RUNNER_DIR:-}" ] || fatal "GITHUB_RUNNER_DIR is required before writing runner sudoers."
-  [ -n "${INSTALL_DIR:-}" ] || fatal "INSTALL_DIR is required before writing runner sudoers."
+_github_runner_forbid_action() {
+  local action="$1"
 
-  if ! id -u "$GITHUB_RUNNER_USER" >/dev/null 2>&1; then
-    log "creating system user $GITHUB_RUNNER_USER for GitHub Actions runner"
-    useradd --system --create-home --shell /bin/bash "$GITHUB_RUNNER_USER"
-  fi
-
-  local sudoers_file="/etc/sudoers.d/otp-relay-actions-runner"
-  log "granting $GITHUB_RUNNER_USER narrow passwordless sudo for the OTP Relay installer"
-
-  cat > "$sudoers_file" <<EOF_SUDOERS
-$GITHUB_RUNNER_USER ALL=(root) NOPASSWD:SETENV: /bin/bash $INSTALL_DIR/install-otp-relay-k8s.sh
-$GITHUB_RUNNER_USER ALL=(root) NOPASSWD:SETENV: /usr/bin/bash $INSTALL_DIR/install-otp-relay-k8s.sh
-$GITHUB_RUNNER_USER ALL=(root) NOPASSWD:SETENV: /bin/bash $GITHUB_RUNNER_DIR/_work/*/*/install-otp-relay-k8s.sh
-$GITHUB_RUNNER_USER ALL=(root) NOPASSWD:SETENV: /usr/bin/bash $GITHUB_RUNNER_DIR/_work/*/*/install-otp-relay-k8s.sh
-EOF_SUDOERS
-
-  chmod 0440 "$sudoers_file"
-  visudo -cf "$sudoers_file" >/dev/null
+  fatal "forbidden GitHub runner action in bundle-only mode: $action"
 }
 
-runner_service_exists_for_dir() {
-  [ -n "${GITHUB_RUNNER_DIR:-}" ] || return 1
+normalize_github_runner_settings() {
+  INSTALL_GITHUB_RUNNER="0"
+  RUNNER_ONLY="0"
+  GITHUB_RUNNER_URL=""
+  GITHUB_RUNNER_TOKEN=""
+  GITHUB_RUNNER_DIR=""
+  GITHUB_RUNNER_USER=""
 
-  if [ -f "$GITHUB_RUNNER_DIR/.service" ]; then
-    return 0
-  fi
+  export INSTALL_GITHUB_RUNNER
+  export RUNNER_ONLY
+  export GITHUB_RUNNER_URL
+  export GITHUB_RUNNER_TOKEN
+  export GITHUB_RUNNER_DIR
+  export GITHUB_RUNNER_USER
 
-  systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | grep -q '^actions\.runner\.'
+  log "GitHub runner setup disabled in bundle-only mode"
+}
+
+validate_github_runner_settings() {
+  normalize_github_runner_settings
+}
+
+prompt_optional_runner_setup() {
+  normalize_github_runner_settings
+}
+
+install_github_runner_if_requested() {
+  normalize_github_runner_settings
+  log "skipping GitHub Actions runner installation in bundle-only mode"
 }
 
 install_github_runner() {
-  [ "${INSTALL_GITHUB_RUNNER:-0}" = "1" ] || return 0
+  _github_runner_forbid_action "install GitHub Actions runner"
+}
 
-  [ -n "${RUNNER_ARCH:-}" ] || fatal "unsupported architecture for GitHub runner: ${ARCH_RAW:-unknown}"
-  [ -n "${GITHUB_RUNNER_URL:-}" ] || fatal "INSTALL_GITHUB_RUNNER=1 requires GITHUB_RUNNER_URL."
-  [ -n "${GITHUB_RUNNER_TOKEN:-}" ] || fatal "INSTALL_GITHUB_RUNNER=1 requires GITHUB_RUNNER_TOKEN."
-  [ -n "${GITHUB_RUNNER_USER:-}" ] || fatal "INSTALL_GITHUB_RUNNER=1 requires GITHUB_RUNNER_USER."
-  [ -n "${GITHUB_RUNNER_DIR:-}" ] || fatal "INSTALL_GITHUB_RUNNER=1 requires GITHUB_RUNNER_DIR."
+create_github_runner_user() {
+  _github_runner_forbid_action "create GitHub runner user"
+}
 
-  write_runner_sudoers
+download_github_runner() {
+  _github_runner_forbid_action "download GitHub runner package"
+}
 
-  if runner_service_exists_for_dir; then
-    warn "a GitHub Actions runner service already appears to exist; leaving existing runner registration untouched"
-    return 0
-  fi
+configure_github_runner() {
+  _github_runner_forbid_action "configure/register GitHub runner"
+}
 
-  command -v curl >/dev/null 2>&1 || fatal "curl is required to download the GitHub Actions runner."
-  command -v tar >/dev/null 2>&1 || fatal "tar is required to extract the GitHub Actions runner."
+install_github_runner_service() {
+  _github_runner_forbid_action "install GitHub runner service"
+}
 
-  log "installing GitHub Actions self-hosted runner before Docker/K3s deployment work"
-  mkdir -p "$GITHUB_RUNNER_DIR"
-  chown -R "$GITHUB_RUNNER_USER:$GITHUB_RUNNER_USER" "$GITHUB_RUNNER_DIR"
+start_github_runner_service() {
+  _github_runner_forbid_action "start GitHub runner service"
+}
 
-  local runner_version="${GITHUB_RUNNER_VERSION:-2.328.0}"
-  local runner_tar="actions-runner-linux-${RUNNER_ARCH}-${runner_version}.tar.gz"
-  local runner_url="https://github.com/actions/runner/releases/download/v${runner_version}/${runner_tar}"
-  local runner_tmp="/tmp/$runner_tar"
-
-  log "downloading GitHub Actions runner $runner_version for linux-$RUNNER_ARCH"
-  curl -fL "$runner_url" -o "$runner_tmp"
-
-  log "extracting GitHub Actions runner into $GITHUB_RUNNER_DIR"
-  tar -xzf "$runner_tmp" -C "$GITHUB_RUNNER_DIR"
-  rm -f "$runner_tmp"
-  chown -R "$GITHUB_RUNNER_USER:$GITHUB_RUNNER_USER" "$GITHUB_RUNNER_DIR"
-
-  log "configuring GitHub Actions runner registration"
-  sudo -u "$GITHUB_RUNNER_USER" bash -lc "cd '$GITHUB_RUNNER_DIR' && ./config.sh --unattended --url '$GITHUB_RUNNER_URL' --token '$GITHUB_RUNNER_TOKEN' --work _work"
-
-  log "installing and starting GitHub Actions runner service"
-  bash -lc "cd '$GITHUB_RUNNER_DIR' && ./svc.sh install '$GITHUB_RUNNER_USER' && ./svc.sh start"
-
-  log "GitHub Actions runner installation completed"
+print_github_runner_status() {
+  log "GitHub runner status skipped in bundle-only mode"
 }
