@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Shared OS helper functions for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# This file must stay non-mutating:
+#   - no apt-get
+#   - no package installation
+#   - no K3s installation
+#   - no service changes
+#   - no network/firewall changes
+#
+# The production server receives only the finished bundle.
 
 is_debian_family() {
   case "${OS_ID:-} ${OS_LIKE:-}" in
