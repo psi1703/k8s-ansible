@@ -100,7 +100,7 @@ spec:
       spec:
         accessModes:
           - ReadWriteOnce
-        storageClassName: otp-redis-nfs
+        storageClassName: otp-redis-devprod-nfs
         resources:
           requests:
             storage: 1Gi
