@@ -1,6 +1,6 @@
 name: Sync k8s-ansible DEVtoPROD repo to server
 
-run-name: "sync/deploy DEVtoPROD @ ${{ github.ref_name }}"
+run-name: "sync DEVtoPROD @ ${{ github.ref_name }}"
 
 permissions:
   contents: read
@@ -10,20 +10,6 @@ on:
     branches:
       - k8s-ansible-DEVtoPROD
   workflow_dispatch:
-    inputs:
-      deploy_mode:
-        description: "Deployment mode override"
-        required: true
-        default: "auto"
-        type: choice
-        options:
-          - auto
-          - none
-          - observability
-          - manifests
-          - app
-          - monitor
-          - full
 
 concurrency:
   group: sync-k8s-ansible-devtoprod-to-server-${{ github.ref }}
@@ -35,9 +21,9 @@ env:
 
 jobs:
   sync:
-    name: Sync DEVtoPROD repository and deploy changed components
+    name: Sync DEVtoPROD repository only
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     defaults:
       run:
@@ -54,7 +40,7 @@ jobs:
           echo "Target dir:      ${DEPLOY_REPO_DIR}"
 
           if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
-            echo "[ERROR] Refusing to sync/deploy from branch '${GITHUB_REF_NAME}'."
+            echo "[ERROR] Refusing to sync from branch '${GITHUB_REF_NAME}'."
             echo "[ERROR] This workflow is only allowed from '${DEPLOY_BRANCH}'."
             exit 1
           fi
@@ -73,96 +59,9 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ env.DEPLOY_BRANCH }}
-          fetch-depth: 0
+          fetch-depth: 1
           clean: true
           persist-credentials: false
-
-      - name: Detect deployment mode
-        id: detect
-        run: |
-          set -Eeuo pipefail
-
-          MANUAL_MODE="${{ github.event.inputs.deploy_mode || 'auto' }}"
-          BEFORE="${{ github.event.before || '' }}"
-          AFTER="${GITHUB_SHA}"
-
-          echo "Manual deploy mode: ${MANUAL_MODE}"
-          echo "Before: ${BEFORE:-none}"
-          echo "After: ${AFTER}"
-
-          if [ "${MANUAL_MODE}" != "auto" ]; then
-            echo "deploy_mode=${MANUAL_MODE}" >> "$GITHUB_OUTPUT"
-            echo "reason=manual override: ${MANUAL_MODE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ -z "${BEFORE}" ] || [ "${BEFORE}" = "0000000000000000000000000000000000000000" ]; then
-            CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "${AFTER}" || true)"
-          else
-            CHANGED_FILES="$(git diff --name-only "${BEFORE}" "${AFTER}" || true)"
-          fi
-
-          echo "Changed files:"
-          if [ -n "${CHANGED_FILES}" ]; then
-            printf '%s\n' "${CHANGED_FILES}"
-          else
-            echo "(none detected)"
-          fi
-
-          FULL_CHANGED=0
-          APP_CHANGED=0
-          MONITOR_CHANGED=0
-          MANIFESTS_CHANGED=0
-          OBSERVABILITY_CHANGED=0
-
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^requirements\.txt$'; then
-            FULL_CHANGED=1
-          fi
-
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_relay/|main\.py$|frontend/|docs/help/|scripts/build_help_docs\.py$|k8s/Dockerfile$|package\.json$|package-lock\.json$)'; then
-            APP_CHANGED=1
-          fi
-
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_monitor/|monitor\.py$|k8s/Dockerfile\.monitor$)'; then
-            MONITOR_CHANGED=1
-          fi
-
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/manifests/)'; then
-            MANIFESTS_CHANGED=1
-          fi
-
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/observability/|scripts/build_grafana_dashboard_configmap\.py$)'; then
-            OBSERVABILITY_CHANGED=1
-          fi
-
-          DEPLOY_MODE="none"
-          REASON="sync-only change"
-
-          if [ "${FULL_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="full"
-            REASON="requirements.txt changed"
-          elif [ "${APP_CHANGED}" = "1" ] && [ "${MONITOR_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="full"
-            REASON="app and monitor files changed"
-          elif [ "${APP_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="app"
-            REASON="app/backend/frontend files changed"
-          elif [ "${MONITOR_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="monitor"
-            REASON="monitor files changed"
-          elif [ "${MANIFESTS_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="manifests"
-            REASON="OTP Relay Kubernetes manifests changed"
-          elif [ "${OBSERVABILITY_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="observability"
-            REASON="observability files changed"
-          fi
-
-          echo "Selected deploy mode: ${DEPLOY_MODE}"
-          echo "Reason: ${REASON}"
-
-          echo "deploy_mode=${DEPLOY_MODE}" >> "$GITHUB_OUTPUT"
-          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
 
       - name: Sync checkout to DEVtoPROD server repo
         run: |
@@ -175,8 +74,6 @@ jobs:
           echo "Target: ${DEPLOY_REPO_DIR}"
           echo "Branch: ${GITHUB_REF_NAME}"
           echo "Commit: ${GITHUB_SHA}"
-          echo "Detected deploy mode: ${{ steps.detect.outputs.deploy_mode }}"
-          echo "Detection reason: ${{ steps.detect.outputs.reason }}"
 
           if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
             echo "[ERROR] Branch changed unexpectedly. Refusing sync."
@@ -196,6 +93,15 @@ jobs:
             --exclude '.git/' \
             --exclude '.env' \
             --exclude '.env.*' \
+            --exclude '.installer-venv/' \
+            --exclude '.pytest_cache/' \
+            --exclude '.mypy_cache/' \
+            --exclude '.ruff_cache/' \
+            --exclude '__pycache__/' \
+            --exclude 'node_modules/' \
+            --exclude 'venv/' \
+            --exclude '.venv/' \
+            --exclude 'release/' \
             --exclude 'automation/ansible/inventory.generated.ini' \
             --exclude 'automation/libvirt/build/' \
             --exclude '*.log' \
@@ -221,7 +127,7 @@ jobs:
             git log --oneline -1 || true
           else
             echo "Synced directory is not a git work tree because .git is intentionally excluded."
-            echo "Current deployed commit: ${GITHUB_SHA}"
+            echo "Current synced commit: ${GITHUB_SHA}"
           fi
 
           echo
@@ -231,60 +137,13 @@ jobs:
           [ -d "${DEPLOY_REPO_DIR}/automation/libvirt/build" ] && echo "- automation/libvirt/build exists" || echo "- automation/libvirt/build not present yet"
 
           echo
-          echo "Provisioner files:"
-          find "${DEPLOY_REPO_DIR}/automation/libvirt" -maxdepth 1 -type f -print 2>/dev/null | sort || true
-
-          echo
-          echo "Ansible helper scripts:"
-          find "${DEPLOY_REPO_DIR}/automation/ansible" -maxdepth 1 -type f -name '*.sh' -print 2>/dev/null | sort || true
+          echo "DEVtoPROD safety values from server-local .env, if present:"
+          grep -nE '^(REPO_REF|INSTALL_DIR|NAMESPACE|PVC_STORAGE_CLASS|NFS_STORAGE_CLASS|NFS_PV_NAME|REDIS_STORAGE_CLASS|REDIS_NFS_|OBSERVABILITY_NAMESPACE|GRAFANA_HOST)=' "${DEPLOY_REPO_DIR}/.env" 2>/dev/null || true
 
           echo
           echo "Sync complete."
-
-      - name: Deploy changed components
-        if: steps.detect.outputs.deploy_mode != 'none'
-        run: |
-          set -Eeuo pipefail
-
-          DEPLOY_MODE="${{ steps.detect.outputs.deploy_mode }}"
-
-          echo "Starting DEVtoPROD deployment after sync"
-          echo "Deploy mode: ${DEPLOY_MODE}"
-          echo "Reason: ${{ steps.detect.outputs.reason }}"
-          echo "Repo: ${DEPLOY_REPO_DIR}"
-          echo "Branch: ${GITHUB_REF_NAME}"
-
-          if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
-            echo "[ERROR] Refusing deployment from wrong branch: ${GITHUB_REF_NAME}"
-            exit 1
-          fi
-
-          cd "${DEPLOY_REPO_DIR}"
-
-          if [ ! -f ".env" ]; then
-            echo "[ERROR] ${DEPLOY_REPO_DIR}/.env is missing. Refusing noninteractive deployment."
-            exit 1
-          fi
-
-          if [ ! -f "install-otp-relay-k8s.sh" ]; then
-            echo "[ERROR] install-otp-relay-k8s.sh is missing."
-            exit 1
-          fi
-
-          sudo env \
-            ENV_FILE="${DEPLOY_REPO_DIR}/.env" \
-            NONINTERACTIVE=1 \
-            SKIP_REPO_SYNC=1 \
-            GIT_CLEAN=0 \
-            INSTALLER_DEPLOY_MODE="${DEPLOY_MODE}" \
-            IMAGE_DISTRIBUTION_PORT="${IMAGE_DISTRIBUTION_PORT:-18080}" \
-            bash install-otp-relay-k8s.sh
-
-          echo "Deployment completed for DEPLOY_MODE=${DEPLOY_MODE}"
-
-      - name: Skip deployment
-        if: steps.detect.outputs.deploy_mode == 'none'
-        run: |
-          set -Eeuo pipefail
-          echo "No deployable app, monitor, manifest, observability, or requirements change detected."
-          echo "DEVtoPROD repository sync completed only."
+          echo "Deployment was not run by this workflow."
+          echo
+          echo "To deploy manually, run:"
+          echo "cd ${DEPLOY_REPO_DIR}"
+          echo "./setup.sh"
