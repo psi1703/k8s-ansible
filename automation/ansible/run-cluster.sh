@@ -1,32 +1,21 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-
-# Deprecated live-cluster runner.
+# Disabled legacy Ansible cluster runner.
 #
-# This file is intentionally kept only as a safety guard for old references.
+# Historical behavior:
+#   This script used to prepare hosts, install K3s, configure workers,
+#   deploy OTP Relay, and validate a live cluster.
 #
-# Bundle-only policy:
-#   - Do not provision worker VMs
-#   - Do not install Ansible dependencies
-#   - Do not modify host networking, DNS, NAT, firewall, or SSH state
-#   - Do not install K3s
-#   - Do not join workers to a cluster
-#   - Do not run ansible-playbook
-#   - Do not deploy OTP Relay
-#   - Do not validate a live cluster
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No cluster provisioning is allowed from this path.
+#   - No Ansible deployment is allowed from this path.
+#   - No K3s install is allowed from this path.
+#   - No kubectl/Helm apply/install is allowed from this path.
+#   - No live validation is allowed from this path.
 #
 # The production server receives only the finished bundle.
-#
-# Correct entrypoint:
-#   bash setup.sh
-#
-# Optional explicit compatibility mode:
-#   bash automation/ansible/run-cluster --explain
-#
-# Any attempt to run old cluster automation through this file fails safely.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+set -Eeuo pipefail
 
 log() {
   printf '[run-cluster] %s\n' "$*"
@@ -38,61 +27,44 @@ fatal() {
 }
 
 usage() {
-  cat <<'USAGE'
+  cat <<EOF_USAGE
 Usage:
   automation/ansible/run-cluster --explain
-  automation/ansible/run-cluster -h|--help
 
-This runner used to execute live cluster automation. It is now disabled.
+This legacy Ansible cluster runner is disabled.
 
-Bundle-only policy:
-  - no VM provisioning
-  - no Ansible cluster execution
-  - no K3s installation
-  - no Kubernetes apply
-  - no Helm install/upgrade
-  - no image import into a live cluster
-  - no live production validation
-
-Use the bundle-only release entrypoint instead:
+Use the bundle-only release builder instead:
 
   bash setup.sh
+  # or
+  bash build-release-bundle.sh
 
-The production server receives only the finished bundle.
-USAGE
+Bundle-only contract:
+  - no Ansible cluster run
+  - no K3s install
+  - no worker configuration
+  - no node labeling
+  - no storage validation against a live cluster
+  - no Kubernetes manifest apply
+  - no Helm install/upgrade
+  - no rollout restart
+  - no live production validation
+
+The production server receives only the finished release bundle.
+EOF_USAGE
 }
 
-explain() {
-  log "live-cluster automation is disabled"
-  log "repository root: ${REPO_ROOT}"
-  log "ansible directory: ${SCRIPT_DIR}"
-  log "correct entrypoint: bash setup.sh"
-  log "expected result: sealed release tarball under ./releases"
-  log "nothing was provisioned, installed, deployed, or validated"
-}
-
-main() {
-  if [ "$#" -eq 0 ]; then
-    usage >&2
-    fatal "refusing to run deprecated live-cluster automation; use 'bash setup.sh' to build a sealed release bundle"
-  fi
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --explain)
-        explain
-        exit 0
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        usage >&2
-        fatal "unsupported argument for disabled runner: $1"
-        ;;
-    esac
-  done
-}
-
-main "$@"
+case "${1:-}" in
+  --explain|-h|--help)
+    usage
+    exit 0
+    ;;
+  "")
+    log "legacy Ansible cluster runner is disabled"
+    log "use: bash setup.sh"
+    fatal "refusing to run live cluster automation from bundle-only path"
+    ;;
+  *)
+    fatal "unsupported option for disabled legacy runner: $1"
+    ;;
+esac
