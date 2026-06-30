@@ -55,11 +55,6 @@ spec:
                   name: otp-relay-secrets
                   key: TELEGRAM_CHAT_ID
 
-          ports:
-            - name: metrics
-              containerPort: 9101
-              protocol: TCP
-
           securityContext:
             allowPrivilegeEscalation: true
             capabilities:
