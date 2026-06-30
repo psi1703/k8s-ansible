@@ -11,7 +11,7 @@ spec:
   entryPoints:
     - websecure
   routes:
-    - match: Host(`grafana-test.lan`)
+    - match: Host(`grafana-devprod.init-db.lan`)
       kind: Rule
       services:
         - name: kube-prometheus-stack-grafana
