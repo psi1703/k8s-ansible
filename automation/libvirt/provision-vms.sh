@@ -1,34 +1,20 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-
-# Deprecated worker VM provisioner.
+# Disabled legacy libvirt worker VM provisioner.
 #
-# This file is intentionally kept only as a safety guard for old references.
+# Historical behavior:
+#   This script used to create worker1/worker2 VMs, configure libvirt networking,
+#   generate cloud-init seed images, and write Ansible inventory.
 #
-# Bundle-only policy:
-#   - Do not install virtualization packages
-#   - Do not enable or configure libvirt
-#   - Do not create bridges
-#   - Do not modify NetworkManager or /etc/network/interfaces
-#   - Do not download cloud images
-#   - Do not create qcow2 disks
-#   - Do not create seed ISOs
-#   - Do not create, destroy, or repair VMs
-#   - Do not write live Ansible inventory for deployment
-#   - Do not validate SSH, DNS, apt, or cloud-init on worker VMs
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No VM provisioning is allowed from this path.
+#   - No libvirt bridge creation is allowed from this path.
+#   - No cloud-init seed creation is allowed from this path.
+#   - No worker inventory generation is allowed from this path.
 #
 # The production server receives only the finished bundle.
-#
-# Correct entrypoint:
-#   bash setup.sh
-#
-# Optional explicit compatibility mode:
-#   bash automation/libvirt/provision-vms.sh --explain
-#
-# Any attempt to run old VM provisioning through this file fails safely.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+set -Eeuo pipefail
 
 log() {
   printf '[provision-vms] %s\n' "$*"
@@ -40,61 +26,44 @@ fatal() {
 }
 
 usage() {
-  cat <<'USAGE'
+  cat <<EOF_USAGE
 Usage:
   automation/libvirt/provision-vms.sh --explain
-  automation/libvirt/provision-vms.sh -h|--help
 
-This provisioner used to create live worker VMs. It is now disabled.
+This legacy libvirt worker VM provisioner is disabled.
 
-Bundle-only policy:
-  - no worker VM provisioning
-  - no libvirt installation/configuration
-  - no bridge/network mutation
-  - no cloud image download
-  - no qcow2/seed ISO creation
-  - no Ansible inventory generation for live deployment
-  - no SSH/DNS/apt/cloud-init validation against VMs
-
-Use the bundle-only release entrypoint instead:
+Use the bundle-only release builder instead:
 
   bash setup.sh
+  # or
+  bash build-release-bundle.sh
 
-The production server receives only the finished bundle.
-USAGE
+Bundle-only contract:
+  - no libvirt package installation
+  - no bridge creation
+  - no NAT/firewall changes
+  - no VM disk creation
+  - no cloud-init seed creation
+  - no worker VM creation
+  - no SSH probing
+  - no Ansible inventory generation
+  - no K3s worker preparation
+
+The production server receives only the finished release bundle.
+EOF_USAGE
 }
 
-explain() {
-  log "worker VM provisioning is disabled"
-  log "repository root: ${REPO_ROOT}"
-  log "libvirt directory: ${SCRIPT_DIR}"
-  log "correct entrypoint: bash setup.sh"
-  log "expected result: sealed release tarball under ./releases"
-  log "nothing was provisioned, installed, changed, downloaded, created, or validated"
-}
-
-main() {
-  if [ "$#" -eq 0 ]; then
-    usage >&2
-    fatal "refusing to run deprecated VM provisioner; use 'bash setup.sh' to build a sealed release bundle"
-  fi
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --explain)
-        explain
-        exit 0
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        usage >&2
-        fatal "unsupported argument for disabled VM provisioner: $1"
-        ;;
-    esac
-  done
-}
-
-main "$@"
+case "${1:-}" in
+  --explain|-h|--help)
+    usage
+    exit 0
+    ;;
+  "")
+    log "legacy libvirt worker VM provisioner is disabled"
+    log "use: bash setup.sh"
+    fatal "refusing to provision VMs from bundle-only path"
+    ;;
+  *)
+    fatal "unsupported option for disabled VM provisioner: $1"
+    ;;
+esac
