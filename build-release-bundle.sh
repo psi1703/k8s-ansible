@@ -118,6 +118,7 @@ run_phase() {
 
   "$@"
 
+  normalize_bundle_mode_inputs
   assert_bundle_only_runtime_contract
   log "phase complete: $phase_name"
 }
@@ -204,7 +205,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      --local|--reprovision-vms|--no-ansible|--deploy|--validate|--install-k3s|--install-runner)
+      --local|--reprovision-vms|--no-ansible|--ansible|--deploy|--validate|--install-k3s|--install-runner|--runner-only|--provision-vms)
         fatal "unsupported old deployment option in bundle-only builder: $1"
         ;;
       *)
@@ -225,12 +226,14 @@ main() {
   log "production server receives only the finished bundle"
 
   run_phase "load environment" load_or_create_env
-  normalize_bundle_mode_inputs
   run_phase "validate artifact selector" validate_deploy_mode
   run_phase "explain artifact selector" explain_deploy_mode
   run_phase "detect build host" detect_host_environment
   run_phase "bundle preflight" validate_bundle_preflight_only
   run_phase "prepare source repository" sync_deployment_repo
+
+  log "active release source directory: $(pwd)"
+
   run_phase "validate source tree" validate_source_tree
   run_phase "build app assets" build_app_assets_if_required
   run_phase "stage and validate manifests" stage_and_validate_manifests
