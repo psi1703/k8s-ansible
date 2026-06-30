@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
-# Host detection, preflight, package install, and K3s readiness.
-# Source this file from install-otp-relay-k8s.sh; do not execute it directly.
+# Host detection and bundle-builder preflight checks.
+# Source this file from build-release-bundle.sh; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Detect the dev/build host environment.
+#   - Check for required local build tools.
+#   - Do not install packages automatically.
+#   - Do not install K3s.
+#   - Do not wait for Kubernetes readiness.
+#   - Do not query Kubernetes nodes, storage classes, PVCs, or pods.
+#   - Do not configure MetalLB, firewall, networking, or runners.
+#
+# The production server receives only the finished bundle.
 
 OS_ID="${OS_ID:-unknown}"
 OS_NAME="${OS_NAME:-unknown}"
@@ -15,9 +26,7 @@ _preflight_cmd_exists() {
 }
 
 _preflight_require_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    fatal "preflight/package/K3s preparation must run as root. Run the installer through setup.sh or with sudo."
-  fi
+  fatal "root is not required and is not requested by the bundle-only preflight path"
 }
 
 _preflight_retry() {
@@ -42,48 +51,15 @@ _preflight_retry() {
 }
 
 _wait_for_apt_locks() {
-  local waited=0
-  local lock
-  local locks="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock"
-
-  while true; do
-    local busy=0
-
-    if _preflight_cmd_exists fuser; then
-      for lock in $locks; do
-        if [ -e "$lock" ] && fuser "$lock" >/dev/null 2>&1; then
-          busy=1
-          break
-        fi
-      done
-    fi
-
-    [ "$busy" = "0" ] && return 0
-
-    if [ "$waited" -ge 180 ]; then
-      fatal "apt/dpkg lock is still held after ${waited}s. Another package operation is running; stop it or wait and rerun setup."
-    fi
-
-    log "waiting for apt/dpkg lock to be released (${waited}s elapsed)"
-    sleep 5
-    waited=$((waited + 5))
-  done
+  log "skipping apt lock wait in bundle-only mode; this builder does not run apt-get"
 }
 
 run_apt_get() {
-  _preflight_require_root
-  _wait_for_apt_locks
-
-  DEBIAN_FRONTEND=noninteractive _preflight_retry 3 10 \
-    apt-get \
-      -o Acquire::Retries=3 \
-      -o Dpkg::Options::=--force-confdef \
-      -o Dpkg::Options::=--force-confold \
-      "$@"
+  fatal "apt-get is forbidden in bundle-only mode; install required build tools on the dev/build host before running the builder"
 }
 
 detect_host_environment() {
-  log "detecting host OS, architecture, and hardware profile"
+  log "detecting build host OS, architecture, and hardware profile"
 
   OS_ID="unknown"
   OS_NAME="unknown"
@@ -114,12 +90,13 @@ detect_host_environment() {
 
   export OS_ID OS_NAME OS_VERSION_ID OS_LIKE ARCH_RAW RUNNER_ARCH IS_RPI
 
-  log "detected OS/arch: $OS_NAME / $ARCH_RAW"
+  log "detected build host OS/arch: $OS_NAME / $ARCH_RAW"
 
   if [ "$IS_RPI" = "1" ]; then
     log "detected Raspberry Pi hardware"
   fi
 
+  check_bundle_builder_tools
   return 0
 }
 
@@ -136,229 +113,126 @@ is_debian_family() {
 }
 
 prompt_optional_runner_setup() {
-  # Optional runner prompt before validation, matching the existing installer behavior.
-  # In non-interactive mode, default to 0 without prompting.
-  if [ -z "${INSTALL_GITHUB_RUNNER:-}" ]; then
-    if [ "${NONINTERACTIVE:-0}" = "1" ]; then
-      INSTALL_GITHUB_RUNNER=0
-    elif prompt_yes_no "Install a GitHub Actions self-hosted runner for CI/CD deployments from GitHub? [y/N]" "N"; then
-      INSTALL_GITHUB_RUNNER=1
-    else
-      INSTALL_GITHUB_RUNNER=0
-    fi
-  fi
-
+  INSTALL_GITHUB_RUNNER=0
   export INSTALL_GITHUB_RUNNER
-  log "GitHub runner setup requested: $INSTALL_GITHUB_RUNNER"
+  log "GitHub runner setup disabled in bundle-only mode"
 }
 
 save_network_firewall_snapshots() {
-  _preflight_require_root
-
-  local backup_dir="/var/backups/otp-relay-k8s"
-
-  log "saving network/firewall state snapshots under $backup_dir"
-  mkdir -p "$backup_dir"
-
-  if _preflight_cmd_exists ip; then
-    ip route > "$backup_dir/ip-route.before" 2>/dev/null || true
-    ip addr > "$backup_dir/ip-addr.before" 2>/dev/null || true
-  else
-    warn "ip command is not available yet; skipping ip route/address snapshots"
-  fi
-
-  if _preflight_cmd_exists iptables-save; then
-    iptables-save > "$backup_dir/iptables.before" 2>/dev/null || true
-  else
-    warn "iptables-save is not available yet; skipping iptables snapshot"
-  fi
-
-  if _preflight_cmd_exists nft; then
-    nft list ruleset > "$backup_dir/nft.before" 2>/dev/null || true
-  else
-    warn "nft is not available yet; skipping nftables snapshot"
-  fi
-
-  log "network/firewall state snapshots saved"
+  log "skipping network/firewall snapshots in bundle-only mode"
 }
 
 check_basic_network_for_install() {
-  log "checking basic network/DNS reachability for package and K3s installation"
-
-  if _preflight_cmd_exists getent; then
-    if ! getent hosts deb.debian.org >/dev/null 2>&1 && ! getent hosts archive.ubuntu.com >/dev/null 2>&1; then
-      warn "DNS lookup for common apt repositories failed. apt-get update may fail until DNS/network is fixed."
-    fi
-
-    if ! getent hosts get.k3s.io >/dev/null 2>&1; then
-      warn "DNS lookup for get.k3s.io failed. K3s installation may fail until DNS/network is fixed."
-    fi
-  fi
-
-  if _preflight_cmd_exists curl; then
-    if ! curl -fsSL --connect-timeout 10 --max-time 20 https://get.k3s.io >/dev/null 2>&1; then
-      warn "https://get.k3s.io is not reachable right now. K3s installation may fail if this host cannot access the internet."
-    fi
-  fi
+  log "skipping package/K3s network checks in bundle-only mode"
 }
 
 check_noninvasive_host_state() {
-  log "running non-invasive preflight checks"
-
-  if _preflight_cmd_exists ss; then
-    if ! ss -lnt 2>/dev/null | grep -qE '(^|[[:space:]]|:)22[[:space:]]'; then
-      warn "SSH does not appear to be listening on TCP/22. I will not change SSH, but confirm console access before continuing."
-    fi
-  else
-    warn "ss command is not available yet; skipping SSH listener check"
-  fi
-
-  if grep -qi '[[:space:]]cifs[[:space:]]' /etc/fstab 2>/dev/null; then
-    warn "CIFS entries detected in /etc/fstab. This installer will not mount, unmount, or edit them."
-  fi
-
-  if mount | grep -qi ' type cifs '; then
-    warn "An active CIFS mount is present. It will be left untouched."
-  fi
+  log "running non-invasive build-host checks"
 
   if systemctl is-active --quiet docker 2>/dev/null; then
-    log "Docker is already running; installer will not restart it"
+    log "Docker is running on build host"
+  else
+    log "Docker is not running or systemctl is unavailable; image export phase will validate Docker only if needed"
   fi
 
   if systemctl is-active --quiet k3s 2>/dev/null; then
-    log "K3s is already running; installer will not restart it"
+    warn "K3s appears to be running on this host, but the bundle builder will not use it"
+  fi
+
+  if _preflight_cmd_exists kubectl; then
+    warn "kubectl exists on this host, but the bundle builder will not use it"
+  fi
+
+  if _preflight_cmd_exists helm; then
+    warn "helm exists on this host, but the bundle builder will not run helm install/upgrade"
   fi
 
   if [ "$IS_RPI" = "1" ]; then
-    if ! grep -qw cgroup_memory /proc/cmdline 2>/dev/null || ! grep -qw cgroup_enable=memory /proc/cmdline 2>/dev/null; then
-      warn "Raspberry Pi memory cgroup flags are not active. K3s may fail without them."
-      warn "This installer will not edit boot files automatically. Add cgroup_memory=1 cgroup_enable=memory and reboot if K3s fails."
+    warn "build host is Raspberry Pi hardware; image builds may be slower"
+  fi
+}
+
+require_build_tool() {
+  local tool="$1"
+
+  _preflight_cmd_exists "$tool" || fatal "required build tool is missing: $tool"
+}
+
+check_bundle_builder_tools() {
+  log "checking required local build tools"
+
+  require_build_tool bash
+  require_build_tool date
+  require_build_tool find
+  require_build_tool grep
+  require_build_tool sed
+  require_build_tool awk
+  require_build_tool sort
+  require_build_tool tar
+  require_build_tool gzip
+  require_build_tool sha256sum
+  require_build_tool python3
+
+  if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+    require_build_tool npm
+  fi
+
+  if [ "${DEPLOY_MODE:-full}" != "none" ]; then
+    if ! _preflight_cmd_exists docker; then
+      warn "Docker CLI is not installed; image export phase will fail if image artifacts are required"
     fi
   fi
+
+  log "required local build tool check completed"
 }
 
 install_base_os_packages() {
-  log "updating apt package index; this may take a few minutes on a fresh host"
-  run_apt_get update
-
-  log "installing base OS packages required for repository sync and optional runner setup with apt-get"
-  run_apt_get install -y --no-install-recommends ca-certificates curl git tar gzip sudo python3 openssl
-  log "base OS package installation completed"
+  log "skipping base OS package installation in bundle-only mode"
+  check_bundle_builder_tools
 }
 
 run_preflight_and_prepare_cluster() {
-  _preflight_require_root
-
-  detect_host_environment
-  validate_k8s_topology_settings
-
-  log "detected OS/arch: $OS_NAME / $ARCH_RAW"
-
-  if [ "$IS_RPI" = "1" ]; then
-    log "detected Raspberry Pi hardware"
-  fi
-
-  is_debian_family || fatal "this installer currently supports Debian-family systems only. Detected: ${OS_NAME:-unknown}"
-
-  check_noninvasive_host_state
-  save_network_firewall_snapshots
-  check_basic_network_for_install
-  install_base_os_packages
+  fatal "run_preflight_and_prepare_cluster is forbidden; bundle-only mode must not prepare a cluster"
 }
 
 install_k3s_server_if_missing() {
-  if ! cmd_exists k3s; then
-    log "installing K3s server on this server/control-plane; this may take a few minutes"
-
-    local k3s_exec_args="server --write-kubeconfig-mode 644"
-
-    # SCH-aligned default: do not use K3s Klipper/serviceLB. Keep Traefik unless explicitly disabled elsewhere.
-    if [ "${K3S_DISABLE_SERVICELB:-1}" = "1" ]; then
-      k3s_exec_args="$k3s_exec_args --disable servicelb"
-    fi
-
-    if [ "${K3S_DISABLE_TRAEFIK:-0}" = "1" ]; then
-      k3s_exec_args="$k3s_exec_args --disable traefik"
-    fi
-
-    log "K3s install args: $k3s_exec_args"
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$k3s_exec_args" sh -
-    log "K3s server installation completed"
-  else
-    log "K3s already installed; no reinstall performed"
-  fi
-
-  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  fatal "install_k3s_server_if_missing is forbidden in bundle-only mode"
 }
 
 print_k3s_diagnostics() {
-  warn "collecting K3s diagnostics"
-  k3s kubectl get nodes -o wide 2>/dev/null || true
-  k3s kubectl get pods -A -o wide 2>/dev/null || true
-  systemctl status k3s --no-pager -l 2>/dev/null || true
-  journalctl -u k3s -n 120 --no-pager 2>/dev/null || true
+  log "skipping K3s diagnostics in bundle-only mode"
 }
 
 wait_for_kubernetes_ready() {
-  log "waiting for Kubernetes node readiness; timeout approximately 120s"
-
-  local i
-  for i in $(seq 1 60); do
-    if k3s kubectl get nodes >/dev/null 2>&1 && k3s kubectl wait --for=condition=Ready node --all --timeout=10s >/dev/null 2>&1; then
-      log "Kubernetes nodes are Ready"
-      return 0
-    fi
-
-    if [ $((i % 15)) -eq 0 ]; then
-      log "still waiting for Kubernetes node readiness after $((i * 2))s"
-      k3s kubectl get nodes -o wide 2>/dev/null || true
-    fi
-
-    sleep 2
-  done
-
-  print_k3s_diagnostics
-  fatal "K3s node did not become Ready"
+  fatal "wait_for_kubernetes_ready is forbidden in bundle-only mode"
 }
 
 install_kubernetes_tooling_and_k3s() {
-  _preflight_require_root
+  fatal "install_kubernetes_tooling_and_k3s is forbidden in bundle-only mode"
+}
 
-  log "installing Kubernetes/deployment OS packages with apt-get"
-  run_apt_get install -y --no-install-recommends iproute2 iptables nftables python3-venv jq nodejs npm
-  log "Kubernetes/deployment OS package installation completed"
+validate_selected_node() {
+  local selector_key="${1:-}"
+  local selector_value="${2:-}"
+  local label="${3:-node selector}"
 
-  if requires_docker; then
-    log "Docker is required for DEPLOY_MODE=$DEPLOY_MODE; checking Docker installation"
-    ensure_docker
-    log "Docker check/install completed"
+  if [ -n "$selector_key" ] || [ -n "$selector_value" ]; then
+    [ -n "$selector_key" ] || fatal "$label node selector value is set but key is empty"
+    [ -n "$selector_value" ] || fatal "$label node selector key is set but value is empty"
+    log "validated configured $label node selector syntax: $selector_key=$selector_value"
   else
-    log "DEPLOY_MODE=$DEPLOY_MODE does not require Docker image build; skipping Docker check/install"
+    log "no $label node selector configured"
+  fi
+}
+
+validate_bundle_preflight_only() {
+  detect_host_environment
+
+  if ! is_debian_family; then
+    warn "build host is not detected as Debian-family: ${OS_NAME:-unknown}"
+    warn "continuing because bundle creation is file/tool based"
   fi
 
-  install_k3s_server_if_missing
-  wait_for_kubernetes_ready
-
-  log "cluster nodes"
-  k3s kubectl get nodes -o wide
-
-  log "cluster storage classes"
-  k3s kubectl get storageclass 2>/dev/null || true
-
-  log "validating configured app node selector"
-  validate_selected_node "$APP_NODE_SELECTOR_KEY" "$APP_NODE_SELECTOR_VALUE" "app"
-
-  log "validating configured monitor node selector"
-  validate_selected_node "$MONITOR_NODE_SELECTOR_KEY" "$MONITOR_NODE_SELECTOR_VALUE" "monitor"
-
-  log "validating configured Redis node selector"
-  validate_selected_node "$REDIS_NODE_SELECTOR_KEY" "$REDIS_NODE_SELECTOR_VALUE" "redis"
-
-  log "checking/installing MetalLB if requested"
-  install_metallb_if_requested
-
-  log "checking LoadBalancer prerequisites"
-  check_loadbalancer_prereqs
-
-  log "Kubernetes tooling and K3s preparation completed"
+  check_noninvasive_host_state
+  check_bundle_builder_tools
 }
