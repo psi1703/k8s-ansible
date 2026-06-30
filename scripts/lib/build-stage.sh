@@ -92,6 +92,39 @@ requires_monitor_artifacts() {
   requires_monitor_image
 }
 
+requires_runtime_manifests() {
+  case "${DEPLOY_MODE:-full}" in
+    full|app|monitor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+initialize_generated_dir() {
+  GENERATED_DIR="$(mktemp -d /tmp/otp-relay-k8s-bundle.XXXXXX)"
+  SOURCE_MANIFEST_DIR="k8s/manifests"
+  SOURCE_OBSERVABILITY_DIR="k8s/observability"
+  MANIFEST_DIR="$GENERATED_DIR/manifests"
+  OBSERVABILITY_DIR="$GENERATED_DIR/observability"
+  APP_DOCKERFILE="k8s/Dockerfile"
+  MONITOR_DOCKERFILE="k8s/Dockerfile.monitor"
+
+  cleanup_generated_assets() {
+    rm -rf "$GENERATED_DIR"
+  }
+
+  trap cleanup_generated_assets EXIT
+
+  export GENERATED_DIR
+  export SOURCE_MANIFEST_DIR
+  export SOURCE_OBSERVABILITY_DIR
+  export MANIFEST_DIR
+  export OBSERVABILITY_DIR
+  export APP_DOCKERFILE
+  export MONITOR_DOCKERFILE
+
+  log "generated release staging directory: $GENERATED_DIR"
+}
+
 validate_frontend_source_tree() {
   log "validating frontend source tree"
 
@@ -159,7 +192,7 @@ build_app_assets_if_required() {
     fi
 
     log "validating frontend bundle path and portal index"
-    grep -q 'script src="app.js"' frontend/index.html || \
+    grep -q 'script src="app.js"' frontend/index.html ||
       fatal "frontend/index.html must load generated bundle with: script src=\"app.js\""
 
     log "frontend production bundle generated and validated: frontend/app.js"
@@ -167,47 +200,53 @@ build_app_assets_if_required() {
     log "artifact selector DEPLOY_MODE=${DEPLOY_MODE:-full} does not require app help-doc/frontend build; skipping"
   fi
 
-  if [ -f k8s/observability/dashboards/otp-relay-live.json ]; then
+  if [ -f k8s/observability/dashboards/otp-relay-live.json ] && [ "${DEPLOY_MODE:-full}" != "none" ]; then
     _validate_required_source_file scripts/build_grafana_dashboard_configmap.py
     _run_checked "generating Grafana dashboard ConfigMap from dashboard JSON" \
       python3 scripts/build_grafana_dashboard_configmap.py
     log "Grafana dashboard ConfigMap generation completed"
   else
-    log "Grafana dashboard JSON not found; skipping dashboard ConfigMap generation"
+    log "Grafana dashboard ConfigMap generation skipped"
   fi
 }
 
 validate_dockerfile_packaging() {
-  log "validating Dockerfile packaging requirements"
-
-  [ -n "${APP_DOCKERFILE:-}" ] || fatal "APP_DOCKERFILE is not set"
-  [ -n "${MONITOR_DOCKERFILE:-}" ] || fatal "MONITOR_DOCKERFILE is not set"
-  [ -f "$APP_DOCKERFILE" ] || fatal "app Dockerfile is missing: $APP_DOCKERFILE"
-  [ -f "$MONITOR_DOCKERFILE" ] || fatal "monitor Dockerfile is missing: $MONITOR_DOCKERFILE"
+  log "validating Dockerfile packaging requirements for selected artifacts"
 
   if requires_app_artifacts; then
+    [ -n "${APP_DOCKERFILE:-}" ] || fatal "APP_DOCKERFILE is not set"
+    [ -f "$APP_DOCKERFILE" ] || fatal "app Dockerfile is missing: $APP_DOCKERFILE"
+
     log "validating app Dockerfile includes otp_relay package and generated frontend"
     _validate_required_source_dir otp_relay
     _validate_required_source_file main.py
     [ -f frontend/app.js ] || fatal "frontend/app.js must exist before Docker image build/export"
 
-    grep -Eq 'COPY[[:space:]].*otp_relay' "$APP_DOCKERFILE" || \
+    grep -Eq 'COPY[[:space:]].*otp_relay' "$APP_DOCKERFILE" ||
       fatal "$APP_DOCKERFILE must copy otp_relay/ into the image because main.py imports otp_relay.routes"
 
-    grep -Eq 'COPY[[:space:]].*frontend' "$APP_DOCKERFILE" || \
+    grep -Eq 'COPY[[:space:]].*frontend' "$APP_DOCKERFILE" ||
       fatal "$APP_DOCKERFILE must copy frontend/ into the image"
 
     if grep -Eq 'COPY[[:space:]].*app\.js' "$APP_DOCKERFILE"; then
       fatal "$APP_DOCKERFILE must not copy root-level app.js. It must copy frontend/ after frontend/app.js is built."
     fi
+  else
+    log "artifact selector does not require app Dockerfile validation"
   fi
 
   if requires_monitor_artifacts; then
+    [ -n "${MONITOR_DOCKERFILE:-}" ] || fatal "MONITOR_DOCKERFILE is not set"
+    [ -f "$MONITOR_DOCKERFILE" ] || fatal "monitor Dockerfile is missing: $MONITOR_DOCKERFILE"
+
     log "validating monitor Dockerfile includes otp_monitor package"
     _validate_required_source_dir otp_monitor
     _validate_required_source_file monitor.py
-    grep -Eq 'COPY[[:space:]].*otp_monitor' "$MONITOR_DOCKERFILE" || \
+
+    grep -Eq 'COPY[[:space:]].*otp_monitor' "$MONITOR_DOCKERFILE" ||
       fatal "$MONITOR_DOCKERFILE must copy otp_monitor/ into the image because monitor.py imports otp_monitor.runner"
+  else
+    log "artifact selector does not require monitor Dockerfile validation"
   fi
 
   log "Dockerfile packaging validation completed"
@@ -253,6 +292,7 @@ validate_staging_source_layout() {
 
 copy_manifests_to_staging() {
   log "copying base Kubernetes manifests into release staging directory"
+  mkdir -p "$MANIFEST_DIR"
   cp "$SOURCE_MANIFEST_DIR"/*.yaml "$MANIFEST_DIR"/
   rm -f "$MANIFEST_DIR/secret-example.env"
 
@@ -363,32 +403,34 @@ dry_run_redis_manifests() {
   validate_rendered_manifest_files
 }
 
+stage_metadata_only_bundle_inputs() {
+  log "DEPLOY_MODE=none selected; staging metadata-only bundle inputs"
+
+  mkdir -p "$GENERATED_DIR/metadata"
+  cat > "$GENERATED_DIR/metadata/metadata-only.txt" <<EOF_METADATA_ONLY
+OTP Relay bundle metadata-only mode
+
+DEPLOY_MODE=none was selected.
+
+No runtime manifests were rendered.
+No Docker images were exported.
+No live cluster operations were performed.
+EOF_METADATA_ONLY
+
+  chmod 0644 "$GENERATED_DIR/metadata/metadata-only.txt" 2>/dev/null || true
+}
+
 stage_and_validate_manifests() {
   log "staging repository Dockerfiles and Kubernetes manifests for release bundle"
 
-  GENERATED_DIR="$(mktemp -d /tmp/otp-relay-k8s-bundle.XXXXXX)"
-  SOURCE_MANIFEST_DIR="k8s/manifests"
-  SOURCE_OBSERVABILITY_DIR="k8s/observability"
-  MANIFEST_DIR="$GENERATED_DIR/manifests"
-  OBSERVABILITY_DIR="$GENERATED_DIR/observability"
-  APP_DOCKERFILE="k8s/Dockerfile"
-  MONITOR_DOCKERFILE="k8s/Dockerfile.monitor"
+  initialize_generated_dir
 
-  cleanup_generated_assets() {
-    rm -rf "$GENERATED_DIR"
-  }
+  if ! requires_runtime_manifests; then
+    stage_metadata_only_bundle_inputs
+    log "manifest staging skipped for DEPLOY_MODE=${DEPLOY_MODE:-none}"
+    return 0
+  fi
 
-  trap cleanup_generated_assets EXIT
-
-  export GENERATED_DIR
-  export SOURCE_MANIFEST_DIR
-  export SOURCE_OBSERVABILITY_DIR
-  export MANIFEST_DIR
-  export OBSERVABILITY_DIR
-  export APP_DOCKERFILE
-  export MONITOR_DOCKERFILE
-
-  log "generated release staging directory: $GENERATED_DIR"
   mkdir -p "$MANIFEST_DIR"
 
   validate_staging_source_layout
