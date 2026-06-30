@@ -1,107 +1,105 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# MetalLB helpers for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Validate MetalLB-related values that are recorded in release metadata.
+#   - Do not install MetalLB.
+#   - Do not apply MetalLB manifests.
+#   - Do not query Kubernetes resources.
+#   - Do not wait for controller/webhook readiness.
+#
+# The production server receives only the finished bundle.
 
-install_metallb_if_requested() {
-  if [ "${INSTALL_METALLB:-0}" != "1" ]; then
-    log "INSTALL_METALLB=${INSTALL_METALLB:-0}; skipping MetalLB install/configuration"
-    return 0
-  fi
+_metallb_forbid_live_action() {
+  local action="$1"
 
-  [ -n "${METALLB_VERSION:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_VERSION to be set."
-  [ -n "${METALLB_MANIFEST_URL:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_MANIFEST_URL to be set."
-  [ -n "${METALLB_POOL_NAME:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_POOL_NAME to be set."
-  [ -n "${METALLB_IP_RANGE:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE, for example <first-ip>-<last-ip>."
-
-  # Installing MetalLB is allowed even when the OTP Relay Service remains
-  # ClusterIP behind Ingress. Do not force SERVICE_TYPE=LoadBalancer here.
-  log "installing/configuring MetalLB $METALLB_VERSION from $METALLB_MANIFEST_URL"
-  log "applying MetalLB upstream manifest; this may take a few minutes on a fresh cluster"
-  k3s kubectl apply -f "$METALLB_MANIFEST_URL"
-
-  log "waiting for MetalLB namespace and CRDs; timeout approximately 120s"
-  for i in $(seq 1 60); do
-    if k3s kubectl get namespace metallb-system >/dev/null 2>&1 \
-      && k3s kubectl get crd ipaddresspools.metallb.io >/dev/null 2>&1 \
-      && k3s kubectl get crd l2advertisements.metallb.io >/dev/null 2>&1; then
-      log "MetalLB namespace and CRDs are present"
-      break
-    fi
-
-    if [ $((i % 15)) -eq 0 ]; then
-      log "still waiting for MetalLB namespace/CRDs after $((i * 2))s"
-      k3s kubectl get namespace metallb-system 2>/dev/null || true
-      k3s kubectl get crd ipaddresspools.metallb.io l2advertisements.metallb.io 2>/dev/null || true
-    fi
-
-    sleep 2
-    [ "$i" -lt 60 ] || fatal "MetalLB CRDs were not ready after install"
-  done
-
-  log "waiting for MetalLB IPAddressPool CRD to be Established"
-  k3s kubectl wait --for=condition=Established crd/ipaddresspools.metallb.io --timeout=120s
-  log "MetalLB IPAddressPool CRD is Established"
-
-  log "waiting for MetalLB L2Advertisement CRD to be Established"
-  k3s kubectl wait --for=condition=Established crd/l2advertisements.metallb.io --timeout=120s
-  log "MetalLB L2Advertisement CRD is Established"
-
-  log "waiting for MetalLB controller rollout; this may take a few minutes"
-  k3s kubectl rollout status deployment/controller -n metallb-system --timeout=180s
-  log "MetalLB controller rollout completed"
-
-  log "waiting for MetalLB speaker rollout; this may take a few minutes"
-  k3s kubectl rollout status daemonset/speaker -n metallb-system --timeout=180s
-  log "MetalLB speaker rollout completed"
-
-  log "configuring MetalLB L2 address pool $METALLB_POOL_NAME=$METALLB_IP_RANGE"
-  cat <<EOF_METALLB | k3s kubectl apply -f -
-apiVersion: metallb.io/v1beta1
-kind: IPAddressPool
-metadata:
-  name: $METALLB_POOL_NAME
-  namespace: metallb-system
-spec:
-  addresses:
-    - $METALLB_IP_RANGE
----
-apiVersion: metallb.io/v1beta1
-kind: L2Advertisement
-metadata:
-  name: ${METALLB_POOL_NAME}-l2
-  namespace: metallb-system
-spec:
-  ipAddressPools:
-    - $METALLB_POOL_NAME
-EOF_METALLB
-
-  log "MetalLB address pool configured"
+  fatal "forbidden MetalLB live-cluster action in bundle-only mode: $action"
 }
 
-check_loadbalancer_prereqs() {
-  [ "${SERVICE_TYPE:-}" = "LoadBalancer" ] || {
-    log "SERVICE_TYPE=${SERVICE_TYPE:-unset}; skipping LoadBalancer prerequisite checks"
-    return 0
-  }
+validate_metallb_settings_for_bundle() {
+  log "validating MetalLB settings for bundle metadata"
 
-  log "SERVICE_TYPE=LoadBalancer selected"
-  if [ -n "${LOADBALANCER_IP:-}" ]; then
-    log "requested LoadBalancer IP: $LOADBALANCER_IP"
-  else
-    warn "LOADBALANCER_IP is not set. The cluster load balancer must allocate an address automatically."
+  case "${REQUIRE_METALLB:-0}" in
+    0|1) ;;
+    *) fatal "REQUIRE_METALLB must be 0 or 1" ;;
+  esac
+
+  case "${INSTALL_METALLB:-0}" in
+    0|1) ;;
+    *) fatal "INSTALL_METALLB must be 0 or 1" ;;
+  esac
+
+  if [ "${SERVICE_TYPE:-}" = "LoadBalancer" ] && [ "${REQUIRE_METALLB:-0}" = "1" ] && [ "${INSTALL_METALLB:-0}" != "1" ]; then
+    warn "SERVICE_TYPE=LoadBalancer and REQUIRE_METALLB=1, but INSTALL_METALLB=0"
+    warn "bundle will record this intent only; production-side procedure must handle LoadBalancer prerequisites"
   fi
 
   if [ "${INSTALL_METALLB:-0}" = "1" ]; then
-    log "INSTALL_METALLB=1 set; MetalLB install/configuration handled by installer"
+    [ -n "${METALLB_VERSION:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_VERSION"
+    [ -n "${METALLB_IP_RANGE:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_IP_RANGE"
+    [ -n "${METALLB_POOL_NAME:-}" ] || fatal "INSTALL_METALLB=1 requires METALLB_POOL_NAME"
+
+    log "MetalLB planned in metadata: version=${METALLB_VERSION} range=${METALLB_IP_RANGE} pool=${METALLB_POOL_NAME}"
+  else
+    log "MetalLB install not planned in bundle metadata"
+  fi
+}
+
+install_metallb_if_requested() {
+  validate_metallb_settings_for_bundle
+
+  if [ "${INSTALL_METALLB:-0}" = "1" ]; then
+    log "skipping MetalLB installation in bundle-only mode"
+    log "MetalLB intent is recorded only; production-side procedure must install/configure it if approved"
+  else
+    log "INSTALL_METALLB=0; no MetalLB intent beyond rendered service settings"
+  fi
+}
+
+wait_for_metallb_ready() {
+  _metallb_forbid_live_action "wait for MetalLB readiness"
+}
+
+apply_metallb_pool_if_requested() {
+  _metallb_forbid_live_action "apply MetalLB IPAddressPool/L2Advertisement"
+}
+
+check_loadbalancer_prereqs() {
+  log "checking LoadBalancer configuration values without contacting a cluster"
+
+  if [ "${SERVICE_TYPE:-}" != "LoadBalancer" ]; then
+    log "SERVICE_TYPE=${SERVICE_TYPE:-ClusterIP}; LoadBalancer prerequisite check not required"
     return 0
   fi
 
-  log "checking for existing MetalLB namespace"
-  if k3s kubectl get namespace metallb-system >/dev/null 2>&1; then
-    log "MetalLB namespace found"
-    k3s kubectl get pods -n metallb-system --no-headers 2>/dev/null || true
-  elif [ "${REQUIRE_METALLB:-0}" = "1" ]; then
-    fatal "SERVICE_TYPE=LoadBalancer requires MetalLB, but namespace metallb-system was not found and INSTALL_METALLB is not enabled."
-  else
-    warn "MetalLB namespace was not found. LoadBalancer service may stay pending unless another load balancer is installed."
+  if [ "${INSTALL_METALLB:-0}" = "1" ]; then
+    validate_metallb_settings_for_bundle
+    log "LoadBalancer service requested; MetalLB intent recorded in bundle metadata"
+    return 0
   fi
+
+  if [ -n "${LOADBALANCER_IP:-}" ]; then
+    log "LoadBalancer service requested with configured LOADBALANCER_IP=${LOADBALANCER_IP}"
+    return 0
+  fi
+
+  warn "SERVICE_TYPE=LoadBalancer selected without INSTALL_METALLB=1 or LOADBALANCER_IP"
+  warn "bundle will still be created; production-side procedure must provide a LoadBalancer implementation"
+}
+
+ensure_metallb_namespace() {
+  _metallb_forbid_live_action "create/check MetalLB namespace"
+}
+
+apply_metallb_manifest() {
+  _metallb_forbid_live_action "apply MetalLB upstream manifest"
+}
+
+apply_metallb_config() {
+  _metallb_forbid_live_action "apply MetalLB config"
+}
+
+print_metallb_diagnostics() {
+  log "skipping MetalLB diagnostics in bundle-only mode"
 }
