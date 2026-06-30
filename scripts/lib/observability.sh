@@ -37,6 +37,7 @@ OBSERVABILITY_ALLOY_CHART_VERSION="${OBSERVABILITY_ALLOY_CHART_VERSION:-1.8.1}"
 OBSERVABILITY_HELM_TIMEOUT="${OBSERVABILITY_HELM_TIMEOUT:-15m}"
 HELM_KUBECONFIG="${HELM_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 GRAFANA_HOST="${GRAFANA_HOST:-grafana-devprod.init-db.lan}"
+OBSERVABILITY_LOKI_GATEWAY_SERVICE="${OBSERVABILITY_LOKI_GATEWAY_SERVICE:-loki-gateway}"
 
 ensure_helm_kubeconfig() {
   if [ -f "$HELM_KUBECONFIG" ]; then
@@ -103,8 +104,25 @@ _prometheus_service_available() {
   k3s kubectl get svc "${OBSERVABILITY_STACK_RELEASE}-prometheus" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1
 }
 
+_detect_loki_service() {
+  if k3s kubectl get svc "${OBSERVABILITY_LOKI_RELEASE}" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1; then
+    printf '%s\n' "$OBSERVABILITY_LOKI_RELEASE"
+    return 0
+  fi
+
+  if k3s kubectl get svc "$OBSERVABILITY_LOKI_GATEWAY_SERVICE" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1; then
+    printf '%s\n' "$OBSERVABILITY_LOKI_GATEWAY_SERVICE"
+    return 0
+  fi
+
+  k3s kubectl get svc -n "$OBSERVABILITY_NAMESPACE" -l app.kubernetes.io/instance="$OBSERVABILITY_LOKI_RELEASE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -Ev 'memberlist$' \
+    | head -1
+}
+
 _loki_service_available() {
-  k3s kubectl get svc "${OBSERVABILITY_LOKI_RELEASE}" -n "$OBSERVABILITY_NAMESPACE" >/dev/null 2>&1
+  [ -n "$(_detect_loki_service)" ]
 }
 
 _alloy_daemonset_available() {
@@ -241,16 +259,46 @@ _delete_wrong_namespace_helm_owned_resources() {
   done
 }
 
+_delete_wrong_namespace_helm_owned_namespaced_resources() {
+  local release_name="$1"
+  local resource_type item_namespace item_name item_release item_release_namespace
+  local jsonpath
+
+  jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-namespace}{"\n"}{end}'
+
+  while IFS= read -r resource_type; do
+    [ -n "$resource_type" ] || continue
+
+    while IFS=$'\t' read -r item_namespace item_name item_release item_release_namespace; do
+      [ -n "$item_namespace" ] || continue
+      [ -n "$item_name" ] || continue
+      [ "$item_release" = "$release_name" ] || continue
+      [ -n "$item_release_namespace" ] || continue
+      [ "$item_release_namespace" != "$OBSERVABILITY_NAMESPACE" ] || continue
+
+      warn "deleting stale Helm-owned $resource_type/$item_namespace/$item_name from old release namespace $item_release_namespace before reinstalling $release_name into $OBSERVABILITY_NAMESPACE"
+      k3s kubectl delete "$resource_type" "$item_name" -n "$item_namespace" --ignore-not-found=true || \
+        fatal_observability "failed to delete stale Helm-owned $resource_type/$item_namespace/$item_name"
+    done < <(k3s kubectl get "$resource_type" -A -o jsonpath="$jsonpath" 2>/dev/null || true)
+  done < <(k3s kubectl api-resources --verbs=list --namespaced=true -o name 2>/dev/null || true)
+}
+
 cleanup_observability_helm_namespace_conflicts() {
   if [ "$OBSERVABILITY_INSTALL_STACK" != "1" ]; then
     return 0
   fi
 
   ensure_helm_kubeconfig
-  log "checking for stale Helm-owned cluster-scoped observability resources"
+  log "checking for stale Helm-owned cluster-scoped and namespaced observability resources"
+
   _delete_wrong_namespace_helm_owned_resources "$OBSERVABILITY_STACK_RELEASE"
+  _delete_wrong_namespace_helm_owned_namespaced_resources "$OBSERVABILITY_STACK_RELEASE"
+
   _delete_wrong_namespace_helm_owned_resources "$OBSERVABILITY_LOKI_RELEASE"
+  _delete_wrong_namespace_helm_owned_namespaced_resources "$OBSERVABILITY_LOKI_RELEASE"
+
   _delete_wrong_namespace_helm_owned_resources "$OBSERVABILITY_ALLOY_RELEASE"
+  _delete_wrong_namespace_helm_owned_namespaced_resources "$OBSERVABILITY_ALLOY_RELEASE"
 }
 
 _render_observability_file_common() {
