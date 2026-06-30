@@ -265,16 +265,23 @@ _render_observability_file_common() {
     "$rendered_file"
 }
 
+_observability_stale_pattern() {
+  printf '%s\n' 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace:[[:space:]]+observability([[:space:]]*$|[[:space:]]+#)|loki\.observability\.svc\.cluster\.local'
+}
+
 _render_observability_values_file() {
   local source_file="$1"
   local rendered_file="$2"
+  local stale_pattern=""
 
   cp "$source_file" "$rendered_file"
   _render_observability_file_common "$rendered_file"
 
-  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >/dev/null 2>&1; then
+  stale_pattern="$(_observability_stale_pattern)"
+
+  if grep -nE "$stale_pattern" "$rendered_file" >/dev/null 2>&1; then
     warn "unresolved placeholder or stale observability namespace detected in rendered Helm values from $(basename "$source_file")"
-    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >&2 || true
+    grep -nE "$stale_pattern" "$rendered_file" >&2 || true
     return 1
   fi
 }
@@ -465,6 +472,7 @@ install_observability_helm_stacks() {
 _render_observability_manifest() {
   local source_file="$1"
   local rendered_file="$2"
+  local stale_pattern=""
 
   cp "$source_file" "$rendered_file"
 
@@ -472,9 +480,11 @@ _render_observability_manifest() {
   # Render runtime namespace/host here so .env remains the operator source of truth.
   _render_observability_file_common "$rendered_file"
 
-  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >/dev/null 2>&1; then
+  stale_pattern="$(_observability_stale_pattern)"
+
+  if grep -nE "$stale_pattern" "$rendered_file" >/dev/null 2>&1; then
     warn "unresolved placeholder or stale observability namespace detected in rendered observability manifest from $(basename "$source_file")"
-    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan|searchNamespace: observability|loki\.observability\.svc\.cluster\.local' "$rendered_file" >&2 || true
+    grep -nE "$stale_pattern" "$rendered_file" >&2 || true
     return 1
   fi
 }
