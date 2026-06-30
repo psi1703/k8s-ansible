@@ -92,6 +92,10 @@ render_manifests() {
   REDIS_REQUIRED="$REDIS_REQUIRED" \
   REDIS_STORAGE_CLASS="$REDIS_STORAGE_CLASS" \
   REDIS_SIZE="$REDIS_SIZE" \
+  REDIS_NFS_PV_PREFIX="${REDIS_NFS_PV_PREFIX:-}" \
+  REDIS_NFS_SERVER="${REDIS_NFS_SERVER:-}" \
+  REDIS_NFS_BASE_PATH="${REDIS_NFS_BASE_PATH:-}" \
+  REDIS_NFS_MOUNT_OPTIONS="${REDIS_NFS_MOUNT_OPTIONS:-}" \
   NFS_ENABLED="$NFS_ENABLED" \
   NFS_SERVER="$NFS_SERVER" \
   NFS_PATH="$NFS_PATH" \
@@ -184,6 +188,70 @@ def add_nodesel(text: str, key: str, value: str) -> str:
 
     block = f"      nodeSelector:\n        {key}: {yaml_quote(value)}\n"
     return text.replace("    spec:\n", "    spec:\n" + block, 1)
+
+
+def redis_nfs_enabled() -> bool:
+    storage_class = os.environ.get("REDIS_STORAGE_CLASS", "").strip()
+    server = os.environ.get("REDIS_NFS_SERVER", "").strip()
+    base_path = os.environ.get("REDIS_NFS_BASE_PATH", "").strip().rstrip("/")
+    return bool(storage_class and server and base_path and storage_class != "local-path")
+
+
+def render_redis_nfs_pv() -> None:
+    path = manifest_dir / "redis-nfs-pv.yaml"
+    if not path.exists():
+        return
+
+    if not redis_nfs_enabled():
+        path.unlink()
+        return
+
+    prefix = os.environ.get("REDIS_NFS_PV_PREFIX", "otp-redis").strip().strip("-") or "otp-redis"
+    storage_class = os.environ["REDIS_STORAGE_CLASS"].strip()
+    storage_size = os.environ["REDIS_SIZE"].strip()
+    server = os.environ["REDIS_NFS_SERVER"].strip()
+    base_path = os.environ["REDIS_NFS_BASE_PATH"].strip().rstrip("/")
+    mount_options = [
+        item.strip()
+        for item in os.environ.get("REDIS_NFS_MOUNT_OPTIONS", "").split(",")
+        if item.strip()
+    ]
+
+    documents = []
+    for index in range(3):
+        pod_name = f"otp-redis-{index}"
+        pv_name = f"{prefix}-{index}-nfs-pv"
+        mount_block = ""
+        if mount_options:
+            mount_block = "  mountOptions:\n" + "".join(f"    - {opt}\n" for opt in mount_options)
+
+        documents.append(
+            "apiVersion: v1\n"
+            "kind: PersistentVolume\n"
+            "metadata:\n"
+            f"  name: {pv_name}\n"
+            "  labels:\n"
+            "    app: otp-redis\n"
+            f"    redis-pod: {pod_name}\n"
+            "    storage-role: redis-data\n"
+            f"    deployment-namespace: {namespace}\n"
+            "spec:\n"
+            "  capacity:\n"
+            f"    storage: {storage_size}\n"
+            "  accessModes:\n"
+            "    - ReadWriteOnce\n"
+            "  persistentVolumeReclaimPolicy: Retain\n"
+            f"  storageClassName: {storage_class}\n"
+            f"{mount_block}"
+            "  claimRef:\n"
+            f"    namespace: {namespace}\n"
+            f"    name: redis-data-{pod_name}\n"
+            "  nfs:\n"
+            f"    server: {server}\n"
+            f"    path: {base_path}/{pod_name}\n"
+        )
+
+    write("redis-nfs-pv.yaml", "---\n".join(documents))
 
 
 # Namespace
@@ -333,6 +401,8 @@ if (manifest_dir / "service.yaml").exists():
 
 
 # Redis HA manifests.
+render_redis_nfs_pv()
+
 redis_manifests = [
     "redis-service.yaml",
     "redis-configmap.yaml",
