@@ -254,13 +254,54 @@
   failed_when: false
 
 - name: Wait for OTP Relay installer to finish
-  ansible.builtin.async_status:
-    jid: "{{ otp_relay_installer_job.ansible_job_id }}"
-  register: otp_relay_installer_status
-  until: otp_relay_installer_status.finished | default(false)
-  retries: 720
-  delay: 10
+  ansible.builtin.shell: |
+    set -eu
+
+    STATUS_FILE="{{ otp_relay_installer_status_file }}"
+    LOG_FILE="{{ otp_relay_installer_log }}"
+    TIMEOUT_SECONDS=7200
+    SLEEP_SECONDS=10
+    START_TS="$(date +%s)"
+    LAST_PROGRESS_TS=0
+
+    echo "Waiting for OTP Relay installer to finish."
+    echo "Live log on control-plane: sudo tail -f ${LOG_FILE}"
+    echo "Status file: ${STATUS_FILE}"
+
+    while true; do
+      if [ -f "${STATUS_FILE}" ]; then
+        RC="$(cat "${STATUS_FILE}" 2>/dev/null || echo 1)"
+        echo "OTP Relay installer finished with rc=${RC}"
+        exit 0
+      fi
+
+      NOW_TS="$(date +%s)"
+      ELAPSED=$((NOW_TS - START_TS))
+
+      if [ "${ELAPSED}" -ge "${TIMEOUT_SECONDS}" ]; then
+        echo "Timed out waiting for OTP Relay installer after ${TIMEOUT_SECONDS}s"
+        echo
+        echo "===== last installer log lines ====="
+        tail -120 "${LOG_FILE}" 2>/dev/null || true
+        exit 1
+      fi
+
+      if [ $((NOW_TS - LAST_PROGRESS_TS)) -ge 60 ]; then
+        echo "Still waiting for OTP Relay installer... elapsed=${ELAPSED}s"
+        LAST_PROGRESS_TS="${NOW_TS}"
+
+        if [ -f "${LOG_FILE}" ]; then
+          echo "Latest installer log line:"
+          tail -1 "${LOG_FILE}" 2>/dev/null || true
+        fi
+      fi
+
+      sleep "${SLEEP_SECONDS}"
+    done
+  args:
+    executable: /bin/bash
   become: true
+  register: otp_relay_installer_wait_result
   changed_when: false
   failed_when: false
 
@@ -280,11 +321,20 @@
   changed_when: false
   failed_when: false
 
+- name: Collect OTP Relay async job result
+  ansible.builtin.async_status:
+    jid: "{{ otp_relay_installer_job.ansible_job_id }}"
+  become: true
+  register: otp_relay_installer_status
+  changed_when: false
+  failed_when: false
+
 - name: Show final OTP Relay installer log
   ansible.builtin.shell: |
     set -eu
 
-    echo "===== installer status ====="
+    echo "===== installer wait status ====="
+    echo "wait task rc={{ otp_relay_installer_wait_result.rc | default('unknown') }}"
     echo "async finished={{ otp_relay_installer_status.finished | default('unknown') }}"
     echo "async rc={{ otp_relay_installer_status.rc | default('unknown') }}"
     echo "status file rc={{ otp_relay_installer_status_file_result.stdout | default('unknown') }}"
@@ -302,17 +352,31 @@
   changed_when: false
   failed_when: false
 
-- name: Fail when OTP Relay installer failed
+- name: Fail when OTP Relay installer did not finish cleanly
   ansible.builtin.fail:
     msg: >-
-      OTP Relay installer failed with rc={{ otp_relay_installer_status.rc | default(otp_relay_installer_status_file_result.stdout | default('unknown')) }}.
+      OTP Relay installer did not finish cleanly.
+      Wait task rc={{ otp_relay_installer_wait_result.rc | default('unknown') }}.
+      Status file rc={{ otp_relay_installer_status_file_result.stdout | default('unknown') }}.
       Review the control-plane log: {{ otp_relay_installer_log }}
       Live command: sudo tail -f {{ otp_relay_installer_log }}
   when: >
-    (otp_relay_installer_status.rc | default(0) | int) != 0
+    (otp_relay_installer_wait_result.rc | default(0) | int) != 0
     or
     (
+      otp_relay_installer_status_file_result.stdout is not defined
+      or otp_relay_installer_status_file_result.stdout == 'missing'
+    )
+
+- name: Fail when OTP Relay installer failed
+  ansible.builtin.fail:
+    msg: >-
+      OTP Relay installer failed with rc={{ otp_relay_installer_status_file_result.stdout | default(otp_relay_installer_status.rc | default('unknown')) }}.
+      Review the control-plane log: {{ otp_relay_installer_log }}
+      Live command: sudo tail -f {{ otp_relay_installer_log }}
+  when: >
+    (
       otp_relay_installer_status_file_result.stdout is defined
-      and otp_relay_installer_status_file_result.stdout not in ['0', 'missing']
+      and otp_relay_installer_status_file_result.stdout != 'missing'
       and (otp_relay_installer_status_file_result.stdout | int) != 0
     )
