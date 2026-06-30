@@ -9,13 +9,14 @@ KPS_CHART_VERSION="${KPS_CHART_VERSION:-85.0.1}"
 LOKI_CHART_VERSION="${LOKI_CHART_VERSION:-}"
 ALLOY_CHART_VERSION="${ALLOY_CHART_VERSION:-1.8.1}"
 
-NAMESPACE="${NAMESPACE:-otp-relay}"
-OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
+NAMESPACE="${NAMESPACE:-otp-relay-devprod}"
+OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability-devprod}"
 KPS_RELEASE="${KPS_RELEASE:-kube-prometheus-stack}"
 LOKI_RELEASE="${LOKI_RELEASE:-loki}"
 ALLOY_RELEASE="${ALLOY_RELEASE:-alloy}"
 LOKI_SERVICE="${LOKI_SERVICE:-loki}"
 LOKI_PORT="${LOKI_PORT:-3100}"
+
 # Some Loki chart versions expose a gateway instead of service/loki.
 # Keep service/loki as the preferred SCH target, but auto-detect a usable fallback
 # so the health check reports the real live state instead of only one assumed name.
@@ -44,6 +45,9 @@ SENTINEL_PORT="${SENTINEL_PORT:-26379}"
 SENTINEL_MASTER_NAME="${SENTINEL_MASTER_NAME:-mymaster}"
 HAPROXY_SERVICE="${HAPROXY_SERVICE:-otp-redis-haproxy}"
 HAPROXY_PORT="${HAPROXY_PORT:-6379}"
+
+PROMETHEUS_SERVICE="${PROMETHEUS_SERVICE:-${KPS_RELEASE}-prometheus}"
+GRAFANA_SERVICE="${GRAFANA_SERVICE:-${KPS_RELEASE}-grafana}"
 
 PROBLEMS=()
 WARNINGS=()
@@ -86,13 +90,10 @@ warning() {
   echo "WARNING: $1"
 }
 
-jsonpath() {
-  kubectl "$@" 2>/dev/null || true
-}
-
 first_pod() {
   local ns="$1"
   local selector="$2"
+
   kubectl -n "$ns" get pod -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
@@ -100,13 +101,15 @@ check_deployment_ready() {
   local ns="$1"
   local name="$2"
   local label="$3"
+  local desired=""
+  local ready=""
+  local available=""
 
   if ! kubectl -n "$ns" get deployment "$name" >/dev/null 2>&1; then
     problem "$label deployment missing: $ns/$name"
     return
   fi
 
-  local desired ready available
   desired="$(kubectl -n "$ns" get deployment "$name" -o jsonpath='{.status.replicas}' 2>/dev/null || echo 0)"
   ready="$(kubectl -n "$ns" get deployment "$name" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
   available="$(kubectl -n "$ns" get deployment "$name" -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo 0)"
@@ -125,13 +128,14 @@ check_statefulset_ready() {
   local ns="$1"
   local name="$2"
   local label="$3"
+  local desired=""
+  local ready=""
 
   if ! kubectl -n "$ns" get statefulset "$name" >/dev/null 2>&1; then
     problem "$label StatefulSet missing: $ns/$name"
     return
   fi
 
-  local desired ready
   desired="$(kubectl -n "$ns" get statefulset "$name" -o jsonpath='{.status.replicas}' 2>/dev/null || echo 0)"
   ready="$(kubectl -n "$ns" get statefulset "$name" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
   desired="${desired:-0}"
@@ -148,13 +152,15 @@ check_daemonset_ready() {
   local ns="$1"
   local name="$2"
   local label="$3"
+  local desired=""
+  local ready=""
+  local available=""
 
   if ! kubectl -n "$ns" get daemonset "$name" >/dev/null 2>&1; then
     problem "$label DaemonSet missing: $ns/$name"
     return
   fi
 
-  local desired ready available
   desired="$(kubectl -n "$ns" get daemonset "$name" -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 0)"
   ready="$(kubectl -n "$ns" get daemonset "$name" -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)"
   available="$(kubectl -n "$ns" get daemonset "$name" -o jsonpath='{.status.numberAvailable}' 2>/dev/null || echo 0)"
@@ -175,13 +181,13 @@ check_service_endpoints() {
   local ns="$1"
   local svc="$2"
   local label="$3"
+  local endpoints=""
 
   if ! kubectl -n "$ns" get svc "$svc" >/dev/null 2>&1; then
     problem "$label service missing: $ns/$svc"
     return
   fi
 
-  local endpoints
   endpoints="$(kubectl -n "$ns" get endpoints "$svc" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
 
   if [ -z "$endpoints" ]; then
@@ -204,8 +210,6 @@ detect_loki_service() {
     return 0
   fi
 
-  # Fall back to the first non-memberlist Loki service if the chart produced
-  # version-specific service names.
   kubectl -n "$ns" get svc -l app.kubernetes.io/instance="$LOKI_RELEASE" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
     | grep -Ev 'memberlist$' \
@@ -214,7 +218,7 @@ detect_loki_service() {
 
 check_loki_workload_present() {
   local ns="$1"
-  local count
+  local count=""
 
   count="$(kubectl -n "$ns" get pod -l app.kubernetes.io/instance="$LOKI_RELEASE" \
     --field-selector=status.phase=Running \
@@ -262,17 +266,18 @@ if ! kubectl get --raw=/readyz >/dev/null 2>&1; then
 else
   echo "OK: Kubernetes API /readyz passed"
 fi
+
 run kubectl cluster-info
 run kubectl get nodes -o wide
 run kubectl get nodes -L observability/role,otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node
 
 section "Helm access"
-run_sh "helm -n $OBSERVABILITY_NAMESPACE list -a || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE list -a || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $KPS_RELEASE || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $LOKI_RELEASE || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm -n $OBSERVABILITY_NAMESPACE status $ALLOY_RELEASE || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo list || true"
+run_sh "helm -n '$OBSERVABILITY_NAMESPACE' list -a || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm -n '$OBSERVABILITY_NAMESPACE' list -a || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm -n '$OBSERVABILITY_NAMESPACE' status '$KPS_RELEASE' || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm -n '$OBSERVABILITY_NAMESPACE' status '$LOKI_RELEASE' || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm -n '$OBSERVABILITY_NAMESPACE' status '$ALLOY_RELEASE' || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm repo list || true"
 
 if ! sudo KUBECONFIG="$KUBECONFIG_PATH" helm -n "$OBSERVABILITY_NAMESPACE" status "$KPS_RELEASE" >/dev/null 2>&1; then
   problem "Helm release missing or unhealthy: $OBSERVABILITY_NAMESPACE/$KPS_RELEASE"
@@ -315,6 +320,7 @@ check_service_endpoints "$NAMESPACE" "$HAPROXY_SERVICE" "Redis HAProxy"
 
 section "Shared PVC / NFS validation"
 run kubectl -n "$NAMESPACE" get pvc -o wide
+
 APP_PVC="$(kubectl -n "$NAMESPACE" get pvc otp-relay-data -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
 if [ -z "$APP_PVC" ]; then
   problem "app shared PVC missing: otp-relay-data"
@@ -341,12 +347,18 @@ else
 fi
 
 section "Runtime shared PVC write/read proof"
-PODS=($(kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null))
-echo "App pods: ${PODS[*]}"
-if [ "${#PODS[@]}" -ge 2 ]; then
+PODS_TEXT="$(kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+POD_COUNT="$(printf '%s\n' "$PODS_TEXT" | sed '/^$/d' | wc -l | xargs)"
+POD_ONE="$(printf '%s\n' "$PODS_TEXT" | sed '/^$/d' | sed -n '1p')"
+POD_TWO="$(printf '%s\n' "$PODS_TEXT" | sed '/^$/d' | sed -n '2p')"
+
+echo "App pods:"
+printf '%s\n' "$PODS_TEXT" | sed '/^$/d'
+
+if [ "${POD_COUNT:-0}" -ge 2 ] && [ -n "$POD_ONE" ] && [ -n "$POD_TWO" ]; then
   TEST_FILE="/app/data/shared-pvc-health-check.txt"
-  run_sh "kubectl -n '$NAMESPACE' exec '${PODS[0]}' -- sh -c 'date -Is > $TEST_FILE && hostname >> $TEST_FILE'"
-  run_sh "kubectl -n '$NAMESPACE' exec '${PODS[1]}' -- cat '$TEST_FILE'"
+  run_sh "kubectl -n '$NAMESPACE' exec '$POD_ONE' -- sh -c 'date -Is > $TEST_FILE && hostname >> $TEST_FILE'"
+  run_sh "kubectl -n '$NAMESPACE' exec '$POD_TWO' -- cat '$TEST_FILE'"
 else
   warning "less than two app pods found; skipping cross-pod shared PVC proof"
 fi
@@ -410,8 +422,8 @@ run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get servicemonitor -o wide 2>/dev/
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get prometheus,alertmanager 2>/dev/null || true"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' get configmap otp-relay-live-dashboard 2>/dev/null || true"
 
-check_service_endpoints "$OBSERVABILITY_NAMESPACE" "${KPS_RELEASE}-grafana" "Grafana"
-check_service_endpoints "$OBSERVABILITY_NAMESPACE" "${KPS_RELEASE}-prometheus" "Prometheus"
+check_service_endpoints "$OBSERVABILITY_NAMESPACE" "$GRAFANA_SERVICE" "Grafana"
+check_service_endpoints "$OBSERVABILITY_NAMESPACE" "$PROMETHEUS_SERVICE" "Prometheus"
 
 if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
   check_loki_workload_present "$OBSERVABILITY_NAMESPACE"
@@ -432,9 +444,9 @@ fi
 section "Metrics endpoints from inside cluster"
 run_sh "kubectl -n '$NAMESPACE' run curl-metrics-test --rm -i --restart=Never --image=curlimages/curl:latest -- sh -c '
 echo --- otp-relay metrics ---
-curl -fsS http://otp-relay.otp-relay.svc.cluster.local/metrics | grep -E \"otp_queue_depth|otp_active_user|otp_delivered_total|otp_claims_total\" | head -30 || true
+curl -fsS http://${PORTAL_SERVICE}.${NAMESPACE}.svc.cluster.local/metrics | grep -E \"otp_queue_depth|otp_active_user|otp_delivered_total|otp_claims_total\" | head -30 || true
 echo --- otp-monitor metrics ---
-curl -fsS http://otp-monitor.otp-relay.svc.cluster.local:9101/metrics | grep -E \"otp_iphone_present|otp_monitor_arp_last_success_timestamp_seconds|otp_iphone_absence_events_total\" | head -30 || true
+curl -fsS http://otp-monitor.${NAMESPACE}.svc.cluster.local:9101/metrics | grep -E \"otp_iphone_present|otp_monitor_arp_last_success_timestamp_seconds|otp_iphone_absence_events_total\" | head -30 || true
 ' || true"
 
 section "Loki and Alloy log pipeline checks"
@@ -451,7 +463,7 @@ if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
 
     run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-labels-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS '$LOKI_URL/loki/api/v1/labels' | head -40 || true"
 
-    run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-query-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS --get '$LOKI_URL/loki/api/v1/query' --data-urlencode 'query={namespace=\"otp-relay\"}' | head -80 || true"
+    run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run loki-query-check --rm -i --restart=Never --image=curlimages/curl:latest -- curl -fsS --get '$LOKI_URL/loki/api/v1/query' --data-urlencode 'query={namespace=\"$NAMESPACE\"}' | head -80 || true"
   fi
 else
   warning "loki-values.yaml not present; skipping Loki API checks"
@@ -466,7 +478,7 @@ fi
 section "Prometheus targets and dashboard queries"
 run_sh "kubectl -n '$OBSERVABILITY_NAMESPACE' run prometheus-api-check --rm -i --restart=Never --image=curlimages/curl:latest -- sh -c '
 set -eu
-PROM_URL=\"http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090\"
+PROM_URL=\"http://${PROMETHEUS_SERVICE}.${OBSERVABILITY_NAMESPACE}.svc.cluster.local:9090\"
 
 echo --- prometheus ready ---
 curl -fsS \"\$PROM_URL/-/ready\"
@@ -520,29 +532,29 @@ if [ -d "$REPO/k8s" ]; then
 fi
 
 section "Repo Helm values render check"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo update >/dev/null 2>&1 || true"
-run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm repo list || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm repo add grafana-community https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm repo update >/dev/null 2>&1 || true"
+run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm repo list || true"
 
 if [ -f "$REPO/k8s/observability/prometheus-stack-values.yaml" ]; then
   KPS_RENDER="$(mktemp /tmp/kps-rendered-health-check.XXXXXX.yaml)"
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --namespace '$OBSERVABILITY_NAMESPACE' --version '$KPS_CHART_VERSION' -f k8s/observability/prometheus-stack-values.yaml >'$KPS_RENDER' && echo OK || echo FAILED"
+  run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm template '$KPS_RELEASE' prometheus-community/kube-prometheus-stack --namespace '$OBSERVABILITY_NAMESPACE' --version '$KPS_CHART_VERSION' -f k8s/observability/prometheus-stack-values.yaml >'$KPS_RENDER' && echo OK || echo FAILED"
 fi
 
 if [ -f "$REPO/k8s/observability/loki-values.yaml" ]; then
   LOKI_RENDER="$(mktemp /tmp/loki-rendered-health-check.XXXXXX.yaml)"
   if [ -n "$LOKI_CHART_VERSION" ]; then
-    run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template loki grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' --version '$LOKI_CHART_VERSION' -f k8s/observability/loki-values.yaml >'$LOKI_RENDER' && echo OK || echo FAILED"
+    run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm template '$LOKI_RELEASE' grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' --version '$LOKI_CHART_VERSION' -f k8s/observability/loki-values.yaml >'$LOKI_RENDER' && echo OK || echo FAILED"
   else
-    run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template loki grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' -f k8s/observability/loki-values.yaml >'$LOKI_RENDER' && echo OK || echo FAILED"
+    run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm template '$LOKI_RELEASE' grafana-community/loki --namespace '$OBSERVABILITY_NAMESPACE' -f k8s/observability/loki-values.yaml >'$LOKI_RENDER' && echo OK || echo FAILED"
   fi
 fi
 
 if [ -f "$REPO/k8s/observability/alloy-values.yaml" ]; then
   ALLOY_RENDER="$(mktemp /tmp/alloy-rendered-health-check.XXXXXX.yaml)"
-  run_sh "sudo KUBECONFIG=$KUBECONFIG_PATH helm template alloy grafana/alloy --namespace '$OBSERVABILITY_NAMESPACE' --version '$ALLOY_CHART_VERSION' -f k8s/observability/alloy-values.yaml >'$ALLOY_RENDER' && echo OK || echo FAILED"
+  run_sh "sudo KUBECONFIG='$KUBECONFIG_PATH' helm template '$ALLOY_RELEASE' grafana/alloy --namespace '$OBSERVABILITY_NAMESPACE' --version '$ALLOY_CHART_VERSION' -f k8s/observability/alloy-values.yaml >'$ALLOY_RENDER' && echo OK || echo FAILED"
 fi
 
 section "Installer recent log tail"
@@ -556,6 +568,7 @@ echo "Problems: ${#PROBLEMS[@]}"
 for p in "${PROBLEMS[@]}"; do
   echo " - $p"
 done
+
 echo
 echo "Warnings: ${#WARNINGS[@]}"
 for w in "${WARNINGS[@]}"; do
