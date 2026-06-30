@@ -1,37 +1,46 @@
 #!/usr/bin/env bash
-# Repository sync and source validation.
+# Repository sync and source validation for the bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Prepare source on the dev/build host only.
+#   - Do not deploy.
+#   - Do not pull or mutate anything on the production server.
+#   - Do not run Kubernetes, Helm, Ansible, K3s, or runner setup.
+#
+# The production server receives only the finished bundle.
 
 sync_deployment_repo() {
-  log "preparing deployment repository source"
+  log "preparing release source repository on dev/build host"
 
   SCRIPT_DIR_REAL="$(cd "$SCRIPT_DIR" && pwd)"
   INSTALL_DIR_REAL="$(mkdir -p "$INSTALL_DIR" 2>/dev/null || true; cd "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
 
   log "script directory: $SCRIPT_DIR_REAL"
-  log "install directory: $INSTALL_DIR_REAL"
+  log "release source directory: $INSTALL_DIR_REAL"
   log "repo sync mode: SKIP_REPO_SYNC=$SKIP_REPO_SYNC"
 
   if [ "$SKIP_REPO_SYNC" = "auto" ] && [ "$SCRIPT_DIR_REAL" = "$INSTALL_DIR_REAL" ]; then
-    log "SKIP_REPO_SYNC=auto and script already runs from install directory; skipping git sync"
+    log "SKIP_REPO_SYNC=auto and launcher already runs from release source directory; skipping git sync"
     SKIP_REPO_SYNC=1
   fi
 
   if [ "$SKIP_REPO_SYNC" = "1" ]; then
-    log "using existing synced repository at $SCRIPT_DIR_REAL; skipping installer git sync"
+    log "using existing source repository at $SCRIPT_DIR_REAL; skipping git sync"
     INSTALL_DIR="$SCRIPT_DIR_REAL"
   elif [ -d "$INSTALL_DIR/.git" ]; then
-    log "syncing repository into $INSTALL_DIR from $REPO_URL ref $REPO_REF"
+    log "syncing source repository into $INSTALL_DIR from $REPO_URL ref $REPO_REF"
     log "updating git remote origin URL"
     git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" || true
 
-    log "fetching repository ref from origin; this may take a few minutes on slow networks"
+    log "fetching repository ref from origin"
     git -C "$INSTALL_DIR" fetch --prune origin "$REPO_REF"
 
-    log "resetting working tree to origin/$REPO_REF"
+    log "resetting build working tree to origin/$REPO_REF"
     git -C "$INSTALL_DIR" reset --hard "origin/$REPO_REF"
 
     if [ "$GIT_CLEAN" = "1" ]; then
-      log "cleaning untracked files in repo working tree, preserving common local data/secret files"
+      log "cleaning untracked files in source working tree, preserving local env/data/log files"
       git -C "$INSTALL_DIR" clean -ffd -e data/ -e .env -e k8s/manifests/secret.env -e '*.log'
       log "git clean completed"
     else
@@ -40,8 +49,7 @@ sync_deployment_repo() {
   elif [ -e "$INSTALL_DIR" ]; then
     fatal "$INSTALL_DIR exists but is not a git repo. Move it away, set INSTALL_DIR to another path, or run from the synced repo with SKIP_REPO_SYNC=1."
   else
-    log "cloning repository into $INSTALL_DIR from $REPO_URL ref $REPO_REF"
-    log "git clone may take a few minutes on slow networks"
+    log "cloning source repository into $INSTALL_DIR from $REPO_URL ref $REPO_REF"
     git clone --branch "$REPO_REF" "$REPO_URL" "$INSTALL_DIR"
     log "repository clone completed"
   fi
@@ -49,7 +57,7 @@ sync_deployment_repo() {
   cd "$INSTALL_DIR"
 
   if [ -f "$ENV_FILE" ] && [ "$ENV_FILE" != "$INSTALL_DIR/.env" ]; then
-    log "copying environment source file into synced repository .env"
+    log "copying environment source file into release source repository .env"
     cp "$ENV_FILE" "$INSTALL_DIR/.env"
     chmod 0600 "$INSTALL_DIR/.env"
     ENV_FILE="$INSTALL_DIR/.env"
@@ -57,8 +65,8 @@ sync_deployment_repo() {
     log "environment source copied to $ENV_FILE"
   fi
 
-  log "deployment source repo: $(git rev-parse --short HEAD 2>/dev/null || echo no-git): $(git log -1 --pretty=%s 2>/dev/null || echo local-files)"
-  log "deployment repository preparation completed"
+  log "release source repo: $(git rev-parse --short HEAD 2>/dev/null || echo no-git): $(git log -1 --pretty=%s 2>/dev/null || echo local-files)"
+  log "release source repository preparation completed"
 }
 
 validate_frontend_source_tree() {
@@ -81,7 +89,7 @@ validate_frontend_source_tree() {
 }
 
 validate_source_tree() {
-  log "checking required source files"
+  log "checking required source files for release bundle"
 
   [ -f main.py ] || fatal "main.py is missing in repo root"
   [ -f monitor.py ] || fatal "monitor.py is required and missing in repo root"
@@ -97,7 +105,7 @@ validate_source_tree() {
   [ -f k8s/Dockerfile.monitor ] || fatal "k8s/Dockerfile.monitor is missing"
   [ -d k8s/manifests ] || fatal "k8s/manifests directory is missing"
 
-  log "checking required core Kubernetes manifests"
+  log "checking required core Kubernetes manifest templates"
   for required_manifest in namespace.yaml pvc.yaml deployment.yaml service.yaml deployment-monitor.yaml monitor-service.yaml; do
     [ -f "k8s/manifests/$required_manifest" ] || fatal "k8s/manifests/$required_manifest is missing"
   done
@@ -111,7 +119,7 @@ validate_source_tree() {
   fi
 
   if [ "$REDIS_ENABLED" = "1" ]; then
-    log "REDIS_ENABLED=1; checking required Redis manifests"
+    log "REDIS_ENABLED=1; checking required Redis manifest templates"
     for required_manifest in \
       redis-service.yaml \
       redis-configmap.yaml \
