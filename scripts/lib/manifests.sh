@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Shared manifest rendering helpers for the OTP Relay bundle-only release builder.
+# Source this file; do not execute it directly.
+#
+# Bundle-only policy:
+#   - Render manifests into the generated release staging directory.
+#   - Validate rendered files for unresolved placeholders.
+#   - Do not apply manifests.
+#   - Do not create live ConfigMaps.
+#   - Do not query a live Kubernetes cluster.
+#
+# The production server receives only the finished bundle.
+
+_forbid_live_manifest_action() {
+  local action="$1"
+
+  fatal "forbidden live manifest action in bundle-only mode: $action"
+}
 
 apply_runtime_configmap() {
-  if [ -n "${MANIFEST_DIR:-}" ] && [ -f "$MANIFEST_DIR/configmap.yaml" ]; then
-    log "applying rendered ConfigMap manifest from repository template"
-    apply_if_exists "$MANIFEST_DIR/configmap.yaml"
-    return 0
-  fi
+  _forbid_live_manifest_action "apply runtime ConfigMap"
+}
 
-  warn "rendered configmap.yaml is not available; falling back to generated live ConfigMap"
-  k3s kubectl create configmap otp-relay-config \
-    --namespace "$NAMESPACE" \
-    --from-literal=CLAIM_EXPIRY_SEC="$CLAIM_EXPIRY_SEC" \
-    --from-literal=OTP_DISPLAY_SEC="$OTP_DISPLAY_SEC" \
-    --from-literal=CONCURRENT_RISK_SEC="$CONCURRENT_RISK_SEC" \
-    --from-literal=OTP_RELAY_DATA_DIR="$OTP_RELAY_DATA_DIR" \
-    --from-literal=USERS_EXCEL_PATH="$USERS_EXCEL_PATH" \
-    --from-literal=AUDIT_LOG_PATH="$AUDIT_LOG_PATH" \
-    --from-literal=PHONE_IP="$PHONE_IP" \
-    --from-literal=PHONE_INTERFACE="$PHONE_INTERFACE" \
-    --from-literal=PHONE_PING_INTERVAL="$PHONE_PING_INTERVAL" \
-    --from-literal=PHONE_OFFLINE_THRESHOLD="$PHONE_OFFLINE_THRESHOLD" \
-    --from-literal=SERVER_HOSTNAME="$SERVER_HOSTNAME" \
-    --from-literal=SERVER_IP="$SERVER_IP" \
-    --from-literal=PORTAL_URL="$PORTAL_URL" \
-    --dry-run=client -o yaml | k3s kubectl apply -f -
+apply_if_exists() {
+  _forbid_live_manifest_action "kubectl apply manifest"
 }
 
 validate_rendered_manifests() {
@@ -39,7 +37,7 @@ validate_rendered_manifests() {
   if [ -n "$found" ]; then
     warn "unresolved manifest placeholders were found after rendering:"
     printf '%s\n' "$found" >&2
-    fatal "manifest rendering left unresolved placeholders; fix .env values or renderer logic before applying"
+    fatal "manifest rendering left unresolved placeholders; fix .env values or renderer logic before bundling"
   fi
 
   log "rendered manifest placeholder validation passed"
@@ -124,7 +122,7 @@ def replace_namespace(text: str) -> str:
 
 
 def yaml_quote(value: str) -> str:
-    escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
@@ -254,12 +252,10 @@ def render_redis_nfs_pv() -> None:
     write("redis-nfs-pv.yaml", "---\n".join(documents))
 
 
-# Namespace
 if (manifest_dir / "namespace.yaml").exists():
     write("namespace.yaml", f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {namespace}\n")
 
 
-# ConfigMap
 if (manifest_dir / "configmap.yaml").exists():
     text = replace_namespace(read("configmap.yaml"))
     values = {
@@ -285,7 +281,6 @@ if (manifest_dir / "configmap.yaml").exists():
     write("configmap.yaml", text)
 
 
-# App PVC and optional static NFS PV. This renderer does not delete or migrate storage.
 if (manifest_dir / "pvc.yaml").exists():
     text = replace_namespace(read("pvc.yaml"))
     text = re.sub(r"\n  storageClassName: .*", "", text)
@@ -326,7 +321,6 @@ if (manifest_dir / "pv-nfs.yaml").exists():
         (manifest_dir / "pv-nfs.yaml").unlink()
 
 
-# App deployment
 if (manifest_dir / "deployment.yaml").exists():
     text = replace_namespace(read("deployment.yaml"))
     text = set_replicas(text, os.environ["REPLICA_COUNT"])
@@ -354,7 +348,6 @@ if (manifest_dir / "deployment.yaml").exists():
     write("deployment.yaml", text)
 
 
-# Monitor deployment: monitor remains required and single-replica.
 if (manifest_dir / "deployment-monitor.yaml").exists():
     text = replace_namespace(read("deployment-monitor.yaml"))
     text = set_replicas(text, "1")
@@ -369,14 +362,11 @@ if (manifest_dir / "deployment-monitor.yaml").exists():
     write("deployment-monitor.yaml", text)
 
 
-# Monitor metrics Service. This is internal-only and is selected by
-# k8s/observability/servicemonitor-otp-monitor.yaml.
 if (manifest_dir / "monitor-service.yaml").exists():
     text = replace_namespace(read("monitor-service.yaml"))
     write("monitor-service.yaml", text)
 
 
-# Service
 if (manifest_dir / "service.yaml").exists():
     text = replace_namespace(read("service.yaml"))
     text = re.sub(r"^  type: .*$", f"  type: {os.environ['SERVICE_TYPE']}", text, flags=re.MULTILINE)
@@ -400,7 +390,6 @@ if (manifest_dir / "service.yaml").exists():
     write("service.yaml", text)
 
 
-# Redis HA manifests.
 render_redis_nfs_pv()
 
 redis_manifests = [
@@ -445,7 +434,6 @@ for name in redis_manifests:
         write(name, text)
 
 
-# Ingress
 if (manifest_dir / "ingress.yaml").exists():
     ingress_enabled = os.environ.get("INGRESS_ENABLED", "1") == "1"
     tls_enabled = os.environ.get("TLS_ENABLED") == "1"
@@ -453,8 +441,6 @@ if (manifest_dir / "ingress.yaml").exists():
     tls_secret_name = os.environ.get("TLS_SECRET_NAME", "otp-relay-tls").strip() or "otp-relay-tls"
 
     if not ingress_enabled:
-        # The apply step deletes the live ingress when INGRESS_ENABLED=0.
-        # Remove the staged file too so it can never be accidentally applied.
         (manifest_dir / "ingress.yaml").unlink()
     else:
         if not tls_host:
@@ -462,10 +448,6 @@ if (manifest_dir / "ingress.yaml").exists():
         if tls_host in {"CHANGE_ME_TLS_HOST", "otp-relay.local"}:
             raise SystemExit("TLS_HOST must be changed from the default when INGRESS_ENABLED=1")
 
-        # Render ingress from scratch instead of patching a template.
-        # Important: Ingress backend port must reference the Kubernetes Service port.
-        # The otp-relay Service exposes port 80 and forwards targetPort 8000.
-        # Therefore the Ingress backend must use number: 80, not 8000.
         text = (
             "apiVersion: networking.k8s.io/v1\n"
             "kind: Ingress\n"
@@ -499,22 +481,4 @@ if (manifest_dir / "ingress.yaml").exists():
 PY_RENDER_MANIFESTS
 
   validate_rendered_manifests
-}
-
-apply_if_exists() {
-  local file="$1"
-
-  if [ ! -f "$file" ]; then
-    log "manifest not present, skipping: $file"
-    return 0
-  fi
-
-  log "applying manifest: $file"
-
-  if ! k3s kubectl apply -f "$file"; then
-    warn "failed to apply manifest: $file"
-    warn "showing first 120 lines of failed manifest for diagnostics"
-    sed -n '1,120p' "$file" >&2 || true
-    fatal "kubectl apply failed for $file"
-  fi
 }
