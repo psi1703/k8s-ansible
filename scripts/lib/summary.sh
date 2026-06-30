@@ -60,8 +60,16 @@ summary_normalize_url() {
 }
 
 summary_release_report_path() {
-  local base="${GENERATED_DIR:-${SCRIPT_DIR:-$(pwd)}}"
-  printf '%s/release-report.txt' "$base"
+  local release_bundle="${RELEASE_BUNDLE_PATH:-${BUNDLE_PATH:-}}"
+  local dist_dir="${DIST_DIR:-${SCRIPT_DIR:-$(pwd)}/dist}"
+  local report_name="release-report.txt"
+
+  if [ -n "$release_bundle" ] && [ "$release_bundle" != "not-set" ]; then
+    printf '%s/%s.report.txt' "$(dirname "$release_bundle")" "$(basename "$release_bundle")"
+    return 0
+  fi
+
+  printf '%s/%s' "$dist_dir" "$report_name"
 }
 
 summary_install_report_path() {
@@ -193,7 +201,7 @@ write_install_report() {
 print_release_bundle_summary() {
   local namespace="${NAMESPACE:-otp-relay-devprod}"
   local observability_namespace="${OBSERVABILITY_NAMESPACE:-observability-devprod}"
-  local portal_url_summary
+  local portal_url_summary=""
   local release_bundle="${RELEASE_BUNDLE_PATH:-${BUNDLE_PATH:-not-set}}"
   local checksum_file="${RELEASE_BUNDLE_SHA256_PATH:-${BUNDLE_SHA256_PATH:-not-set}}"
 
