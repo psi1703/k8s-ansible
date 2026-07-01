@@ -1,86 +1,22 @@
 ---
-- name: Ensure K3s agent prerequisites are installed
-  ansible.builtin.apt:
-    name:
-      - ca-certificates
-      - curl
-    state: present
-    update_cache: true
+# Disabled legacy Ansible role tasks.
+#
+# Historical behavior:
+#   This role installed and configured K3s agent/worker nodes.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No K3s agent installation is allowed from this repository path.
+#   - No worker node mutation is allowed from this repository path.
+#   - No production server deployment is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
 
-- name: Read K3s node token from localhost control-plane
-  ansible.builtin.slurp:
-    src: /var/lib/rancher/k3s/server/node-token
-  register: k3s_token_raw
-  delegate_to: "{{ groups['control_plane'][0] }}"
-  run_once: true
-
-- name: Publish K3s join token for worker play
-  ansible.builtin.set_fact:
-    k3s_join_token: "{{ k3s_token_raw.content | b64decode | trim }}"
-  run_once: true
-
-- name: Require K3s server URL from control-plane role
-  ansible.builtin.assert:
-    that:
-      - hostvars[groups['control_plane'][0]].k3s_server_url is defined
-      - hostvars[groups['control_plane'][0]].k3s_server_url | length > 0
-    fail_msg: >-
-      k3s_server_url was not published by the control-plane role.
-      Run playbooks/10-k3s-control-plane.yml before playbooks/20-k3s-workers.yml.
-
-- name: Detect K3s server URL from control-plane facts
-  ansible.builtin.set_fact:
-    k3s_worker_server_url: "{{ hostvars[groups['control_plane'][0]].k3s_server_url }}"
-  run_once: true
-
-- name: Show worker join endpoint
-  ansible.builtin.debug:
-    msg: "Joining workers to {{ k3s_worker_server_url }}"
-  run_once: true
-
-- name: Check if K3s agent is installed
-  ansible.builtin.stat:
-    path: /usr/local/bin/k3s
-  register: k3s_bin
-
-- name: Install K3s agent
-  ansible.builtin.shell: |
-    set -eu
-
-    echo "Installing K3s agent and joining {{ k3s_worker_server_url }}"
-    curl -sfL https://get.k3s.io | \
-      K3S_URL="{{ k3s_worker_server_url }}" \
-      K3S_TOKEN="{{ k3s_join_token }}" \
-      sh -
-  args:
-    executable: /bin/bash
-  when: not k3s_bin.stat.exists
-
-- name: Ensure K3s agent service is enabled and running
-  ansible.builtin.systemd:
-    name: k3s-agent
-    enabled: true
-    state: started
-
-- name: Wait for K3s agent service to become active
-  ansible.builtin.command:
-    cmd: systemctl is-active k3s-agent
-  register: k3s_agent_active
-  changed_when: false
-  retries: 30
-  delay: 5
-  until: k3s_agent_active.stdout == "active"
-
-- name: Show cluster nodes after worker join
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes -o wide
-  delegate_to: "{{ groups['control_plane'][0] }}"
-  run_once: true
-  register: k3s_nodes_after_worker_join
-  changed_when: false
-  failed_when: false
-
-- name: Print cluster nodes after worker join
-  ansible.builtin.debug:
-    var: k3s_nodes_after_worker_join.stdout_lines
-  run_once: true
+- name: Refuse legacy K3s agent installation
+  ansible.builtin.fail:
+    msg: >-
+      Legacy K3s agent/worker installation is disabled in the bundle-only
+      DEVtoPROD architecture. Use bash setup.sh or
+      bash build-release-bundle.sh to create a sealed production release
+      bundle. Production-side installation must be performed only by the
+      approved production procedure.
