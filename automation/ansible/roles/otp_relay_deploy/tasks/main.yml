@@ -6,6 +6,9 @@
     otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
     otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
     otp_relay_installer_status_file: "/tmp/otp-relay-installer-current.status"
+    otp_relay_installer_wait_seconds: "{{ otp_installer_wait_seconds | default(7200) }}"
+    otp_relay_installer_wait_interval_seconds: "{{ otp_installer_wait_interval_seconds | default(10) }}"
+    otp_relay_installer_snapshot_seconds: "{{ otp_installer_snapshot_seconds | default(60) }}"
 
 - name: Check if control-plane is local
   ansible.builtin.set_fact:
@@ -249,13 +252,70 @@
   changed_when: false
   failed_when: false
 
-- name: Wait for OTP Relay installer to finish
+- name: Wait for OTP Relay installer to finish cleanly
+  ansible.builtin.shell: |
+    set -eu
+
+    LOG="{{ otp_relay_installer_log }}"
+    STATUS_FILE="{{ otp_relay_installer_status_file }}"
+    MAX_SECONDS="{{ otp_relay_installer_wait_seconds }}"
+    INTERVAL_SECONDS="{{ otp_relay_installer_wait_interval_seconds }}"
+    SNAPSHOT_SECONDS="{{ otp_relay_installer_snapshot_seconds }}"
+
+    elapsed=0
+    next_snapshot=0
+
+    echo "Waiting for OTP Relay installer to finish."
+    echo "Live log: sudo tail -f ${LOG}"
+    echo "Status file: ${STATUS_FILE}"
+    echo "Timeout: ${MAX_SECONDS}s"
+    echo
+
+    while [ "$elapsed" -lt "$MAX_SECONDS" ]; do
+      if [ -f "$STATUS_FILE" ]; then
+        rc="$(cat "$STATUS_FILE" 2>/dev/null || echo missing)"
+        echo
+        echo "OTP Relay installer finished after ${elapsed}s with rc=${rc}"
+        exit 0
+      fi
+
+      if [ "$elapsed" -ge "$next_snapshot" ]; then
+        echo
+        echo "Still running after ${elapsed}s..."
+        if [ -f "$LOG" ]; then
+          echo "----- recent installer log -----"
+          tail -60 "$LOG" || true
+          echo "--------------------------------"
+        else
+          echo "Installer log not created yet: ${LOG}"
+        fi
+        next_snapshot=$((elapsed + SNAPSHOT_SECONDS))
+      fi
+
+      sleep "$INTERVAL_SECONDS"
+      elapsed=$((elapsed + INTERVAL_SECONDS))
+    done
+
+    echo
+    echo "Timed out after ${MAX_SECONDS}s waiting for OTP Relay installer."
+    if [ -f "$LOG" ]; then
+      echo "----- final installer log tail -----"
+      tail -200 "$LOG" || true
+      echo "------------------------------------"
+    fi
+
+    exit 124
+  args:
+    executable: /bin/bash
+  become: true
+  register: otp_relay_installer_wait_result
+  changed_when: false
+  failed_when: false
+
+- name: Collect OTP Relay installer async result
   ansible.builtin.async_status:
     jid: "{{ otp_relay_installer_job.ansible_job_id }}"
   register: otp_relay_installer_status
-  until: otp_relay_installer_status.finished | default(false)
-  retries: 720
-  delay: 10
   become: true
   changed_when: false
   failed_when: false
@@ -281,6 +341,7 @@
     set -eu
 
     echo "===== installer status ====="
+    echo "wait rc={{ otp_relay_installer_wait_result.rc | default('unknown') }}"
     echo "async finished={{ otp_relay_installer_status.finished | default('unknown') }}"
     echo "async rc={{ otp_relay_installer_status.rc | default('unknown') }}"
     echo "status file rc={{ otp_relay_installer_status_file_result.stdout | default('unknown') }}"
@@ -301,11 +362,19 @@
 - name: Fail when OTP Relay installer failed
   ansible.builtin.fail:
     msg: >-
-      OTP Relay installer failed with rc={{ otp_relay_installer_status.rc | default(otp_relay_installer_status_file_result.stdout | default('unknown')) }}.
+      OTP Relay installer failed or timed out.
+      wait rc={{ otp_relay_installer_wait_result.rc | default('unknown') }}.
+      async rc={{ otp_relay_installer_status.rc | default('unknown') }}.
+      status file rc={{ otp_relay_installer_status_file_result.stdout | default('unknown') }}.
       Review the control-plane log: {{ otp_relay_installer_log }}
       Live command: sudo tail -f {{ otp_relay_installer_log }}
   when: >
-    (otp_relay_installer_status.rc | default(0) | int) != 0
+    (otp_relay_installer_wait_result.rc | default(0) | int) != 0
+    or
+    (
+      otp_relay_installer_status.rc is defined
+      and (otp_relay_installer_status.rc | int) != 0
+    )
     or
     (
       otp_relay_installer_status_file_result.stdout is defined
