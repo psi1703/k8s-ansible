@@ -1,6 +1,28 @@
 ---
-- name: Join K3s workers
-  hosts: workers
-  become: true
-  roles:
-    - k3s_agent
+# Disabled legacy Ansible playbook.
+#
+# Historical behavior:
+#   This playbook joined/configured K3s worker nodes.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No K3s worker installation is allowed from this repository path.
+#   - No worker node mutation is allowed from this repository path.
+#   - No production server deployment is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
+
+- name: Disabled legacy K3s worker installation
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Refuse legacy K3s worker installation
+      ansible.builtin.fail:
+        msg: >-
+          Legacy K3s worker installation is disabled in the bundle-only
+          DEVtoPROD architecture. Use bash setup.sh or
+          bash build-release-bundle.sh to create a sealed production
+          release bundle. Production-side installation must be performed
+          only by the approved production procedure.
