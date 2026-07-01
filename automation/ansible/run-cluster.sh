@@ -94,26 +94,32 @@ ensure_server_networking_helpers() {
 }
 
 fix_local_ssh_permissions() {
-  local real_user="${SUDO_USER:-${USER:-$(id -un)}}"
-  local real_group
-  local real_home
-  local ssh_dir
-  local known_hosts
+  local real_user=""
+  local real_group=""
+  local ssh_dir=""
+  local known_hosts=""
+
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+    real_user="${SUDO_USER}"
+  elif [[ "$SSH_KEY" =~ ^/home/([^/]+)/\.ssh/ ]]; then
+    real_user="${BASH_REMATCH[1]}"
+  else
+    real_user="${USER:-$(id -un)}"
+  fi
 
   real_group="$(id -gn "$real_user" 2>/dev/null || printf '%s' "$real_user")"
-  real_home="$(getent passwd "$real_user" | cut -d: -f6)"
-  ssh_dir="$real_home/.ssh"
+  ssh_dir="$(dirname "$SSH_KEY")"
   known_hosts="$ssh_dir/known_hosts"
 
   log "Ensuring local SSH directory/key permissions are safe for ${real_user}"
 
   sudo mkdir -p "$ssh_dir"
-  sudo chmod 700 "$ssh_dir" || true
   sudo chown "$real_user:$real_group" "$ssh_dir" 2>/dev/null || sudo chown "$real_user" "$ssh_dir" 2>/dev/null || true
+  sudo chmod 700 "$ssh_dir" || true
 
   sudo touch "$known_hosts"
-  sudo chmod 644 "$known_hosts" || true
   sudo chown "$real_user:$real_group" "$known_hosts" 2>/dev/null || sudo chown "$real_user" "$known_hosts" 2>/dev/null || true
+  sudo chmod 644 "$known_hosts" || true
 
   if [[ -f "$SSH_KEY" ]]; then
     sudo chown "$real_user:$real_group" "$SSH_KEY" 2>/dev/null || sudo chown "$real_user" "$SSH_KEY" 2>/dev/null || true
@@ -125,9 +131,11 @@ fix_local_ssh_permissions() {
     sudo chmod 644 "${SSH_KEY}.pub" || true
   fi
 
-  [[ ! -f "$SSH_KEY" || -r "$SSH_KEY" ]] || fatal "SSH key exists but is not readable by ${real_user}: $SSH_KEY"
+  if [[ -f "$SSH_KEY" ]]; then
+    sudo test -r "$SSH_KEY" || fatal "SSH key exists but is not readable by root after repair: $SSH_KEY"
+    sudo -u "$real_user" test -r "$SSH_KEY" || fatal "SSH key exists but is not readable by ${real_user} after repair: $SSH_KEY"
+  fi
 }
-
 worker_inventory_hosts() {
   awk '
     BEGIN { in_workers=0 }
