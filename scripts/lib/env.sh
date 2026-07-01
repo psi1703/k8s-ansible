@@ -20,6 +20,7 @@ ENV_FILE_CREATED=0
 
 _env_quote() {
   local value="${1:-}"
+
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '"%s"' "$value"
@@ -95,21 +96,74 @@ _env_default_interface() {
   ip route show default 2>/dev/null | awk '{print $5; exit}'
 }
 
-_env_reset_config_vars() {
-  local names
-  local name=""
-
-  names="REPO_URL REPO_REF INSTALL_DIR NAMESPACE APP_IMAGE MONITOR_IMAGE DEPLOY_MODE SERVICE_TYPE SERVICE_NODE_PORT LOADBALANCER_IP INGRESS_ENABLED TLS_ENABLED TLS_HOST TLS_SECRET_NAME TLS_SELF_SIGNED PORTAL_URL PVC_STORAGE_CLASS PVC_SIZE NFS_ENABLED NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_PV_NAME NFS_MOUNT_OPTIONS REPLICA_COUNT APP_NODE_SELECTOR_KEY APP_NODE_SELECTOR_VALUE MONITOR_NODE_SELECTOR_KEY MONITOR_NODE_SELECTOR_VALUE REDIS_NODE_SELECTOR_KEY REDIS_NODE_SELECTOR_VALUE REQUIRE_METALLB INSTALL_METALLB METALLB_VERSION METALLB_MANIFEST_URL METALLB_IP_RANGE METALLB_POOL_NAME SERVER_HOSTNAME SERVER_IP PHONE_IP PHONE_INTERFACE PHONE_PING_INTERVAL PHONE_OFFLINE_THRESHOLD PHONE_ARP_COUNT PHONE_ARP_TIMEOUT MONITOR_METRICS_PORT OTP_RELAY_DATA_DIR USERS_EXCEL_PATH AUDIT_LOG_PATH CLAIM_EXPIRY_SEC OTP_DISPLAY_SEC CONCURRENT_RISK_SEC TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD INSTALL_GITHUB_RUNNER GITHUB_RUNNER_URL GITHUB_RUNNER_TOKEN GITHUB_RUNNER_DIR GITHUB_RUNNER_USER RUNNER_ONLY DOCKER_BIN REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS REDIS_NFS_PV_PREFIX REDIS_NFS_SERVER REDIS_NFS_BASE_PATH REDIS_NFS_MOUNT_OPTIONS DISTRIBUTE_IMAGES_TO_NODES IMAGE_DISTRIBUTION_PORT IMAGE_IMPORTER_IMAGE SMS_SECRET_TOKEN BRIDGE_NAME HOST_IFACE HOST_IP_CIDR GATEWAY DNS PREFIX IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END AUTO_ASSIGN_IPS WORKER1_IP WORKER2_IP VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB WORKER1_NAME WORKER2_NAME OBSERVABILITY_NAMESPACE OBSERVABILITY_INSTALL_STACK OBSERVABILITY_STACK_CHART_VERSION GRAFANA_HOST RELEASE_MODE SKIP_CLUSTER_DEPLOY SKIP_K3S_INSTALL SKIP_HELM_INSTALL SKIP_KUBECTL_APPLY SKIP_IMAGE_IMPORT SKIP_ROLLOUT_RESTART SKIP_LIVE_CLUSTER_VALIDATE SKIP_GITHUB_RUNNER_INSTALL SKIP_VM_PROVISIONING DEPLOY_OTP_RELAY VALIDATE_OTP_RELAY"
-
-  for name in $names; do
-    unset "$name"
-  done
-}
-
 _env_file_syntax_ok() {
   local source_file="$1"
 
   bash -n "$source_file" >/dev/null 2>&1
+}
+
+_env_is_default_placeholder() {
+  case "${1:-}" in
+    ""|"CHANGE_ME_TLS_HOST"|"otp-relay.local"|"CHANGE_ME_VM_PASSWORD") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_env_mode_requires_runtime_manifests() {
+  case "${DEPLOY_MODE:-full}" in
+    full|app|monitor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_env_mode_requires_app() {
+  case "${DEPLOY_MODE:-full}" in
+    full|app) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_env_mode_requires_monitor() {
+  case "${DEPLOY_MODE:-full}" in
+    full|monitor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_env_force_bundle_only_flags() {
+  RELEASE_MODE="bundle"
+
+  SKIP_CLUSTER_DEPLOY="1"
+  SKIP_K3S_INSTALL="1"
+  SKIP_HELM_INSTALL="1"
+  SKIP_KUBECTL_APPLY="1"
+  SKIP_IMAGE_IMPORT="1"
+  SKIP_ROLLOUT_RESTART="1"
+  SKIP_LIVE_CLUSTER_VALIDATE="1"
+  SKIP_GITHUB_RUNNER_INSTALL="1"
+  SKIP_VM_PROVISIONING="1"
+
+  DEPLOY_OTP_RELAY="0"
+  VALIDATE_OTP_RELAY="0"
+  INSTALL_GITHUB_RUNNER="0"
+  RUNNER_ONLY="0"
+  DISTRIBUTE_IMAGES_TO_NODES="0"
+
+  export RELEASE_MODE
+  export SKIP_CLUSTER_DEPLOY
+  export SKIP_K3S_INSTALL
+  export SKIP_HELM_INSTALL
+  export SKIP_KUBECTL_APPLY
+  export SKIP_IMAGE_IMPORT
+  export SKIP_ROLLOUT_RESTART
+  export SKIP_LIVE_CLUSTER_VALIDATE
+  export SKIP_GITHUB_RUNNER_INSTALL
+  export SKIP_VM_PROVISIONING
+  export DEPLOY_OTP_RELAY
+  export VALIDATE_OTP_RELAY
+  export INSTALL_GITHUB_RUNNER
+  export RUNNER_ONLY
+  export DISTRIBUTE_IMAGES_TO_NODES
 }
 
 _env_reject_file() {
@@ -137,20 +191,21 @@ _env_clear_recoverable_placeholders() {
   fi
 }
 
-_env_is_default_placeholder() {
-  case "${1:-}" in
-    ""|"CHANGE_ME_TLS_HOST"|"otp-relay.local"|"CHANGE_ME_VM_PASSWORD") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 _env_existing_file_is_recoverable_first_run() {
-  # Return 0 only for values that indicate an incomplete/cancelled first-run file.
-  # Normal older .env files with missing optional values are normalized instead of rejected.
+  # Only reject incomplete .env files when the selected artifact mode actually
+  # requires the missing values. Metadata-only mode must not be blocked by
+  # production runtime placeholders.
 
-  if [ -z "${PHONE_IP:-}" ]; then
-    warn "saved .env is missing PHONE_IP"
-    return 0
+  case "${DEPLOY_MODE:-full}" in
+    full|app|monitor|none) ;;
+    *)
+      warn "saved .env has unsupported DEPLOY_MODE=${DEPLOY_MODE:-}"
+      return 0
+      ;;
+  esac
+
+  if ! _env_mode_requires_runtime_manifests; then
+    return 1
   fi
 
   if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
@@ -172,46 +227,7 @@ _env_existing_file_is_recoverable_first_run() {
     return 0
   fi
 
-  if [ -z "${SMS_SECRET_TOKEN:-}" ]; then
-    warn "saved .env is missing SMS_SECRET_TOKEN"
-    return 0
-  fi
-
   return 1
-}
-
-_env_force_bundle_only_flags() {
-  RELEASE_MODE="bundle"
-  SKIP_CLUSTER_DEPLOY="1"
-  SKIP_K3S_INSTALL="1"
-  SKIP_HELM_INSTALL="1"
-  SKIP_KUBECTL_APPLY="1"
-  SKIP_IMAGE_IMPORT="1"
-  SKIP_ROLLOUT_RESTART="1"
-  SKIP_LIVE_CLUSTER_VALIDATE="1"
-  SKIP_GITHUB_RUNNER_INSTALL="1"
-  SKIP_VM_PROVISIONING="1"
-  DEPLOY_OTP_RELAY="0"
-  VALIDATE_OTP_RELAY="0"
-  INSTALL_GITHUB_RUNNER="0"
-  RUNNER_ONLY="0"
-  DISTRIBUTE_IMAGES_TO_NODES="0"
-
-  export RELEASE_MODE
-  export SKIP_CLUSTER_DEPLOY
-  export SKIP_K3S_INSTALL
-  export SKIP_HELM_INSTALL
-  export SKIP_KUBECTL_APPLY
-  export SKIP_IMAGE_IMPORT
-  export SKIP_ROLLOUT_RESTART
-  export SKIP_LIVE_CLUSTER_VALIDATE
-  export SKIP_GITHUB_RUNNER_INSTALL
-  export SKIP_VM_PROVISIONING
-  export DEPLOY_OTP_RELAY
-  export VALIDATE_OTP_RELAY
-  export INSTALL_GITHUB_RUNNER
-  export RUNNER_ONLY
-  export DISTRIBUTE_IMAGES_TO_NODES
 }
 
 _write_env_file() {
@@ -244,19 +260,16 @@ _write_env_file() {
 #
 # Keep secrets in this file only. Do not commit populated .env files.
 
-# Internal repository / build location.
 REPO_URL=$(_env_quote "${REPO_URL:-}")
-REPO_REF=$(_env_quote "${REPO_REF:-main}")
+REPO_REF=$(_env_quote "${REPO_REF:-k8s-ansible-DEVtoPROD}")
 INSTALL_DIR=$(_env_quote "${INSTALL_DIR:-${SCRIPT_DIR}}")
-NAMESPACE=$(_env_quote "${NAMESPACE:-otp-relay}")
 
-# Image archive / artifact selector behavior.
+NAMESPACE=$(_env_quote "${NAMESPACE:-otp-relay-devprod}")
 APP_IMAGE=$(_env_quote "${APP_IMAGE:-otp-relay:latest}")
 MONITOR_IMAGE=$(_env_quote "${MONITOR_IMAGE:-otp-monitor:latest}")
 DEPLOY_MODE=$(_env_quote "${DEPLOY_MODE:-full}")
 RELEASE_MODE=$(_env_quote "bundle")
 
-# Bundle-only safety flags. These must stay disabled.
 SKIP_CLUSTER_DEPLOY=$(_env_quote "1")
 SKIP_K3S_INSTALL=$(_env_quote "1")
 SKIP_HELM_INSTALL=$(_env_quote "1")
@@ -269,7 +282,6 @@ SKIP_VM_PROVISIONING=$(_env_quote "1")
 DEPLOY_OTP_RELAY=$(_env_quote "0")
 VALIDATE_OTP_RELAY=$(_env_quote "0")
 
-# Service / Ingress runtime values to render into bundled manifests.
 SERVICE_TYPE=$(_env_quote "${SERVICE_TYPE:-ClusterIP}")
 SERVICE_NODE_PORT=$(_env_quote "${SERVICE_NODE_PORT:-30080}")
 LOADBALANCER_IP=$(_env_quote "${LOADBALANCER_IP:-}")
@@ -280,7 +292,6 @@ TLS_SECRET_NAME=$(_env_quote "${TLS_SECRET_NAME:-otp-relay-tls}")
 TLS_SELF_SIGNED=$(_env_quote "${TLS_SELF_SIGNED:-1}")
 PORTAL_URL=$(_env_quote "${PORTAL_URL:-}")
 
-# Storage runtime values to render into bundled manifests.
 PVC_STORAGE_CLASS=$(_env_quote "${PVC_STORAGE_CLASS:-otp-relay-devprod-nfs}")
 PVC_SIZE=$(_env_quote "${PVC_SIZE:-1Gi}")
 NFS_ENABLED=$(_env_quote "${NFS_ENABLED:-1}")
@@ -290,7 +301,6 @@ NFS_STORAGE_CLASS=$(_env_quote "${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs}")
 NFS_PV_NAME=$(_env_quote "${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}")
 NFS_MOUNT_OPTIONS=$(_env_quote "${NFS_MOUNT_OPTIONS:-nfsvers=4.1}")
 
-# Replicas / placement values to render into bundled manifests.
 REPLICA_COUNT=$(_env_quote "${REPLICA_COUNT:-2}")
 APP_NODE_SELECTOR_KEY=$(_env_quote "${APP_NODE_SELECTOR_KEY:-otp-relay/app-node}")
 APP_NODE_SELECTOR_VALUE=$(_env_quote "${APP_NODE_SELECTOR_VALUE:-true}")
@@ -299,14 +309,12 @@ MONITOR_NODE_SELECTOR_VALUE=$(_env_quote "${MONITOR_NODE_SELECTOR_VALUE:-true}")
 REDIS_NODE_SELECTOR_KEY=$(_env_quote "${REDIS_NODE_SELECTOR_KEY:-otp-relay/redis-node}")
 REDIS_NODE_SELECTOR_VALUE=$(_env_quote "${REDIS_NODE_SELECTOR_VALUE:-true}")
 
-# MetalLB runtime intent, recorded/rendered only. The builder does not install MetalLB.
 REQUIRE_METALLB=$(_env_quote "${REQUIRE_METALLB:-0}")
 INSTALL_METALLB=$(_env_quote "${INSTALL_METALLB:-0}")
 METALLB_VERSION=$(_env_quote "${METALLB_VERSION:-v0.15.3}")
 METALLB_IP_RANGE=$(_env_quote "${METALLB_IP_RANGE:-}")
 METALLB_POOL_NAME=$(_env_quote "${METALLB_POOL_NAME:-otp-relay-pool}")
 
-# Runtime app / monitor inputs.
 PHONE_IP=$(_env_quote "${PHONE_IP:-}")
 PHONE_INTERFACE=$(_env_quote "${PHONE_INTERFACE:-}")
 PHONE_PING_INTERVAL=$(_env_quote "${PHONE_PING_INTERVAL:-10}")
@@ -314,6 +322,7 @@ PHONE_OFFLINE_THRESHOLD=$(_env_quote "${PHONE_OFFLINE_THRESHOLD:-30}")
 PHONE_ARP_COUNT=$(_env_quote "${PHONE_ARP_COUNT:-2}")
 PHONE_ARP_TIMEOUT=$(_env_quote "${PHONE_ARP_TIMEOUT:-2}")
 MONITOR_METRICS_PORT=$(_env_quote "${MONITOR_METRICS_PORT:-9101}")
+
 OTP_RELAY_DATA_DIR=$(_env_quote "${OTP_RELAY_DATA_DIR:-/app/data}")
 USERS_EXCEL_PATH=$(_env_quote "${USERS_EXCEL_PATH:-/app/data/users.xlsx}")
 AUDIT_LOG_PATH=$(_env_quote "${AUDIT_LOG_PATH:-/app/data/audit.log}")
@@ -321,12 +330,10 @@ CLAIM_EXPIRY_SEC=$(_env_quote "${CLAIM_EXPIRY_SEC:-90}")
 OTP_DISPLAY_SEC=$(_env_quote "${OTP_DISPLAY_SEC:-285}")
 CONCURRENT_RISK_SEC=$(_env_quote "${CONCURRENT_RISK_SEC:-30}")
 
-# Secrets rendered or handed off as production input. Do not commit populated .env files.
-SMS_SECRET_TOKEN=$(_env_quote "${SMS_SECRET_TOKEN:-$(make_secret)}")
+SMS_SECRET_TOKEN=$(_env_quote "${SMS_SECRET_TOKEN:-}")
 TELEGRAM_BOT_TOKEN=$(_env_quote "${TELEGRAM_BOT_TOKEN:-}")
 TELEGRAM_CHAT_ID=$(_env_quote "${TELEGRAM_CHAT_ID:-}")
 
-# Redis runtime values to render into bundled manifests.
 REDIS_ENABLED=$(_env_quote "${REDIS_ENABLED:-1}")
 REDIS_URL=$(_env_quote "${REDIS_URL:-redis://otp-redis-haproxy:6379/0}")
 REDIS_REQUIRED=$(_env_quote "${REDIS_REQUIRED:-1}")
@@ -338,26 +345,25 @@ REDIS_NFS_SERVER=$(_env_quote "${REDIS_NFS_SERVER:-${NFS_SERVER:-}}")
 REDIS_NFS_BASE_PATH=$(_env_quote "${REDIS_NFS_BASE_PATH:-${NFS_PATH:-}/redis}")
 REDIS_NFS_MOUNT_OPTIONS=$(_env_quote "${REDIS_NFS_MOUNT_OPTIONS:-${NFS_MOUNT_OPTIONS:-nfsvers=4.1}}")
 
-# Bundle-builder behavior.
 RUNTIME_DATA_DIR=$(_env_quote "${RUNTIME_DATA_DIR:-}")
 SKIP_HELP_DOCS_BUILD=$(_env_quote "${SKIP_HELP_DOCS_BUILD:-0}")
 GIT_CLEAN=$(_env_quote "${GIT_CLEAN:-1}")
 SKIP_REPO_SYNC=$(_env_quote "${SKIP_REPO_SYNC:-auto}")
 NONINTERACTIVE=$(_env_quote "${NONINTERACTIVE:-0}")
 DOCKER_BIN=$(_env_quote "${DOCKER_BIN:-}")
+DIST_DIR=$(_env_quote "${DIST_DIR:-dist}")
 
-# Old live-deployment knobs are forced disabled and kept only for compatibility.
 INSTALL_GITHUB_RUNNER=$(_env_quote "0")
 GITHUB_RUNNER_URL=$(_env_quote "")
 GITHUB_RUNNER_TOKEN=$(_env_quote "")
 GITHUB_RUNNER_DIR=$(_env_quote "")
 GITHUB_RUNNER_USER=$(_env_quote "")
 RUNNER_ONLY=$(_env_quote "0")
+
 DISTRIBUTE_IMAGES_TO_NODES=$(_env_quote "0")
 IMAGE_DISTRIBUTION_PORT=$(_env_quote "${IMAGE_DISTRIBUTION_PORT:-18080}")
 IMAGE_IMPORTER_IMAGE=$(_env_quote "${IMAGE_IMPORTER_IMAGE:-redis:7-alpine}")
 
-# Old worker VM provisioner inputs are intentionally disabled.
 BRIDGE_NAME=$(_env_quote "")
 HOST_IFACE=$(_env_quote "")
 HOST_IP_CIDR=$(_env_quote "")
@@ -378,7 +384,6 @@ VM_DISK_GB=$(_env_quote "")
 WORKER1_NAME=$(_env_quote "")
 WORKER2_NAME=$(_env_quote "")
 
-# Observability runtime intent, recorded/packaged only. The builder does not install Helm charts.
 OBSERVABILITY_NAMESPACE=$(_env_quote "${OBSERVABILITY_NAMESPACE:-observability-devprod}")
 OBSERVABILITY_INSTALL_STACK=$(_env_quote "${OBSERVABILITY_INSTALL_STACK:-1}")
 OBSERVABILITY_STACK_CHART_VERSION=$(_env_quote "${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}")
@@ -415,7 +420,7 @@ source_env_file() {
 
 create_env_interactive() {
   log "creating first-run bundle-builder environment file at $ENV_FILE"
-  log "interactive setup will ask only for release/runtime values required to render the bundle"
+  log "interactive setup asks only for release/runtime values required by the selected artifact mode"
 
   _env_set_default REPO_URL ""
   _env_set_default REPO_REF "k8s-ansible-DEVtoPROD"
@@ -438,9 +443,6 @@ create_env_interactive() {
   _env_set_default REDIS_URL "redis://otp-redis-haproxy:6379/0"
   _env_set_default REDIS_STORAGE_CLASS "otp-redis-devprod-nfs"
   _env_set_default REDIS_NFS_PV_PREFIX "otp-redis-devprod"
-  _env_set_default REDIS_NFS_SERVER "${NFS_SERVER:-}"
-  _env_set_default REDIS_NFS_BASE_PATH "${NFS_PATH:-}/redis"
-  _env_set_default REDIS_NFS_MOUNT_OPTIONS "${NFS_MOUNT_OPTIONS:-nfsvers=4.1}"
   _env_set_default REPLICA_COUNT "2"
 
   _env_set_default APP_NODE_SELECTOR_KEY "otp-relay/app-node"
@@ -452,61 +454,71 @@ create_env_interactive() {
 
   _env_set_default PHONE_PING_INTERVAL "10"
   _env_set_default PHONE_OFFLINE_THRESHOLD "30"
+
   _env_set_default OBSERVABILITY_NAMESPACE "observability-devprod"
   _env_set_default OBSERVABILITY_INSTALL_STACK "1"
   _env_set_default OBSERVABILITY_STACK_CHART_VERSION "85.0.1"
   _env_set_default GRAFANA_HOST "grafana-devprod.init-db.lan"
 
-  _env_prompt NAMESPACE "Kubernetes namespace to render into manifests" 1 0
   _env_prompt DEPLOY_MODE "Artifact selector: full, app, monitor, or none" 1 0
-  _env_prompt SERVICE_TYPE "Service type to render: ClusterIP, NodePort, or LoadBalancer" 1 0
-  _env_prompt INGRESS_ENABLED "Render ingress? 1=yes, 0=no" 1 0
-  _env_prompt TLS_ENABLED "Render TLS reference? 1=yes, 0=no" 1 0
+  normalize_loaded_env
 
-  if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
-    _env_prompt TLS_HOST "Ingress/TLS hostname" 1 0
+  if _env_mode_requires_runtime_manifests; then
+    _env_prompt NAMESPACE "Kubernetes namespace to render into manifests" 1 0
+    _env_prompt SERVICE_TYPE "Service type to render: ClusterIP, NodePort, or LoadBalancer" 1 0
+    _env_prompt INGRESS_ENABLED "Render ingress? 1=yes, 0=no" 1 0
+    _env_prompt TLS_ENABLED "Render TLS reference? 1=yes, 0=no" 1 0
+
+    if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
+      _env_prompt TLS_HOST "Ingress/TLS hostname" 1 0
+    fi
+
+    _env_prompt NFS_ENABLED "Render external NFS-backed PVCs? 1=yes, 0=no" 1 0
+    if [ "${NFS_ENABLED:-0}" = "1" ]; then
+      _env_prompt NFS_SERVER "External NFS server IP/DNS to render" 1 0
+      _env_prompt NFS_PATH "External NFS export path to render" 1 0
+      PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs}}"
+      REDIS_NFS_SERVER="${REDIS_NFS_SERVER:-$NFS_SERVER}"
+      REDIS_NFS_BASE_PATH="${REDIS_NFS_BASE_PATH:-$NFS_PATH/redis}"
+      export PVC_STORAGE_CLASS REDIS_NFS_SERVER REDIS_NFS_BASE_PATH
+    fi
+
+    _env_prompt INSTALL_METALLB "Record MetalLB as planned in bundle metadata? 1=yes, 0=no" 1 0
+    if [ "${INSTALL_METALLB:-0}" = "1" ]; then
+      _env_prompt METALLB_IP_RANGE "MetalLB IP range to record" 1 0
+    fi
+
+    _env_prompt REDIS_ENABLED "Render Redis manifests? 1=yes, 0=no" 1 0
+    if [ "${REDIS_ENABLED:-0}" = "1" ]; then
+      _env_prompt REDIS_URL "Redis URL to render" 1 0
+      _env_prompt REDIS_REQUIRED "Require Redis for readiness? 1=yes, 0=no" 1 0
+    fi
+
+    _env_prompt REPLICA_COUNT "App replica count to render" 1 0
   fi
 
-  _env_prompt NFS_ENABLED "Render external NFS-backed app PVC? 1=yes, 0=no" 1 0
-  if [ "${NFS_ENABLED:-0}" = "1" ]; then
-    _env_prompt NFS_SERVER "External NFS server IP/DNS to render" 1 0
-    _env_prompt NFS_PATH "External NFS export path to render" 1 0
-    PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs}}"
-    export PVC_STORAGE_CLASS
+  if _env_mode_requires_monitor; then
+    _env_prompt PHONE_IP "Monitored phone IP to render into ConfigMap" 0 0
+
+    if [ -z "${PHONE_INTERFACE:-}" ]; then
+      PHONE_INTERFACE="$(_env_default_interface)"
+      export PHONE_INTERFACE
+    fi
+
+    _env_prompt PHONE_INTERFACE "Monitor network interface value to render" 0 0
+    _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
+    _env_prompt PHONE_OFFLINE_THRESHOLD "Phone offline threshold seconds" 1 0
+    _env_prompt TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" 0 1
+    _env_prompt TELEGRAM_CHAT_ID "Telegram chat ID (optional)" 0 0
   fi
 
-  _env_prompt INSTALL_METALLB "Record MetalLB as planned in bundle metadata? 1=yes, 0=no" 1 0
-  if [ "${INSTALL_METALLB:-0}" = "1" ]; then
-    _env_prompt METALLB_IP_RANGE "MetalLB IP range to record" 1 0
+  if _env_mode_requires_app; then
+    if [ -z "${SMS_SECRET_TOKEN:-}" ]; then
+      SMS_SECRET_TOKEN="$(make_secret)"
+      export SMS_SECRET_TOKEN
+    fi
+    _env_prompt SMS_SECRET_TOKEN "SMS webhook secret token" 0 1
   fi
-
-  _env_prompt PHONE_IP "Monitored phone IP to render into ConfigMap" 1 0
-
-  if [ -z "${PHONE_INTERFACE:-}" ]; then
-    PHONE_INTERFACE="$(_env_default_interface)"
-    export PHONE_INTERFACE
-  fi
-
-  _env_prompt PHONE_INTERFACE "Monitor network interface value to render" 1 0
-  _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
-  _env_prompt PHONE_OFFLINE_THRESHOLD "Phone offline threshold seconds" 1 0
-
-  _env_prompt REDIS_ENABLED "Render Redis manifests? 1=yes, 0=no" 1 0
-  if [ "${REDIS_ENABLED:-0}" = "1" ]; then
-    _env_prompt REDIS_URL "Redis URL to render" 1 0
-    _env_prompt REDIS_REQUIRED "Require Redis for readiness? 1=yes, 0=no" 1 0
-  fi
-
-  _env_prompt REPLICA_COUNT "App replica count to render" 1 0
-  _env_prompt TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" 0 1
-  _env_prompt TELEGRAM_CHAT_ID "Telegram chat ID (optional)" 0 0
-
-  if [ -z "${SMS_SECRET_TOKEN:-}" ]; then
-    SMS_SECRET_TOKEN="$(make_secret)"
-    export SMS_SECRET_TOKEN
-  fi
-
-  _env_prompt SMS_SECRET_TOKEN "SMS webhook secret token" 1 1
 
   normalize_loaded_env
   _write_env_file "$ENV_FILE"
@@ -515,7 +527,6 @@ create_env_interactive() {
 
 create_env_noninteractive() {
   log "creating non-interactive bundle-builder environment file at $ENV_FILE from exported variables"
-  log "NONINTERACTIVE=1 is set and no .env file exists; missing required values will fail validation after defaults are written"
   normalize_loaded_env
   _write_env_file "$ENV_FILE"
   ENV_FILE_CREATED=1
@@ -556,15 +567,15 @@ EOF_MENU
         _env_prompt NFS_PATH "External NFS export path" 0 0
         ;;
       3)
-        _env_prompt PHONE_IP "Monitored phone IP" 1 0
-        _env_prompt PHONE_INTERFACE "Host network interface value" 1 0
+        _env_prompt PHONE_IP "Monitored phone IP" 0 0
+        _env_prompt PHONE_INTERFACE "Host network interface value" 0 0
         _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
         _env_prompt PHONE_OFFLINE_THRESHOLD "Offline threshold seconds" 1 0
         ;;
       4)
         _env_prompt TELEGRAM_BOT_TOKEN "Telegram bot token" 0 1
         _env_prompt TELEGRAM_CHAT_ID "Telegram chat ID" 0 0
-        _env_prompt SMS_SECRET_TOKEN "SMS webhook secret token" 1 1
+        _env_prompt SMS_SECRET_TOKEN "SMS webhook secret token" 0 1
         ;;
       5)
         _env_prompt REDIS_ENABLED "Render Redis? 1/0" 1 0
@@ -608,7 +619,6 @@ validate_env_required() {
 
   _env_force_bundle_only_flags
 
-  [ -n "${NAMESPACE:-}" ] || fatal "NAMESPACE is required in $ENV_FILE"
   [ -n "${INSTALL_DIR:-}" ] || fatal "INSTALL_DIR is required in $ENV_FILE"
 
   case "${DEPLOY_MODE:-full}" in
@@ -616,9 +626,18 @@ validate_env_required() {
     *) fatal "DEPLOY_MODE is an artifact selector only. Use one of: full, app, monitor, none." ;;
   esac
 
+  if ! _env_mode_requires_runtime_manifests; then
+    log "DEPLOY_MODE=${DEPLOY_MODE:-none}; metadata-only environment validation completed"
+    return 0
+  fi
+
+  [ -n "${NAMESPACE:-}" ] || fatal "NAMESPACE is required in $ENV_FILE"
   [ -n "${SERVICE_TYPE:-}" ] || fatal "SERVICE_TYPE is required in $ENV_FILE"
-  [ -n "${PHONE_IP:-}" ] || fatal "PHONE_IP is required in $ENV_FILE because the monitor is a core component"
-  [ -n "${PHONE_INTERFACE:-}" ] || fatal "PHONE_INTERFACE is required in $ENV_FILE because ARP monitoring requires an interface value"
+
+  case "${SERVICE_TYPE:-}" in
+    ClusterIP|NodePort|LoadBalancer) ;;
+    *) fatal "SERVICE_TYPE must be ClusterIP, NodePort, or LoadBalancer" ;;
+  esac
 
   if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
     [ -n "${TLS_HOST:-}" ] || fatal "TLS_HOST is required in $ENV_FILE when ingress or TLS is enabled"
@@ -637,7 +656,19 @@ validate_env_required() {
     [ -n "${METALLB_IP_RANGE:-}" ] || fatal "METALLB_IP_RANGE is required in $ENV_FILE when INSTALL_METALLB=1"
   fi
 
-  [ -n "${SMS_SECRET_TOKEN:-}" ] || fatal "SMS_SECRET_TOKEN is required in $ENV_FILE"
+  if _env_mode_requires_monitor; then
+    if [ -z "${PHONE_IP:-}" ]; then
+      warn "PHONE_IP is not set; monitor runtime target must be finalized by the approved production-side procedure"
+    fi
+
+    if [ -z "${PHONE_INTERFACE:-}" ]; then
+      warn "PHONE_INTERFACE is not set; monitor runtime interface must be finalized by the approved production-side procedure"
+    fi
+  fi
+
+  if _env_mode_requires_app && [ -z "${SMS_SECRET_TOKEN:-}" ]; then
+    warn "SMS_SECRET_TOKEN is not set; production secret must be created by the approved production-side procedure"
+  fi
 
   if [ "${REDIS_ENABLED:-0}" = "1" ]; then
     [ -n "${REDIS_URL:-}" ] || fatal "REDIS_URL is required in $ENV_FILE when REDIS_ENABLED=1"
@@ -657,6 +688,7 @@ _env_reapply_runtime_overrides() {
   local runtime_noninteractive="$1"
   local runtime_skip_repo_sync="$2"
   local runtime_git_clean="$3"
+  local runtime_dist_dir="${4:-}"
 
   if [ -n "$runtime_noninteractive" ]; then
     NONINTERACTIVE="$runtime_noninteractive"
@@ -671,6 +703,11 @@ _env_reapply_runtime_overrides() {
   if [ -n "$runtime_git_clean" ]; then
     GIT_CLEAN="$runtime_git_clean"
     export GIT_CLEAN
+  fi
+
+  if [ -n "$runtime_dist_dir" ]; then
+    DIST_DIR="$runtime_dist_dir"
+    export DIST_DIR
   fi
 }
 
@@ -693,12 +730,10 @@ _env_create_new_file_for_current_mode() {
 }
 
 load_or_create_env() {
-  ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
-  export ENV_FILE
-
   local runtime_noninteractive="${NONINTERACTIVE:-}"
   local runtime_skip_repo_sync="${SKIP_REPO_SYNC:-}"
   local runtime_git_clean="${GIT_CLEAN:-}"
+  local runtime_dist_dir="${DIST_DIR:-}"
   local runtime_deploy_mode="${DEPLOY_MODE:-}"
   local recovery_service_type="${SERVICE_TYPE:-}"
   local recovery_ingress_enabled="${INGRESS_ENABLED:-}"
@@ -717,6 +752,9 @@ load_or_create_env() {
   local recovery_redis_required="${REDIS_REQUIRED:-}"
   local loaded_existing_env=0
 
+  ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
+  export ENV_FILE
+
   if [ -f "$ENV_FILE" ]; then
     log "loading environment from $ENV_FILE"
 
@@ -725,7 +763,7 @@ load_or_create_env() {
       loaded_existing_env=1
     else
       _env_reject_file "$ENV_FILE" "file is not valid shell syntax or could not be sourced"
-      _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+      _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean" "$runtime_dist_dir"
       _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
       _env_restore_recovery_input SERVICE_TYPE "$recovery_service_type"
       _env_restore_recovery_input INGRESS_ENABLED "$recovery_ingress_enabled"
@@ -747,20 +785,20 @@ load_or_create_env() {
   fi
 
   if [ ! -f "$ENV_FILE" ]; then
-    _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+    _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean" "$runtime_dist_dir"
     _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
     _env_create_new_file_for_current_mode
   fi
 
   if [ "$loaded_existing_env" = "1" ]; then
-    _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+    _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean" "$runtime_dist_dir"
     _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
     normalize_loaded_env
 
     if _env_existing_file_is_recoverable_first_run; then
       _env_reject_file "$ENV_FILE" "file appears incomplete or still contains first-run placeholders"
       _env_clear_recoverable_placeholders
-      _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+      _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean" "$runtime_dist_dir"
       _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
       _env_restore_recovery_input SERVICE_TYPE "$recovery_service_type"
       _env_restore_recovery_input INGRESS_ENABLED "$recovery_ingress_enabled"
@@ -782,7 +820,7 @@ load_or_create_env() {
       if prompt_yes_no "Change saved bundle-builder environment values before continuing? [y/N]" "N"; then
         change_env_menu
         source_env_file "$ENV_FILE"
-        _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+        _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean" "$runtime_dist_dir"
         _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
         normalize_loaded_env
       fi
@@ -793,10 +831,13 @@ load_or_create_env() {
 
   source_env_file "$ENV_FILE"
   ENV_FILE_LOADED=1
-  _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean"
+
+  _env_reapply_runtime_overrides "$runtime_noninteractive" "$runtime_skip_repo_sync" "$runtime_git_clean" "$runtime_dist_dir"
   _env_restore_recovery_input DEPLOY_MODE "$runtime_deploy_mode"
+
   normalize_loaded_env
   validate_env_required
+
   log "environment source: $ENV_FILE"
 }
 
@@ -879,8 +920,6 @@ normalize_loaded_env() {
   PHONE_ARP_COUNT="${PHONE_ARP_COUNT:-2}"
   PHONE_ARP_TIMEOUT="${PHONE_ARP_TIMEOUT:-2}"
   MONITOR_METRICS_PORT="${MONITOR_METRICS_PORT:-9101}"
-  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
-  TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 
   OTP_RELAY_DATA_DIR="${OTP_RELAY_DATA_DIR:-/app/data}"
   USERS_EXCEL_PATH="${USERS_EXCEL_PATH:-/app/data/users.xlsx}"
@@ -889,12 +928,16 @@ normalize_loaded_env() {
   OTP_DISPLAY_SEC="${OTP_DISPLAY_SEC:-285}"
   CONCURRENT_RISK_SEC="${CONCURRENT_RISK_SEC:-30}"
 
+  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+  TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+
   RUNTIME_DATA_DIR="${RUNTIME_DATA_DIR:-}"
   SKIP_HELP_DOCS_BUILD="${SKIP_HELP_DOCS_BUILD:-0}"
   GIT_CLEAN="${GIT_CLEAN:-1}"
   SKIP_REPO_SYNC="${SKIP_REPO_SYNC:-auto}"
   NONINTERACTIVE="${NONINTERACTIVE:-0}"
   DOCKER_BIN="${DOCKER_BIN:-}"
+  DIST_DIR="${DIST_DIR:-dist}"
 
   REDIS_ENABLED="${REDIS_ENABLED:-1}"
   REDIS_URL="${REDIS_URL:-redis://otp-redis-haproxy:6379/0}"
@@ -909,7 +952,8 @@ normalize_loaded_env() {
 
   IMAGE_DISTRIBUTION_PORT="${IMAGE_DISTRIBUTION_PORT:-18080}"
   IMAGE_IMPORTER_IMAGE="${IMAGE_IMPORTER_IMAGE:-redis:7-alpine}"
-  SMS_SECRET_TOKEN="${SMS_SECRET_TOKEN:-$(make_secret)}"
+
+  SMS_SECRET_TOKEN="${SMS_SECRET_TOKEN:-}"
 
   BRIDGE_NAME=""
   HOST_IFACE=""
@@ -943,11 +987,13 @@ normalize_loaded_env() {
 
   export REPO_URL REPO_REF INSTALL_DIR NAMESPACE APP_IMAGE MONITOR_IMAGE DEPLOY_MODE RELEASE_MODE
   export SERVICE_TYPE SERVICE_NODE_PORT LOADBALANCER_IP INGRESS_ENABLED TLS_ENABLED TLS_HOST TLS_SECRET_NAME TLS_SELF_SIGNED
-  export PVC_STORAGE_CLASS PVC_SIZE NFS_ENABLED NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_PV_NAME NFS_MOUNT_OPTIONS REPLICA_COUNT APP_NODE_SELECTOR_KEY APP_NODE_SELECTOR_VALUE
-  export MONITOR_NODE_SELECTOR_KEY MONITOR_NODE_SELECTOR_VALUE REDIS_NODE_SELECTOR_KEY REDIS_NODE_SELECTOR_VALUE REQUIRE_METALLB INSTALL_METALLB METALLB_VERSION METALLB_MANIFEST_URL METALLB_IP_RANGE METALLB_POOL_NAME
-  export SERVER_HOSTNAME SERVER_IP PORTAL_URL PORTAL_URL_EXPLICIT ASSIGNED_LOADBALANCER_ADDRESS PORTAL_URL_CONFIG_REFRESHED PHONE_IP PHONE_INTERFACE PHONE_PING_INTERVAL PHONE_OFFLINE_THRESHOLD PHONE_ARP_COUNT PHONE_ARP_TIMEOUT MONITOR_METRICS_PORT
+  export PVC_STORAGE_CLASS PVC_SIZE NFS_ENABLED NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_PV_NAME NFS_MOUNT_OPTIONS
+  export REPLICA_COUNT APP_NODE_SELECTOR_KEY APP_NODE_SELECTOR_VALUE MONITOR_NODE_SELECTOR_KEY MONITOR_NODE_SELECTOR_VALUE REDIS_NODE_SELECTOR_KEY REDIS_NODE_SELECTOR_VALUE
+  export REQUIRE_METALLB INSTALL_METALLB METALLB_VERSION METALLB_MANIFEST_URL METALLB_IP_RANGE METALLB_POOL_NAME
+  export SERVER_HOSTNAME SERVER_IP PORTAL_URL PORTAL_URL_EXPLICIT ASSIGNED_LOADBALANCER_ADDRESS PORTAL_URL_CONFIG_REFRESHED
+  export PHONE_IP PHONE_INTERFACE PHONE_PING_INTERVAL PHONE_OFFLINE_THRESHOLD PHONE_ARP_COUNT PHONE_ARP_TIMEOUT MONITOR_METRICS_PORT
   export OTP_RELAY_DATA_DIR USERS_EXCEL_PATH AUDIT_LOG_PATH CLAIM_EXPIRY_SEC OTP_DISPLAY_SEC CONCURRENT_RISK_SEC
-  export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD GIT_CLEAN SKIP_REPO_SYNC NONINTERACTIVE DOCKER_BIN
+  export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID RUNTIME_DATA_DIR SKIP_HELP_DOCS_BUILD GIT_CLEAN SKIP_REPO_SYNC NONINTERACTIVE DOCKER_BIN DIST_DIR
   export REDIS_ENABLED REDIS_URL REDIS_REQUIRED REDIS_STORAGE_CLASS REDIS_SIZE REDIS_SPREAD_RECREATE_PVCS REDIS_NFS_PV_PREFIX REDIS_NFS_SERVER REDIS_NFS_BASE_PATH REDIS_NFS_MOUNT_OPTIONS
   export SMS_SECRET_TOKEN RESTART_APP_REQUIRED RESTART_MONITOR_REQUIRED
   export BRIDGE_NAME HOST_IFACE HOST_IP_CIDR GATEWAY DNS PREFIX IP_SCAN_PREFIX IP_SCAN_START IP_SCAN_END AUTO_ASSIGN_IPS WORKER1_IP WORKER2_IP VM_USER VM_PASSWORD VM_RAM_MB VM_VCPUS VM_DISK_GB WORKER1_NAME WORKER2_NAME
