@@ -58,6 +58,45 @@ _bundle_manifest_lint_or_fatal() {
   fi
 }
 
+_observability_file_requires_kubernetes_lint() {
+  local file="$1"
+
+  [ -f "$file" ] || return 1
+
+  # Helm values files are bundled inputs, not Kubernetes API objects. They are
+  # intentionally allowed to omit apiVersion/kind. Kubernetes-object YAMLs,
+  # such as ServiceMonitor, Ingress, and generated Grafana dashboard ConfigMaps,
+  # still receive strict apiVersion/kind validation.
+  case "$(basename "$file")" in
+    *-values.yaml|*-values.yml|values.yaml|values.yml)
+      return 1
+      ;;
+  esac
+
+  grep -Eq '^[[:space:]]*apiVersion:[[:space:]]*' "$file" || return 1
+  grep -Eq '^[[:space:]]*kind:[[:space:]]*' "$file" || return 1
+
+  return 0
+}
+
+_bundle_observability_file_lint_or_warn() {
+  local file="$1"
+  local label="${2:-$file}"
+
+  [ -f "$file" ] || fatal "cannot validate missing observability file: $file"
+  [ -s "$file" ] || fatal "observability file exists but is empty: $file"
+
+  if grep -n $'\r' "$file" >/dev/null 2>&1; then
+    fatal "observability file contains CRLF line endings: $label"
+  fi
+
+  if _observability_file_requires_kubernetes_lint "$file"; then
+    _bundle_manifest_lint_or_fatal "$file" "$label"
+  else
+    log "bundle-only accepting observability values/input file without Kubernetes apiVersion/kind: $label"
+  fi
+}
+
 _forbidden_live_cluster_guard() {
   local action="$1"
 
@@ -386,9 +425,9 @@ validate_rendered_manifest_files() {
   fi
 
   if [ -d "${OBSERVABILITY_DIR:-}" ]; then
-    find "$OBSERVABILITY_DIR" -maxdepth 1 -type f -name '*.yaml' -print0 |
+    find "$OBSERVABILITY_DIR" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 |
       while IFS= read -r -d '' observability_manifest; do
-        _bundle_manifest_lint_or_fatal "$observability_manifest" "observability/$(basename "$observability_manifest")"
+        _bundle_observability_file_lint_or_warn "$observability_manifest" "observability/$(basename "$observability_manifest")"
       done
   fi
 
