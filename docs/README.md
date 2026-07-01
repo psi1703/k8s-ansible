@@ -1,129 +1,145 @@
-# OTP Relay Kubernetes Documentation
+# Documentation Index
 
-This directory is the documentation home for OTP Relay Kubernetes.
+This documentation set belongs to the `k8s-ansible-DEVtoPROD` bundle-only branch.
 
-Kubernetes manifests, Dockerfiles, installer scripts, automation, and observability manifests stay in their functional repo locations such as `k8s/`, `scripts/`, `.github/`, and `automation/`.
+This branch does not deploy OTP Relay.
 
-Explanations, architecture notes, deployment guides, runbooks, validation notes, and portal help source stay under `docs/`.
+It builds a sealed production release bundle on the dev/build host. The production server receives only the finished bundle, checksum, and report.
 
----
+## Bundle-only documentation rule
 
-## Current documentation status
+Documentation in this branch must describe the dev/build path as bundle-only.
 
-Phase 3 resilience validation completed on **2026-06-03** with no detected blockers.
+The dev/build side may:
 
-Validated:
+- validate local source files
+- build frontend assets
+- build and export local Docker image archives
+- render Kubernetes manifests into staging
+- package observability files
+- write release metadata
+- create checksums
+- create a sealed release tarball
+- create a release report
 
-* two app replicas
-* real SMS/OTP portal confirmation
-* Redis/Sentinel/HAProxy health and Redis master pod deletion recovery
-* app, monitor, HAProxy, Sentinel, and Grafana pod restart recovery
-* worker drain and uncordon recovery for `otp-worker1` and `otp-worker2`
-* NFS/RWX app storage proof across app pods
-* Prometheus/Grafana/Loki/Alloy observability recovery
+The dev/build side must not:
 
-Remaining production-alignment items are tracked in the architecture and operations docs.
+- install K3s
+- install Helm
+- run Helm install or upgrade
+- run `kubectl apply`
+- run `kubectl rollout`
+- import images into a live cluster
+- restart deployments
+- provision VMs
+- install GitHub Actions runners
+- label live Kubernetes nodes
+- inspect live Kubernetes resources
+- validate a live production cluster
+- deploy directly to production
 
----
+Production-side installation, image loading, Helm execution, Kubernetes manifest application, rollout validation, secret handling, and operational checks are outside this repository path.
 
-## Active documents
+## Start here
 
-| Area          | Document                                                                                               | Purpose                                                                                                                                       |
-| ------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Architecture  | [Current Architecture and SCH Gap Analysis](architecture/current-architecture-and-sch-gap-analysis.md) | Current topology, SCH target architecture, production gaps, and safe design rules.                                                            |
-| Deployment    | [Deployment and Storage Guide](deployment/deployment-and-storage-guide.md)                             | GitHub Actions deployment path, installer behavior, `.env` model, NFS/RWX storage, Redis deployment safety, and post-deployment verification. |
-| Operations    | [Operations and Validation Runbook](operations/operations-and-validation-runbook.md)                   | Daily health checks, Redis/NFS/TLS/monitor validation, OTP checks, worker-drain validation, and SCH sign-off gates.                           |
-| Observability | [Observability and Grafana Guide](operations/observability-and-grafana.md)                             | Prometheus, Grafana, Loki/Alloy, ServiceMonitor resources, dashboard source/generated workflow, PromQL guidance, and Grafana troubleshooting. |
-| Development   | [Build and Development Guide](development/build-and-development-guide.md)                              | App/monitor image build model, package layout, dependency-change behavior, frontend/help/Grafana generation, and generated artifact rules.    |
-| User help     | [Help Documentation Source](help/)                                                                     | Markdown and screenshots used by `scripts/build_help_docs.py` to generate portal help pages and wizard guide content.                         |
+| Topic | File | Purpose |
+|---|---|---|
+| Repository overview | `../README.md` | Main bundle-only project overview and entrypoints |
+| Deployment/storage handoff | `deployment/deployment-and-storage-guide.md` | Storage, ingress, Redis, and handoff values rendered into the bundle |
+| Build/development | `development/build-and-development-guide.md` | Local build rules, source validation, image archive export, and bundle creation |
+| Operations boundary | `operations/operations-and-validation-runbook.md` | Explains what the build side does and what production-side validation must handle |
+| Observability packaging | `operations/observability-and-grafana.md` | Observability metadata and file packaging without Helm or live validation |
 
----
+## Current source of truth
 
-## Recommended reading order
+For this branch, the source of truth is:
 
-For SCH review or a new maintainer, read in this order:
-
-1. [Current Architecture and SCH Gap Analysis](architecture/current-architecture-and-sch-gap-analysis.md)
-2. [Deployment and Storage Guide](deployment/deployment-and-storage-guide.md)
-3. [Operations and Validation Runbook](operations/operations-and-validation-runbook.md)
-4. [Observability and Grafana Guide](operations/observability-and-grafana.md)
-5. [Build and Development Guide](development/build-and-development-guide.md)
-
-Portal user-facing help source is maintained separately under:
-
-```text id="l9xfgh"
-docs/help/
+```text
+build-release-bundle.sh
+setup.sh
+scripts/lib/
+.env.example
+.github/workflows/sync.yml
 ```
 
----
+The build path creates release artifacts only.
 
-## Source-of-truth map
+Legacy Ansible and libvirt automation is intentionally disabled.
 
-| Area                  | Source                                             | Generated output                                               | Build/generation command                               |
-| --------------------- | -------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------ |
-| Runtime configuration | `.env`                                             | rendered manifests, runtime configuration, and Ansible handoff | installer                                              |
-| Portal frontend       | `frontend/app.jsx`                                 | `frontend/app.js`                                              | installer / frontend build                             |
-| Help docs             | `docs/help/*.md`, `docs/help/assets/*`             | `frontend/help/*`                                              | `python3 scripts/build_help_docs.py`                   |
-| Grafana dashboard     | `k8s/observability/dashboards/otp-relay-live.json` | `k8s/observability/grafana-dashboard-otp-relay-live.yaml`      | `python3 scripts/build_grafana_dashboard_configmap.py` |
+## Correct build command
 
-Do not edit generated files as source. Update the source file, run the matching build or generation command, then commit both source and generated output when required by the repository model.
+From the repository root:
 
----
-
-## Documentation ownership rules
-
-| Topic                                                                                | Owner document                                                   |
-| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| Architecture and SCH gaps                                                            | `docs/architecture/current-architecture-and-sch-gap-analysis.md` |
-| Fresh install, update behavior, `.env`, NFS, Redis deployment safety                 | `docs/deployment/deployment-and-storage-guide.md`                |
-| Daily checks, validation commands, OTP testing, worker drain, troubleshooting triage | `docs/operations/operations-and-validation-runbook.md`           |
-| Grafana, Prometheus, Loki, Alloy, ServiceMonitor, dashboard generation, PromQL       | `docs/operations/observability-and-grafana.md`                   |
-| Python package layout, Docker images, frontend/help/Grafana build model              | `docs/development/build-and-development-guide.md`                |
-| Portal user-facing guide content                                                     | `docs/help/`                                                     |
-
-Avoid duplicating detailed procedures across documents. Cross-link to the owner document instead.
-
----
-
-## Documentation rules
-
-* Keep active docs compact and current.
-* Avoid duplicate Phase 1/2/3 explanations across multiple files.
-* Do not restore `docs/k8s-plan.md`, `docs/dev/`, `docs/diagrams/`, or `k8s/docs/`.
-* Keep architecture diagrams under `docs/architecture/diagrams/`.
-* Keep portal user-help source under `docs/help/`.
-* Keep observability explanations under `docs/operations/`.
-* Do not use archived or old planning notes as deployment source of truth.
-* Do not document WhatsApp as the active alerting path unless the feature is intentionally restored.
-* Treat the 2026-06-03 multi-replica OTP and worker-drain validation as complete for the current code/configuration baseline.
-* Re-run validation after future changes to OTP flow, Redis state handling, frontend polling, Kubernetes placement, or deployment workflow behavior.
-
----
-
-## Files not to commit
-
-Do not commit runtime or secret-bearing files:
-
-```text id="e2bkgb"
-.env
-secret.env
-users.xlsx
-admin_auth.json
-admin_config.json
-wizard_progress.json
-audit.log
-*.tar
-*.log
-runtime tokens
-Telegram credentials
-SMS secrets
-local kubeconfig files
+```bash
+bash setup.sh
 ```
 
-Generated files may be committed only when the repository expects generated artifacts to be versioned, and only after regenerating them from source:
+or:
 
-```text id="pe9lpy"
-frontend/app.js
-frontend/help/
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
+```bash
+bash build-release-bundle.sh
 ```
+
+Examples:
+
+```bash
+bash setup.sh --mode full
+bash setup.sh --mode app
+bash setup.sh --mode monitor
+bash setup.sh --mode none
+```
+
+## Artifact selector
+
+The historical variable `DEPLOY_MODE` is now an artifact selector only.
+
+| Mode | Meaning |
+|---|---|
+| `full` | App image, monitor image, rendered manifests, observability files, metadata |
+| `app` | App image and rendered runtime manifests |
+| `monitor` | Monitor image and rendered runtime manifests |
+| `none` | Metadata-only bundle validation |
+
+No mode deploys.
+
+## Expected output
+
+The default output directory is:
+
+```text
+dist/
+```
+
+Expected files:
+
+```text
+dist/*.tar.gz
+dist/*.tar.gz.sha256
+dist/*.tar.gz.report.txt
+```
+
+The production handoff product is the sealed bundle plus checksum and report.
+
+## Help documentation
+
+The files under `docs/help/` are application help content used by the OTP Relay portal.
+
+They are not deployment instructions.
+
+They may be processed by the local help-doc build step when app artifacts are selected.
+
+## Architecture notes
+
+Architecture documents should describe the target runtime design and the bundle-only handoff boundary.
+
+They must not instruct the dev/build path to install, deploy, apply, import, or validate against production.
+
+## Legacy notes
+
+Archived or historical deployment notes must not be used as current operational instructions for this branch.
+
+Any stale documentation that says this branch deploys directly should be replaced or marked obsolete.
+
+## Safety rule
+
+If documentation in this branch tells the dev/build path to install K3s, run Helm, run `kubectl apply`, import images into a live cluster, provision VMs, install runners, restart deployments, or validate production, the documentation is wrong and must be corrected.
