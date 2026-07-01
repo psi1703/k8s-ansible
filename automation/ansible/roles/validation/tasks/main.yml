@@ -1,139 +1,24 @@
 ---
-- name: Define validation namespace
-  ansible.builtin.set_fact:
-    validation_namespace: "{{ otp_namespace | default('otp-relay') }}"
+# Disabled legacy Ansible role tasks.
+#
+# Historical behavior:
+#   This role validated a live Kubernetes deployment by inspecting pods,
+#   services, ingress, storage, Redis, Grafana, rollout state, and runtime
+#   application health.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No live production validation is allowed from this repository path.
+#   - No Kubernetes pod, service, ingress, PVC, Redis, Grafana, or rollout
+#     inspection is allowed from this repository path.
+#   - No live cluster dependency is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
 
-- name: Show cluster nodes
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes -o wide
-  register: validation_nodes
-  changed_when: false
-
-- name: Print cluster nodes
-  ansible.builtin.debug:
-    var: validation_nodes.stdout_lines
-
-- name: Show OTP Relay pods
-  ansible.builtin.command:
-    cmd: "k3s kubectl get pods -n {{ validation_namespace }} -o wide"
-  register: validation_pods
-  changed_when: false
-
-- name: Print OTP Relay pods
-  ansible.builtin.debug:
-    var: validation_pods.stdout_lines
-
-- name: Show OTP Relay services and ingress
-  ansible.builtin.command:
-    cmd: "k3s kubectl get svc,ingress -n {{ validation_namespace }}"
-  register: validation_svc_ingress
-  changed_when: false
-  failed_when: false
-
-- name: Print OTP Relay services and ingress
-  ansible.builtin.debug:
-    var: validation_svc_ingress.stdout_lines
-
-- name: Wait for OTP Relay app deployment rollout
-  ansible.builtin.command:
-    cmd: "k3s kubectl rollout status deployment/otp-relay -n {{ validation_namespace }} --timeout=240s"
-  changed_when: false
-
-- name: Wait for OTP monitor deployment rollout
-  ansible.builtin.command:
-    cmd: "k3s kubectl rollout status deployment/otp-monitor -n {{ validation_namespace }} --timeout=180s"
-  changed_when: false
-  failed_when: false
-
-- name: Check app readiness endpoint from inside app pod
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
-  register: validation_readyz
-  changed_when: false
-
-- name: Print readiness endpoint result
-  ansible.builtin.debug:
-    var: validation_readyz.stdout_lines
-
-- name: Verify generated frontend bundle exists in running pod
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- test -s /app/frontend/app.js
-  changed_when: false
-
-- name: Verify frontend source app.jsx is not present in running pod
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- sh -c 'test ! -e /app/frontend/app.jsx'
-  changed_when: false
-
-- name: Verify root-level stale app.js is not present in running pod
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- sh -c 'test ! -e /app/app.js'
-  changed_when: false
-
-- name: Verify frontend index references app.js
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- sh -c 'grep -q "script src=\"app.js\"" /app/frontend/index.html'
-  changed_when: false
-
-- name: Verify frontend bundle does not contain RTA wizard contamination
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- sh -c "! grep -E 'RTA Wizard|RTA Account Creation|Submit the RTA Access Form|Amer Darwich|Jathin' /app/frontend/app.js"
-  changed_when: false
-
-- name: Verify frontend app bundle is not empty
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- sh -c 'wc -c /app/frontend/app.js'
-  register: validation_app_js_size
-  changed_when: false
-
-- name: Print frontend app bundle size
-  ansible.builtin.debug:
-    var: validation_app_js_size.stdout
-
-- name: Check portal root from inside app pod
-  ansible.builtin.command:
-    cmd: >
-      k3s kubectl -n {{ validation_namespace }} exec deploy/otp-relay
-      -- python3 -c "import urllib.request; data=urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read().decode(); print(data[:500])"
-  register: validation_portal_root
-  changed_when: false
-
-- name: Print portal root sample
-  ansible.builtin.debug:
-    var: validation_portal_root.stdout_lines
-
-- name: Fail if portal root does not look like OTP portal index
-  ansible.builtin.assert:
-    that:
-      - "'OTP Portal' in validation_portal_root.stdout"
-      - "'app.js' in validation_portal_root.stdout"
-    fail_msg: "Portal root did not return expected OTP Portal index HTML."
-
-- name: Show observability resources if present
-  ansible.builtin.command:
-    cmd: k3s kubectl get all,ingress,ingressroute,servicemonitor -A
-  register: validation_observability
-  changed_when: false
-  failed_when: false
-
-- name: Print observability-related resources
-  ansible.builtin.debug:
-    msg: "{{ validation_observability.stdout_lines | select('search', 'grafana|prometheus|loki|alloy|monitoring|observability') | list }}"
-
-- name: Validation completed
-  ansible.builtin.debug:
-    msg: "OTP Relay validation completed on namespace {{ validation_namespace }}."
+- name: Refuse legacy production validation
+  ansible.builtin.fail:
+    msg: >-
+      Legacy live production validation is disabled in the bundle-only
+      DEVtoPROD architecture. Use bash setup.sh or bash build-release-bundle.sh
+      to create a sealed production release bundle. Production-side validation
+      must be performed only by the approved production procedure.
