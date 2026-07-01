@@ -1,4 +1,4 @@
-name: Sync k8s-ansible DEVtoPROD repo to server
+name: Sync k8s-ansible DEVtoPROD repo to dev server
 
 run-name: "sync DEVtoPROD @ ${{ github.ref_name }}"
 
@@ -12,16 +12,16 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: sync-k8s-ansible-devtoprod-to-server-${{ github.ref }}
+  group: sync-k8s-ansible-devtoprod-to-dev-server-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  DEPLOY_BRANCH: k8s-ansible-DEVtoPROD
-  DEPLOY_REPO_DIR: /opt/k8s-ansible-DEVtoPROD
+  SYNC_BRANCH: k8s-ansible-DEVtoPROD
+  SYNC_REPO_DIR: /opt/k8s-ansible-DEVtoPROD
 
 jobs:
   sync:
-    name: Sync DEVtoPROD repository only
+    name: Sync DEVtoPROD repository to dev/build server only
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
 
@@ -34,23 +34,23 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Expected branch: ${DEPLOY_BRANCH}"
+          echo "Expected branch: ${SYNC_BRANCH}"
           echo "Current branch:  ${GITHUB_REF_NAME}"
           echo "Git ref:         ${GITHUB_REF}"
-          echo "Target dir:      ${DEPLOY_REPO_DIR}"
+          echo "Target dir:      ${SYNC_REPO_DIR}"
 
-          if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
+          if [ "${GITHUB_REF_NAME}" != "${SYNC_BRANCH}" ]; then
             echo "[ERROR] Refusing to sync from branch '${GITHUB_REF_NAME}'."
-            echo "[ERROR] This workflow is only allowed from '${DEPLOY_BRANCH}'."
+            echo "[ERROR] This workflow is only allowed from '${SYNC_BRANCH}'."
             exit 1
           fi
 
-          case "${DEPLOY_REPO_DIR}" in
+          case "${SYNC_REPO_DIR}" in
             *DEVtoPROD*)
               echo "Target directory safety check passed."
               ;;
             *)
-              echo "[ERROR] DEPLOY_REPO_DIR does not look like a DEVtoPROD path: ${DEPLOY_REPO_DIR}"
+              echo "[ERROR] SYNC_REPO_DIR does not look like a DEVtoPROD path: ${SYNC_REPO_DIR}"
               exit 1
               ;;
           esac
@@ -58,12 +58,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          ref: ${{ env.DEPLOY_BRANCH }}
+          ref: ${{ env.SYNC_BRANCH }}
           fetch-depth: 1
           clean: true
           persist-credentials: false
 
-      - name: Sync checkout to DEVtoPROD server repo
+      - name: Sync checkout to dev/build server repo
         run: |
           set -Eeuo pipefail
 
@@ -71,11 +71,11 @@ jobs:
           echo "Runner OS: ${RUNNER_OS:-unknown}"
           echo "Runner arch: ${RUNNER_ARCH:-unknown}"
           echo "Workspace: ${GITHUB_WORKSPACE}"
-          echo "Target: ${DEPLOY_REPO_DIR}"
+          echo "Target: ${SYNC_REPO_DIR}"
           echo "Branch: ${GITHUB_REF_NAME}"
           echo "Commit: ${GITHUB_SHA}"
 
-          if [ "${GITHUB_REF_NAME}" != "${DEPLOY_BRANCH}" ]; then
+          if [ "${GITHUB_REF_NAME}" != "${SYNC_BRANCH}" ]; then
             echo "[ERROR] Branch changed unexpectedly. Refusing sync."
             exit 1
           fi
@@ -86,8 +86,8 @@ jobs:
             sudo apt-get install -y rsync
           fi
 
-          sudo mkdir -p "${DEPLOY_REPO_DIR}"
-          sudo chown -R "$(id -un):$(id -gn)" "${DEPLOY_REPO_DIR}"
+          sudo mkdir -p "${SYNC_REPO_DIR}"
+          sudo chown -R "$(id -un):$(id -gn)" "${SYNC_REPO_DIR}"
 
           rsync -a --delete \
             --exclude '.git/' \
@@ -102,6 +102,7 @@ jobs:
             --exclude 'venv/' \
             --exclude '.venv/' \
             --exclude 'release/' \
+            --exclude 'dist/' \
             --exclude 'automation/ansible/inventory.generated.ini' \
             --exclude 'automation/libvirt/build/' \
             --exclude '*.log' \
@@ -115,11 +116,11 @@ jobs:
             --exclude 'wizard_progress.json' \
             --exclude 'audit.log' \
             "${GITHUB_WORKSPACE}/" \
-            "${DEPLOY_REPO_DIR}/"
+            "${SYNC_REPO_DIR}/"
 
           echo
           echo "Synced repo status:"
-          cd "${DEPLOY_REPO_DIR}"
+          cd "${SYNC_REPO_DIR}"
 
           if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             git status --short || true
@@ -131,19 +132,19 @@ jobs:
           fi
 
           echo
-          echo "Preserved server-local files:"
-          [ -f "${DEPLOY_REPO_DIR}/.env" ] && echo "- .env exists" || echo "- .env not present yet"
-          [ -f "${DEPLOY_REPO_DIR}/automation/ansible/inventory.generated.ini" ] && echo "- inventory.generated.ini exists" || echo "- inventory.generated.ini not present yet"
-          [ -d "${DEPLOY_REPO_DIR}/automation/libvirt/build" ] && echo "- automation/libvirt/build exists" || echo "- automation/libvirt/build not present yet"
+          echo "Preserved dev-server-local files:"
+          [ -f "${SYNC_REPO_DIR}/.env" ] && echo "- .env exists" || echo "- .env not present yet"
+          [ -f "${SYNC_REPO_DIR}/automation/ansible/inventory.generated.ini" ] && echo "- inventory.generated.ini exists" || echo "- inventory.generated.ini not present yet"
+          [ -d "${SYNC_REPO_DIR}/automation/libvirt/build" ] && echo "- automation/libvirt/build exists" || echo "- automation/libvirt/build not present yet"
+          [ -d "${SYNC_REPO_DIR}/release" ] && echo "- release directory exists" || echo "- release directory not present yet"
+          [ -d "${SYNC_REPO_DIR}/dist" ] && echo "- dist directory exists" || echo "- dist directory not present yet"
 
           echo
-          echo "DEVtoPROD safety values from server-local .env, if present:"
-          grep -nE '^(REPO_REF|INSTALL_DIR|NAMESPACE|PVC_STORAGE_CLASS|NFS_STORAGE_CLASS|NFS_PV_NAME|REDIS_STORAGE_CLASS|REDIS_NFS_|OBSERVABILITY_NAMESPACE|GRAFANA_HOST)=' "${DEPLOY_REPO_DIR}/.env" 2>/dev/null || true
+          echo "DEVtoPROD safety values from dev-server-local .env, if present:"
+          grep -nE '^(REPO_REF|INSTALL_DIR|NAMESPACE|PVC_STORAGE_CLASS|NFS_STORAGE_CLASS|NFS_PV_NAME|REDIS_STORAGE_CLASS|REDIS_NFS_|OBSERVABILITY_NAMESPACE|GRAFANA_HOST)=' "${SYNC_REPO_DIR}/.env" 2>/dev/null || true
 
           echo
           echo "Sync complete."
-          echo "Deployment was not run by this workflow."
-          echo
-          echo "To deploy manually, run:"
-          echo "cd ${DEPLOY_REPO_DIR}"
-          echo "./setup.sh"
+          echo "No deployment was run by this workflow."
+          echo "No Kubernetes, Helm, Ansible deployment, libvirt provisioning, or production mutation was run."
+          echo "This workflow only refreshed the DEVtoPROD source tree on the dev/build server."
