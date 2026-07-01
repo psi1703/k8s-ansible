@@ -54,6 +54,22 @@ _release_sanitize_name() {
   printf '%s' "$value"
 }
 
+_release_abs_path() {
+  local input_path="$1"
+  local base_dir="${2:-$SCRIPT_DIR}"
+
+  [ -n "$input_path" ] || return 1
+
+  case "$input_path" in
+    /*)
+      printf '%s' "$input_path"
+      ;;
+    *)
+      printf '%s/%s' "$base_dir" "$input_path"
+      ;;
+  esac
+}
+
 _release_require_file() {
   local file="$1"
   local label="${2:-$1}"
@@ -69,46 +85,34 @@ _release_require_dir() {
   [ -d "$dir" ] || fatal "required release directory missing: $label ($dir)"
 }
 
-_release_abs_path() {
-  local input_path="$1"
-  local base_dir="${2:-$SCRIPT_DIR}"
-
-  if [ -z "$input_path" ]; then
-    return 1
-  fi
-
-  case "$input_path" in
-    /*)
-      printf '%s' "$input_path"
-      ;;
-    *)
-      printf '%s/%s' "$base_dir" "$input_path"
-      ;;
-  esac
-}
-
 _release_forbid_live_tooling_in_path() {
   local scan_dir="$1"
   local found=""
 
   [ -d "$scan_dir" ] || return 0
 
-  # Scan executable-like payloads only.
-  # Do not scan .md/.txt handoff documents; those intentionally explain which
-  # live operations are outside the build path.
+  # Only scan executable script payloads.
+  #
+  # Do not scan Kubernetes manifests, Helm values, Markdown, TXT metadata, or
+  # handoff docs here. Those files may legitimately mention kubectl, Helm, K3s,
+  # or production import procedures without executing anything.
+  #
+  # The bundle-only policy is enforced by:
+  #   - disabled live-deploy library functions
+  #   - disabled legacy Ansible roles/playbooks
+  #   - no kubectl/helm/k3s execution in the build path
+  #   - script-only scan below for accidental executable deploy payloads
   found="$(
     grep -RInE \
-      '(^|[^A-Za-z0-9_-])(k3s[[:space:]]+kubectl|kubectl[[:space:]]+apply|kubectl[[:space:]]+rollout|helm[[:space:]]+(install|upgrade|repo|dependency)|k3s[[:space:]]+ctr[[:space:]]+images[[:space:]]+import|ansible-playbook|virsh|virt-install|get\.k3s\.io)([^A-Za-z0-9_-]|$)' \
+      '(^|[^A-Za-z0-9_-])(curl[[:space:]].*get\.k3s\.io|k3s[[:space:]]+kubectl|kubectl[[:space:]]+apply|kubectl[[:space:]]+rollout|helm[[:space:]]+(install|upgrade|repo|dependency)|k3s[[:space:]]+ctr[[:space:]]+images[[:space:]]+import|ansible-playbook|virsh|virt-install)([^A-Za-z0-9_-]|$)' \
       "$scan_dir" \
       --include='*.sh' \
       --include='*.bash' \
-      --include='*.yaml' \
-      --include='*.yml' \
       2>/dev/null || true
   )"
 
   if [ -n "$found" ]; then
-    warn "release bundle staging contains live-deploy command references in executable or YAML payloads:"
+    warn "release bundle staging contains live-deploy command references in executable payloads:"
     printf '%s\n' "$found" >&2
     fatal "release bundle must not package live-deploy executable paths"
   fi
@@ -254,14 +258,19 @@ This build path did not:
 - observability YAML/value files under \`observability/\`, when present
 - image archives under \`images/\`, when requested by the artifact selector
 - release metadata under \`metadata/\`
+- proposed bundle environment under \`metadata/.env.bundle\`
 - checksum files for handoff verification
 
 ## Production-side responsibility
 
 Production-side installation, image loading, Helm execution, kubectl apply,
-rollout validation, secret handling, and operational checks are intentionally
-outside this build path and must be performed only by the approved production
-procedure.
+rollout validation, secret handling, environment merge, and operational checks
+are intentionally outside this build path and must be performed only by the
+approved production procedure.
+
+The production import/merge procedure should treat the existing production
+\`.env\` as the source of truth, compare it with \`metadata/.env.bundle\`, keep
+existing production values by default, and prompt before critical changes.
 EOF_README
 
   chmod 0644 "$readme_file" 2>/dev/null || true
@@ -291,6 +300,102 @@ EOF_SECRET
   chmod 0600 "$secret_note" 2>/dev/null || true
 }
 
+_release_write_required_env_index() {
+  local bundle_root="$1"
+  local required_env_file="$bundle_root/metadata/required-env.txt"
+
+  cat > "$required_env_file" <<'EOF_REQUIRED_ENV'
+# Required/proposed environment keys for production import/merge.
+#
+# Existing production .env is the source of truth.
+# Bundle values are proposed release values.
+# Production import/merge should:
+#   - keep existing production values by default
+#   - add missing keys
+#   - prompt before critical changes
+#   - never overwrite secrets silently
+
+NAMESPACE
+SERVICE_TYPE
+SERVICE_NODE_PORT
+LOADBALANCER_IP
+INGRESS_ENABLED
+TLS_ENABLED
+TLS_HOST
+TLS_SECRET_NAME
+NFS_ENABLED
+NFS_SERVER
+NFS_PATH
+NFS_STORAGE_CLASS
+NFS_PV_NAME
+NFS_MOUNT_OPTIONS
+PVC_STORAGE_CLASS
+PVC_SIZE
+APP_IMAGE
+MONITOR_IMAGE
+REPLICA_COUNT
+REDIS_ENABLED
+REDIS_URL
+REDIS_REQUIRED
+REDIS_STORAGE_CLASS
+REDIS_SIZE
+REDIS_NFS_PV_PREFIX
+REDIS_NFS_SERVER
+REDIS_NFS_BASE_PATH
+REDIS_NFS_MOUNT_OPTIONS
+OBSERVABILITY_NAMESPACE
+OBSERVABILITY_INSTALL_STACK
+GRAFANA_HOST
+PORTAL_URL
+SERVER_HOSTNAME
+SERVER_IP
+PHONE_IP
+PHONE_INTERFACE
+SMS_SECRET_TOKEN
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+EOF_REQUIRED_ENV
+
+  chmod 0644 "$required_env_file" 2>/dev/null || true
+}
+
+_release_stage_bundle_env() {
+  local bundle_root="$1"
+  local source_env="${INSTALL_DIR:-$SCRIPT_DIR}/.env"
+  local dest_env="$bundle_root/metadata/.env.bundle"
+
+  if [ -f "$source_env" ]; then
+    cp -a "$source_env" "$dest_env"
+  else
+    cat > "$dest_env" <<EOF_BUNDLE_ENV
+# Proposed bundle environment generated at $(_release_now_utc)
+# Existing production .env remains the source of truth during import/merge.
+
+NAMESPACE="${NAMESPACE:-otp-relay-devprod}"
+SERVICE_TYPE="${SERVICE_TYPE:-ClusterIP}"
+INGRESS_ENABLED="${INGRESS_ENABLED:-1}"
+TLS_ENABLED="${TLS_ENABLED:-0}"
+TLS_HOST="${TLS_HOST:-CHANGE_ME_TLS_HOST}"
+TLS_SECRET_NAME="${TLS_SECRET_NAME:-otp-relay-tls}"
+NFS_ENABLED="${NFS_ENABLED:-1}"
+NFS_SERVER="${NFS_SERVER:-CHANGE_ME_NFS_SERVER}"
+NFS_PATH="${NFS_PATH:-CHANGE_ME_NFS_PATH}"
+PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-otp-relay-nfs}"
+PVC_SIZE="${PVC_SIZE:-5Gi}"
+APP_IMAGE="${APP_IMAGE:-otp-relay-app:bundle}"
+MONITOR_IMAGE="${MONITOR_IMAGE:-otp-relay-monitor:bundle}"
+REDIS_ENABLED="${REDIS_ENABLED:-1}"
+REDIS_URL="${REDIS_URL:-redis://otp-redis-haproxy:6379/0}"
+REDIS_REQUIRED="${REDIS_REQUIRED:-1}"
+OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability-devprod}"
+GRAFANA_HOST="${GRAFANA_HOST:-CHANGE_ME_GRAFANA_HOST}"
+PORTAL_URL="${PORTAL_URL:-https://CHANGE_ME_TLS_HOST}"
+EOF_BUNDLE_ENV
+  fi
+
+  chmod 0600 "$dest_env" 2>/dev/null || true
+}
+
 _release_stage_bundle_tree() {
   local bundle_root="$1"
 
@@ -307,10 +412,11 @@ _release_stage_bundle_tree() {
   _release_copy_tree_if_exists "${OBSERVABILITY_DIR:-}" "$bundle_root/observability"
   _release_copy_tree_if_exists "${GENERATED_DIR:-}/images" "$bundle_root/images"
 
-  _release_copy_if_exists "${INSTALL_DIR:-$SCRIPT_DIR}/.env" "$bundle_root/metadata/build.env"
+  _release_stage_bundle_env "$bundle_root"
   _release_copy_if_exists "${GENERATED_DIR:-}/app-image-frontend-app.js" "$bundle_root/metadata/app-image-frontend-app.js"
 
   _release_write_metadata "$bundle_root"
+  _release_write_required_env_index "$bundle_root"
   _release_stage_runtime_secret_note "$bundle_root"
   _release_write_handoff_readme "$bundle_root"
   _release_write_manifest_index "$bundle_root"
@@ -322,6 +428,8 @@ _release_validate_bundle_tree() {
 
   _release_require_file "$bundle_root/PROD-HANDOFF.md" "production handoff readme"
   _release_require_file "$bundle_root/metadata/release.env" "release metadata"
+  _release_require_file "$bundle_root/metadata/.env.bundle" "proposed bundle environment"
+  _release_require_file "$bundle_root/metadata/required-env.txt" "required environment index"
   _release_require_file "$bundle_root/metadata/SHA256SUMS" "bundle checksums"
   _release_require_file "$bundle_root/metadata/file-index.txt" "bundle file index"
 
