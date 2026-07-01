@@ -1,119 +1,29 @@
 ---
-- name: Validate external NFS storage from K3s nodes
-  hosts: k3s_cluster
-  become: true
-  gather_facts: false
+# Disabled legacy Ansible playbook.
+#
+# Historical behavior:
+#   This playbook validated live Kubernetes storage, PVCs, NFS-backed volumes,
+#   and runtime cluster storage readiness.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No live Kubernetes storage validation is allowed from this repository path.
+#   - No PVC, pod, namespace, or storage class inspection is allowed from this path.
+#   - No production server deployment or validation is allowed from this path.
+#
+# The production server receives only the finished release bundle.
 
-  vars:
-    resolved_nfs_server: >-
-      {{
-        nfs_server
-        | default(nfs_server_ip, true)
-        | default(lookup('env', 'NFS_SERVER'), true)
-        | default(lookup('env', 'STORAGE_SERVER_IP'), true)
-      }}
-    resolved_nfs_path: >-
-      {{
-        nfs_export_path
-        | default(nfs_path, true)
-        | default(lookup('env', 'NFS_PATH'), true)
-        | default(lookup('env', 'NFS_EXPORT'), true)
-      }}
-    nfs_test_mount: /mnt/otp-relay-nfs-test
+- name: Disabled legacy Kubernetes storage validation
+  hosts: localhost
+  gather_facts: false
+  connection: local
 
   tasks:
-    - name: Show NFS validation target
-      ansible.builtin.debug:
-        msg:
-          - "Validating external NFS export from K3s node {{ inventory_hostname }}"
-          - "NFS target: {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
-
-    - name: Require NFS server
-      ansible.builtin.assert:
-        that:
-          - resolved_nfs_server | length > 0
-        fail_msg: "NFS server is not configured. Set NFS_SERVER in .env or nfs_server/nfs_server_ip in inventory/group vars."
-
-    - name: Require NFS path
-      ansible.builtin.assert:
-        that:
-          - resolved_nfs_path | length > 0
-        fail_msg: "NFS path is not configured. Set NFS_PATH in .env or nfs_export_path/nfs_path in inventory/group vars."
-
-    - name: Ensure NFS client tools are installed on K3s node
-      ansible.builtin.apt:
-        name: nfs-common
-        state: present
-        update_cache: true
-
-    - name: Check exported NFS paths from external NFS server
-      ansible.builtin.command:
-        cmd: "showmount -e {{ resolved_nfs_server }}"
-      register: nfs_exports
-      changed_when: false
-
-    - name: Show exported NFS paths
-      ansible.builtin.debug:
-        var: nfs_exports.stdout_lines
-
-    - name: Verify configured NFS export exists
-      ansible.builtin.assert:
-        that:
-          - resolved_nfs_path in nfs_exports.stdout
-        fail_msg: "NFS export {{ resolved_nfs_path }} was not found on {{ resolved_nfs_server }}."
-
-    - name: Create temporary NFS test mount point
-      ansible.builtin.file:
-        path: "{{ nfs_test_mount }}"
-        state: directory
-        mode: "0755"
-
-    - name: Check whether temporary NFS test mount is already mounted
-      ansible.builtin.command:
-        cmd: "mountpoint -q {{ nfs_test_mount }}"
-      register: nfs_test_mountpoint
-      changed_when: false
-      failed_when: false
-
-    - name: Mount and validate NFS export from this K3s node
-      block:
-        - name: Mount NFS export for validation
-          ansible.builtin.command:
-            cmd: "mount -t nfs {{ resolved_nfs_server }}:{{ resolved_nfs_path }} {{ nfs_test_mount }}"
-          when: nfs_test_mountpoint.rc != 0
-          changed_when: true
-
-        - name: Verify NFS test mount is writable from this K3s node
-          ansible.builtin.copy:
-            dest: "{{ nfs_test_mount }}/.otp-relay-nfs-validation-{{ inventory_hostname }}"
-            content: "ok\n"
-            mode: "0644"
-
-        - name: Remove NFS validation file
-          ansible.builtin.file:
-            path: "{{ nfs_test_mount }}/.otp-relay-nfs-validation-{{ inventory_hostname }}"
-            state: absent
-
-      always:
-        - name: Check whether temporary NFS test mount is mounted before cleanup
-          ansible.builtin.command:
-            cmd: "mountpoint -q {{ nfs_test_mount }}"
-          register: nfs_test_mountpoint_after
-          changed_when: false
-          failed_when: false
-
-        - name: Unmount temporary NFS test mount
-          ansible.builtin.command:
-            cmd: "umount {{ nfs_test_mount }}"
-          when: nfs_test_mountpoint_after.rc == 0
-          changed_when: true
-          failed_when: false
-
-        - name: Remove temporary NFS test mount point
-          ansible.builtin.file:
-            path: "{{ nfs_test_mount }}"
-            state: absent
-
-    - name: NFS validation completed
-      ansible.builtin.debug:
-        msg: "NFS validation succeeded from {{ inventory_hostname }} to {{ resolved_nfs_server }}:{{ resolved_nfs_path }}"
+    - name: Refuse legacy storage validation
+      ansible.builtin.fail:
+        msg: >-
+          Legacy live Kubernetes storage validation is disabled in the
+          bundle-only DEVtoPROD architecture. Use bash setup.sh or
+          bash build-release-bundle.sh to create a sealed production
+          release bundle. Production-side storage validation must be
+          performed only by the approved production procedure.
