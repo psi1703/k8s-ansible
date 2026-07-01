@@ -1,462 +1,363 @@
 # Build and Development Guide
 
-## Purpose
+## Scope
 
-This guide is the development and build reference for OTP Relay Kubernetes.
+This guide applies to the `k8s-ansible-DEVtoPROD` bundle-only branch.
 
-It owns:
+This branch is used to prepare OTP Relay Kubernetes release artifacts on the dev/build host.
 
-* app and monitor package layout
-* app and monitor image build rules
-* dependency-change behavior
-* frontend source/generated bundle model
-* help-doc generation model
-* Grafana dashboard generation model
-* runtime data rules
-* local build commands
-* generated artifact commit rules
+It does not deploy.
 
-Deployment flow belongs in:
+It does not install or configure a Kubernetes cluster.
 
-```text
-docs/deployment/deployment-and-storage-guide.md
+It does not mutate production.
+
+The production server receives only the sealed release bundle, checksum, and report.
+
+## Development model
+
+The development side is responsible for producing a complete handoff artifact.
+
+The bundle builder may:
+
+- validate repository source files
+- build frontend assets
+- build local Docker images
+- export Docker image archives
+- render Kubernetes manifests into staging
+- package observability YAML/value files
+- write release metadata
+- write checksums
+- create a sealed release tarball
+
+The bundle builder must not:
+
+- install K3s
+- install Helm
+- run Helm install or upgrade
+- run `kubectl apply`
+- run `kubectl rollout`
+- import images into a live cluster
+- restart deployments
+- provision worker VMs
+- install GitHub Actions runners
+- label live Kubernetes nodes
+- inspect live Kubernetes resources
+- validate a live production cluster
+
+Production-side execution is outside this repository path.
+
+## Main entrypoints
+
+From the repository root, use:
+
+```bash
+bash setup.sh
 ```
 
-Operations and validation commands belong in:
+or:
 
-```text
-docs/operations/operations-and-validation-runbook.md
+```bash
+bash build-release-bundle.sh
 ```
 
-Grafana/Prometheus troubleshooting and PromQL guidance belongs in:
+`setup.sh` is only a compatibility launcher. It forwards to `build-release-bundle.sh`.
 
-```text
-docs/operations/observability-and-grafana.md
+It must not contain standalone deployment logic.
+
+## Artifact selector
+
+The historical variable name `DEPLOY_MODE` is retained only for compatibility.
+
+In this branch, it means artifact selector.
+
+Supported values:
+
+| Mode | Purpose |
+|---|---|
+| `full` | Build/package app image, monitor image, rendered manifests, observability files, metadata |
+| `app` | Build/package app image and rendered runtime manifests |
+| `monitor` | Build/package monitor image and rendered runtime manifests |
+| `none` | Metadata-only bundle validation |
+
+Examples:
+
+```bash
+bash setup.sh --mode full
+bash setup.sh --mode app
+bash setup.sh --mode monitor
+bash setup.sh --mode none
 ```
 
----
+## Required local build tools
 
-## Application package layout
+The builder expects required tools to already exist on the dev/build host.
 
-The portal application is organized under:
+It does not install packages automatically.
 
-```text
-otp_relay/
+Typical tools:
+
+- `bash`
+- `git`
+- `python3`
+- `npm`
+- `docker`
+- `tar`
+- `gzip`
+- `sha256sum`
+- standard POSIX tools such as `find`, `grep`, `sed`, `awk`, and `sort`
+
+`npm` is required only when app artifacts are selected.
+
+Docker is required only when image artifacts are selected.
+
+For `DEPLOY_MODE=none`, the builder should not require runtime manifests, frontend build output, or image builds.
+
+## Environment file
+
+Create `.env` from the example:
+
+```bash
+cp .env.example .env
 ```
 
-Important modules:
+Do not commit populated `.env` files.
 
-| Module                     | Purpose                                           |
-| -------------------------- | ------------------------------------------------- |
-| `otp_relay/routes.py`      | App assembly and router registration              |
-| `otp_relay/config.py`      | Runtime configuration                             |
-| `otp_relay/state.py`       | Shared in-memory fallback state                   |
-| `otp_relay/storage.py`     | JSON/PVC-backed admin and wizard files            |
-| `otp_relay/users.py`       | `users.xlsx` import and validation                |
-| `otp_relay/redis_state.py` | Redis queue, pending OTP, and admin session state |
-| `otp_relay/otp_flow.py`    | OTP claim, status, cancel, and SMS receive flow   |
-| `otp_relay/admin.py`       | Admin auth, users, queue, wizard, and diagnostics |
-| `otp_relay/audit.py`       | Audit log write/read behavior                     |
-| `otp_relay/metrics.py`     | Prometheus metrics                                |
-| `otp_relay/frontend.py`    | Static frontend mounting and `guide.html`         |
+The `.env` file provides render-time and package-time values.
 
-The top-level app entry remains:
+Important groups:
+
+- release branch/source values
+- namespace
+- image references
+- service/ingress/TLS values
+- NFS/PVC values
+- Redis values
+- monitor values
+- observability metadata
+- artifact selector
+- output directory
+
+The builder forces bundle-only safety flags even if `.env` contains older deployment values.
+
+Forced disabled values include:
+
+```bash
+SKIP_CLUSTER_DEPLOY="1"
+SKIP_K3S_INSTALL="1"
+SKIP_HELM_INSTALL="1"
+SKIP_KUBECTL_APPLY="1"
+SKIP_IMAGE_IMPORT="1"
+SKIP_ROLLOUT_RESTART="1"
+SKIP_LIVE_CLUSTER_VALIDATE="1"
+SKIP_GITHUB_RUNNER_INSTALL="1"
+SKIP_VM_PROVISIONING="1"
+DEPLOY_OTP_RELAY="0"
+VALIDATE_OTP_RELAY="0"
+INSTALL_GITHUB_RUNNER="0"
+RUNNER_ONLY="0"
+DISTRIBUTE_IMAGES_TO_NODES="0"
+```
+
+## Frontend build
+
+When app artifacts are selected, the builder validates and builds the frontend.
+
+Expected source files:
+
+```text
+frontend/app.jsx
+frontend/index.html
+frontend/style.css
+package.json
+package-lock.json
+```
+
+Expected generated output:
+
+```text
+frontend/app.js
+```
+
+The root-level file `app.js` is forbidden.
+
+The browser bundle must be generated into `frontend/app.js`.
+
+## Python source validation
+
+When app artifacts are selected, the builder validates app Python sources.
+
+Expected app files include:
 
 ```text
 main.py
+otp_relay/
+requirements.txt
 ```
 
-`main.py` should stay thin and delegate app construction to the modular package.
+When monitor artifacts are selected, the builder validates monitor Python sources.
 
----
-
-## Monitor package layout
-
-The monitor is organized under:
-
-```text
-otp_monitor/
-```
-
-Important modules:
-
-| Module                      | Purpose                           |
-| --------------------------- | --------------------------------- |
-| `otp_monitor/runner.py`     | Monitor launcher/runtime loop     |
-| `otp_monitor/config.py`     | Monitor runtime configuration     |
-| `otp_monitor/phone.py`      | iPhone presence and ARP detection |
-| `otp_monitor/alerts.py`     | Telegram alerts                   |
-| `otp_monitor/audit_tail.py` | Audit-log tailing                 |
-| `otp_monitor/metrics.py`    | Prometheus metrics                |
-
-The top-level monitor entry remains:
+Expected monitor files include:
 
 ```text
 monitor.py
+otp_monitor/
+requirements.txt
 ```
 
-`monitor.py` should stay thin and delegate runtime behavior to the modular package.
+The builder may run Python syntax checks locally.
 
----
+It must not contact Kubernetes.
 
-## App image
+## Docker image build/export
 
-The app image is built from:
+When image artifacts are selected, Docker may be used only on the dev/build host.
+
+Allowed Docker actions:
+
+- build local image
+- inspect local image
+- save local image to archive
+
+Forbidden Docker/Kubernetes image actions:
+
+- importing into K3s/containerd
+- distributing images to live nodes
+- creating importer DaemonSets
+- starting temporary image distribution servers for cluster nodes
+- querying Kubernetes nodes
+
+Image archives are packaged under the release bundle `images/` directory.
+
+## Manifest rendering
+
+When runtime manifests are selected, the builder stages and renders files from:
 
 ```text
-k8s/Dockerfile
+k8s/manifests/
 ```
 
-The app image includes:
+The builder validates rendered files locally for basic manifest structure.
 
-* Python runtime for FastAPI/Uvicorn
-* Python dependencies from `requirements.txt`
-* `main.py`
-* `otp_relay/`
-* frontend static files
-* generated production `frontend/app.js` from `frontend/app.jsx`
-* generated help pages from `docs/help/`
+It must not run Kubernetes dry-run against a live cluster.
 
-The app starts Uvicorn through Python:
+It must not run `kubectl apply`.
+
+It must not create namespaces.
+
+It must not inspect PVCs, storage classes, pods, services, or ingresses.
+
+## Observability files
+
+The builder may package observability YAML/value files from:
 
 ```text
-python -m uvicorn main:app
+k8s/observability/
 ```
 
-This avoids relying on shell `PATH` details for the `uvicorn` executable.
+It may generate static dashboard ConfigMap YAML from repository JSON source.
 
-The app should run as non-root where possible and use `/app/data` as a mounted persistent path, not image content.
+It must not run Helm.
 
----
+It must not install Prometheus, Grafana, Loki, or Alloy.
 
-## Monitor image
+It must not validate dashboards against a live Grafana instance.
 
-The monitor image is built from:
+## Release bundle creation
+
+The builder creates a sealed tarball and checksum under `dist/` by default.
+
+Typical output:
 
 ```text
-k8s/Dockerfile.monitor
+dist/*.tar.gz
+dist/*.tar.gz.sha256
+dist/*.tar.gz.report.txt
 ```
 
-The monitor image includes:
-
-* Python runtime
-* Python dependencies from `requirements.txt`
-* `monitor.py`
-* `otp_monitor/`
-
-The monitor is a required service. It performs:
-
-* phone presence checks
-* audit-log checks
-* Prometheus metric export
-* Telegram alert checks
-
-Kubernetes deployment requirements:
-
-* `hostNetwork: true`
-* `dnsPolicy: ClusterFirstWithHostNet`
-* `NET_RAW` capability
-* no Service
-* no Ingress
-
----
-
-## Dependency-change behavior
-
-`requirements.txt` affects both the app and the monitor images.
-
-A change to `requirements.txt` should trigger:
-
-* app image rebuild
-* monitor image rebuild
-* app rollout
-* monitor rollout
-
-Do not classify a `requirements.txt` change as observability-only or manifest-only.
-
----
-
-## Frontend build model
-
-The React source is:
+The tarball contains a release directory similar to:
 
 ```text
-frontend/app.jsx
+otp-relay-k8s-<namespace>-<timestamp>-<gitsha>/
+├── PROD-HANDOFF.md
+├── manifests/
+├── observability/
+├── images/
+└── metadata/
+    ├── release.env
+    ├── secret-handoff.txt
+    ├── file-index.txt
+    └── SHA256SUMS
 ```
 
-The production build output is:
+Exact contents depend on the selected artifact mode.
 
-```text
-frontend/app.js
-```
+## Local smoke test
 
-The portal serves `frontend/app.js` in production.
-
-Rules:
-
-* Edit `frontend/app.jsx` for frontend behavior changes.
-* Rebuild `frontend/app.js` after editing `frontend/app.jsx`.
-* Commit both `frontend/app.jsx` and `frontend/app.js` when the generated bundle changes.
-* Do not edit `frontend/app.js` directly as source.
-* Do not restore browser Babel or `text/babel` as the production model.
-
-This matters for portal behavior such as:
-
-* RTA wizard overlay
-* guide iframe rendering
-* admin UI
-* OTP screen
-* user login flow
-
----
-
-## Help-doc build model
-
-Help source lives under:
-
-```text
-docs/help/
-docs/help/assets/
-```
-
-The build script is:
-
-```text
-scripts/build_help_docs.py
-```
-
-The generated portal help output is under:
-
-```text
-frontend/help/
-```
-
-Generated help output includes:
-
-```text
-frontend/help/manifest.json
-frontend/help/wizard-guide.json
-frontend/help/rendered/
-frontend/help/assets/
-```
-
-Build command:
+The safest smoke test is metadata-only mode:
 
 ```bash
-python3 scripts/build_help_docs.py
+bash setup.sh \
+  --mode none \
+  --skip-repo-sync 1 \
+  --git-clean 0 \
+  --noninteractive \
+  --dist-dir dist
 ```
 
-`docs/help/` is source material and should stay in the repo.
+This validates the bundle path without requiring runtime manifest values or image builds.
 
-Generated help output should be handled by the build/deploy process according to `.gitignore` and installer behavior. If the repository intentionally versions generated help output, regenerate it from source before committing.
+## Full local release build
 
----
-
-## Help overlay development note
-
-If an image works in the pop-out guide but not in the portal overlay, the relevant source is usually:
-
-```text
-frontend/app.jsx
-```
-
-After fixing overlay behavior, rebuild:
-
-```text
-frontend/app.js
-```
-
-For operational checks of the live portal, use:
-
-```text
-docs/operations/operations-and-validation-runbook.md
-```
-
----
-
-## Grafana dashboard build model
-
-Grafana dashboard source lives at:
-
-```text
-k8s/observability/dashboards/otp-relay-live.json
-```
-
-The generator script is:
-
-```text
-scripts/build_grafana_dashboard_configmap.py
-```
-
-The generated ConfigMap output is:
-
-```text
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-Build command:
+After `.env` is configured:
 
 ```bash
-python3 scripts/build_grafana_dashboard_configmap.py
+bash setup.sh \
+  --mode full \
+  --skip-repo-sync 1 \
+  --git-clean 0 \
+  --noninteractive \
+  --dist-dir dist
 ```
 
-Rules:
+This should produce a sealed release bundle and checksum.
 
-* Edit `k8s/observability/dashboards/otp-relay-live.json` as the dashboard source of truth.
-* Do not hand-edit the generated ConfigMap as the source.
-* Regenerate the ConfigMap after dashboard source changes.
-* Commit both the source JSON and generated YAML when dashboard changes are made.
-* The Grafana UI should not be used as the permanent source of truth.
-* Provisioned dashboards may not be saveable from Grafana UI; this is expected.
+## GitHub Actions build
 
-Dashboard behavior, PromQL, and troubleshooting belong in:
+The GitHub Actions workflow must build and upload only release bundle artifacts.
+
+It must not sync the repository as the production handoff product.
+
+It must not run deployment commands.
+
+It must not install K3s, run Helm, run `kubectl apply`, import images, provision VMs, or install runners.
+
+The uploaded artifact is the production handoff product.
+
+## Legacy automation
+
+Legacy automation paths are retained only as disabled safety boundaries.
+
+Examples:
 
 ```text
-docs/operations/observability-and-grafana.md
+automation/ansible/
+automation/libvirt/
 ```
 
----
+These paths must fail safely if invoked.
 
-## Runtime data
+They must not provision, install, deploy, validate, or mutate a live environment.
 
-Runtime data belongs on the Kubernetes PVC at:
+## Development rule
 
-```text
-/app/data
-```
+When adding or editing scripts in this branch, keep the boundary strict:
 
-Do not bake runtime files into the image.
+- build/package locally
+- render files locally
+- create bundle locally
+- do not deploy
+- do not call live cluster tools
+- do not mutate production
 
-Expected runtime files:
-
-```text
-users.xlsx
-admin_auth.json
-admin_config.json
-wizard_progress.json
-audit.log
-```
-
-OTP values must not be written to runtime files, image layers, logs, or committed files.
-
----
-
-## Local build commands
-
-From the repository root:
-
-```bash
-docker build -t otp-relay:latest -f k8s/Dockerfile .
-docker build -t otp-monitor:latest -f k8s/Dockerfile.monitor .
-```
-
-For K3s without a registry:
-
-```bash
-docker save otp-relay:latest -o otp-relay-latest.tar
-docker save otp-monitor:latest -o otp-monitor-latest.tar
-sudo k3s ctr images import otp-relay-latest.tar
-sudo k3s ctr images import otp-monitor-latest.tar
-```
-
-For deployment and rollout checks after import, use:
-
-```text
-docs/deployment/deployment-and-storage-guide.md
-docs/operations/operations-and-validation-runbook.md
-```
-
----
-
-## Local generation commands
-
-Before committing generated changes, run the relevant command.
-
-Help docs:
-
-```bash
-python3 scripts/build_help_docs.py
-```
-
-Grafana dashboard ConfigMap:
-
-```bash
-python3 scripts/build_grafana_dashboard_configmap.py
-```
-
-Frontend bundle generation is handled by the installer/frontend build path. When frontend source changes, commit the rebuilt `frontend/app.js` only if the repository intentionally versions the generated bundle.
-
----
-
-## Development workflow notes
-
-* Keep application changes focused and small.
-* Do not commit secrets or runtime data.
-* Do not commit generated logs or tar images.
-* Keep Kubernetes manifests as deployment source.
-* Keep observability manifests under `k8s/observability/`.
-* Keep docs under `docs/`; do not recreate `k8s/docs/`.
-* Keep frontend source/generated bundle changes together when generated artifacts are versioned.
-* Keep Grafana dashboard source/generated ConfigMap changes together.
-* Keep `.env` as the source of operator/site-specific values.
-* Do not hardcode phone IP, interface, Telegram token, NFS server, TLS host, Redis URL, or storage class in code.
-* Keep monitor internal only; do not add Service or Ingress for it.
-
----
-
-## Files not to commit
-
-```text
-.env
-secret.env
-data/
-k8s/manifests/secret.env
-users.xlsx
-admin_auth.json
-admin_config.json
-wizard_progress.json
-audit.log
-*.log
-*.tar
-```
-
-Generated files such as these may be committed only when the repository's deployment model expects generated artifacts to be versioned:
-
-```text
-frontend/app.js
-frontend/help/
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-When committed, regenerate them from their source files instead of editing them directly.
-
----
-
-## Design notes retained as active rules
-
-* Use multi-stage builds where appropriate.
-* Keep containers focused: app container runs the app, not nginx.
-* TLS termination belongs to Kubernetes ingress, not inside the app container.
-* Run as non-root where possible.
-* Keep `/app/data` as a mounted persistent path, not image content.
-* Keep Grafana dashboard provisioning source-driven: source JSON -> generated ConfigMap -> Grafana sidecar.
-* Keep the monitor as a required internal workload.
-* Keep Redis as required in the validated Kubernetes posture.
-* Keep normal Redis updates non-destructive unless an explicit reset path is used.
-
----
-
-## Build sign-off checklist
-
-* [ ] App image includes `main.py`.
-* [ ] App image includes `otp_relay/`.
-* [ ] Monitor image includes `monitor.py`.
-* [ ] Monitor image includes `otp_monitor/`.
-* [ ] `requirements.txt` changes trigger app and monitor rebuilds.
-* [ ] `frontend/app.js` is generated from `frontend/app.jsx`.
-* [ ] Help output is generated from `docs/help/`.
-* [ ] Grafana dashboard ConfigMap is generated by `scripts/build_grafana_dashboard_configmap.py`.
-* [ ] Runtime data is not baked into images.
-* [ ] Secrets are not committed.
-* [ ] Docker images build cleanly.
-* [ ] K3s imports images successfully when manual import is used.
+If a development change reintroduces live deployment behavior into the dev/build path, it is a bug.
