@@ -104,11 +104,10 @@
   changed_when: true
   failed_when: false
 
-- name: Remove Redis eligibility from control-plane
+- name: Label control-plane for Redis eligibility
   ansible.builtin.command:
-    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node- --overwrite
+    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node=true --overwrite
   changed_when: true
-  failed_when: false
 
 - name: Remove storage eligibility from control-plane
   ansible.builtin.command:
@@ -140,7 +139,6 @@
   loop: "{{ worker_k8s_nodes }}"
   changed_when: true
   failed_when: false
-
 
 - name: Set observability UI Kubernetes node fact
   ansible.builtin.set_fact:
