@@ -1,183 +1,23 @@
 ---
-- name: Get Kubernetes node names
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
-  register: k8s_node_names
-  changed_when: false
+# Disabled legacy Ansible role tasks.
+#
+# Historical behavior:
+#   This role labeled live Kubernetes nodes for app, monitor, and Redis
+#   placement.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No live Kubernetes node labeling is allowed from this repository path.
+#   - No kubectl/k3s node mutation is allowed from this repository path.
+#   - No production server deployment is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
 
-- name: Get Kubernetes nodes with internal IPs
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}'
-  register: k8s_node_ip_rows
-  changed_when: false
-
-- name: Resolve control-plane Kubernetes node name from hostname
-  ansible.builtin.shell: |
-    set -eu
-
-    short_hostname="$(hostname -s)"
-    fqdn="$(hostname -f 2>/dev/null || hostname)"
-
-    k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
-      awk -v short="$short_hostname" -v fqdn="$fqdn" '
-        $0 == short { print; found=1; exit }
-        $0 == fqdn { print; found=1; exit }
-        index($0, short) > 0 { candidate=$0 }
-        END { if (!found && candidate != "") print candidate }
-      '
-  args:
-    executable: /bin/bash
-  register: control_plane_k8s_node_raw
-  changed_when: false
-
-- name: Set control-plane Kubernetes node fact
-  ansible.builtin.set_fact:
-    control_plane_k8s_node: "{{ control_plane_k8s_node_raw.stdout | trim }}"
-
-- name: Fail if control-plane Kubernetes node name could not be resolved
+- name: Refuse legacy Kubernetes node labeling
   ansible.builtin.fail:
     msg: >-
-      Could not resolve Kubernetes node for localhost control-plane.
-      Found nodes: {{ k8s_node_names.stdout_lines }}
-  when: control_plane_k8s_node | length == 0
-
-- name: Build worker IP list from inventory
-  ansible.builtin.set_fact:
-    worker_ips: "{{ groups['workers'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
-
-- name: Fail if no workers are defined
-  ansible.builtin.fail:
-    msg: "No workers are defined in inventory. The current design expects worker1 and worker2."
-  when: worker_ips | length == 0
-
-- name: Resolve worker Kubernetes node names by InternalIP
-  ansible.builtin.shell: |
-    set -eu
-
-    worker_ips="{{ worker_ips | join(' ') }}"
-
-    k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{" "}{end}{"\n"}{end}' |
-      awk -v ips="$worker_ips" '
-        BEGIN {
-          n=split(ips, iplist, " ")
-          for (i=1; i<=n; i++) wanted[iplist[i]]=1
-        }
-        {
-          node=$1
-          for (i=2; i<=NF; i++) {
-            if ($i in wanted) print node
-          }
-        }
-      '
-  args:
-    executable: /bin/bash
-  register: worker_k8s_nodes_raw
-  changed_when: false
-
-- name: Set worker Kubernetes node facts
-  ansible.builtin.set_fact:
-    worker_k8s_nodes: "{{ worker_k8s_nodes_raw.stdout_lines | unique | list }}"
-
-- name: Fail if not all worker Kubernetes nodes could be resolved
-  ansible.builtin.fail:
-    msg: >-
-      Could not resolve all worker Kubernetes nodes by inventory IP.
-      Worker inventory IPs: {{ worker_ips }}
-      Resolved Kubernetes worker nodes: {{ worker_k8s_nodes }}
-      Kubernetes node/IP rows: {{ k8s_node_ip_rows.stdout_lines }}
-  when: worker_k8s_nodes | length != worker_ips | length
-
-- name: Show resolved Kubernetes node placement
-  ansible.builtin.debug:
-    msg:
-      - "Control-plane Kubernetes node: {{ control_plane_k8s_node }}"
-      - "Worker Kubernetes nodes: {{ worker_k8s_nodes }}"
-
-- name: Label control-plane for monitor eligibility
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/monitor-node=true --overwrite
-  changed_when: true
-
-- name: Remove app eligibility from control-plane
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/app-node- --overwrite
-  changed_when: true
-  failed_when: false
-
-- name: Remove Redis eligibility from control-plane
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/redis-node- --overwrite
-  changed_when: true
-  failed_when: false
-
-- name: Remove storage eligibility from control-plane
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ control_plane_k8s_node }} otp-relay/storage-node- --overwrite
-  changed_when: true
-  failed_when: false
-
-- name: Label workers for app eligibility
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ item }} otp-relay/app-node=true --overwrite
-  loop: "{{ worker_k8s_nodes }}"
-  changed_when: true
-
-- name: Label workers for Redis eligibility
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ item }} otp-relay/redis-node=true --overwrite
-  loop: "{{ worker_k8s_nodes }}"
-  changed_when: true
-
-- name: Label workers for storage eligibility
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ item }} otp-relay/storage-node=true --overwrite
-  loop: "{{ worker_k8s_nodes }}"
-  changed_when: true
-
-- name: Remove monitor eligibility from workers
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ item }} otp-relay/monitor-node- --overwrite
-  loop: "{{ worker_k8s_nodes }}"
-  changed_when: true
-  failed_when: false
-
-
-- name: Set observability UI Kubernetes node fact
-  ansible.builtin.set_fact:
-    observability_ui_node: "{{ worker_k8s_nodes[0] }}"
-
-- name: Set observability data Kubernetes node fact
-  ansible.builtin.set_fact:
-    observability_data_node: "{{ worker_k8s_nodes[1] if (worker_k8s_nodes | length) > 1 else worker_k8s_nodes[0] }}"
-
-- name: Label observability UI node for Grafana and Alertmanager
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ observability_ui_node }} observability/role=ui --overwrite
-  changed_when: true
-
-- name: Label observability data node for Prometheus
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ observability_data_node }} observability/role=data --overwrite
-  changed_when: true
-
-- name: Remove observability eligibility from control-plane
-  ansible.builtin.command:
-    cmd: k3s kubectl label node {{ control_plane_k8s_node }} observability/role- --overwrite
-  changed_when: true
-  failed_when: false
-
-- name: Show resolved observability placement
-  ansible.builtin.debug:
-    msg:
-      - "Grafana/Alertmanager observability UI node: {{ observability_ui_node }}"
-      - "Prometheus observability data node: {{ observability_data_node }}"
-
-- name: Show final node labels
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes -L otp-relay/app-node,otp-relay/redis-node,otp-relay/storage-node,otp-relay/monitor-node,observability/role
-  register: final_node_labels
-  changed_when: false
-
-- name: Print final node labels
-  ansible.builtin.debug:
-    var: final_node_labels.stdout_lines
+      Legacy Kubernetes node labeling is disabled in the bundle-only
+      DEVtoPROD architecture. Use bash setup.sh or
+      bash build-release-bundle.sh to create a sealed production release
+      bundle. Production-side node labeling, if required, must be performed
+      only by the approved production procedure.
