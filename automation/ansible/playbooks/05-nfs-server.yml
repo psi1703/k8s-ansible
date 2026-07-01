@@ -1,6 +1,27 @@
 ---
-- name: Configure external shared NFS storage VM
+# Bundle-only release policy:
+#
+# This repository no longer configures NFS servers during the DEVtoPROD
+# release-build path.
+#
+# The old NFS playbook used to install and configure nfs-kernel-server on a
+# target host. That behavior is intentionally disabled.
+#
+# Production storage must be prepared outside this bundle builder. The build
+# path may package Kubernetes/NFS-related manifests or metadata into the sealed
+# release bundle, but it must not install packages, edit /etc/exports, restart
+# services, or mutate any host.
+
+- name: Disabled legacy NFS server configuration
   hosts: nfs_server
-  become: true
-  roles:
-    - nfs_server
+  gather_facts: false
+
+  tasks:
+    - name: Refuse legacy NFS server execution
+      ansible.builtin.fail:
+        msg: >-
+          This playbook is disabled by the bundle-only DEVtoPROD release policy.
+          Do not install, configure, export, or restart NFS services from this
+          repository. Build the sealed production release bundle on the
+          dev/build host instead, then hand off only the finished bundle to
+          production.
