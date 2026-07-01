@@ -1,653 +1,200 @@
 # Observability and Grafana Guide
 
-## Purpose
+## Scope
 
-This guide is the observability reference for OTP Relay Kubernetes.
+This guide applies to the `k8s-ansible-DEVtoPROD` bundle-only branch.
 
-It owns:
+This branch does not install or operate the observability stack.
 
-* Prometheus, Grafana, Loki, and Alloy guidance
-* ServiceMonitor validation
-* OTP Relay portal and monitor metrics
-* Grafana dashboard provisioning
-* dashboard source/generated workflow
-* replica-aware PromQL guidance
-* Grafana access through Traefik/IngressRoute
-* dashboard-specific troubleshooting
+It may package observability-related YAML, values, dashboard ConfigMaps, and metadata into the sealed production release bundle.
 
-General operations and SCH validation belong in:
+The production server receives only the finished bundle, checksum, and report.
 
-```text
-docs/operations/operations-and-validation-runbook.md
+## Bundle-only boundary
+
+The dev/build side may:
+
+- package observability YAML/value files
+- generate static dashboard ConfigMap YAML from repository dashboard JSON
+- record observability namespace and Grafana host metadata
+- include observability files in the release bundle
+- include observability intent in the release report
+
+The dev/build side must not:
+
+- install Prometheus
+- install Grafana
+- install Loki
+- install Alloy
+- run Helm install or upgrade
+- run Helm repository commands against production
+- run `kubectl apply`
+- inspect live ServiceMonitors
+- inspect live Grafana dashboards
+- inspect live Prometheus targets
+- inspect live Loki or Alloy pods
+- validate a live observability stack
+
+Production-side observability installation and validation are outside this repository path.
+
+## Relevant configuration
+
+Observability intent is configured through `.env`.
+
+Common values:
+
+```bash
+OBSERVABILITY_NAMESPACE="observability-devprod"
+OBSERVABILITY_INSTALL_STACK="1"
+OBSERVABILITY_STACK_CHART_VERSION="85.0.1"
+GRAFANA_HOST="grafana-devprod.init-db.lan"
 ```
 
-Deployment and storage guidance belongs in:
+These values are recorded in release metadata and reports.
 
-```text
-docs/deployment/deployment-and-storage-guide.md
-```
+They do not cause the dev/build path to run Helm or mutate a cluster.
 
-Build/source-generated artifact guidance belongs in:
+## Source files
 
-```text
-docs/development/build-and-development-guide.md
-```
-
----
-
-## Observability namespace
-
-Observability resources run in:
-
-```text
-observability
-```
-
-Core components:
-
-| Component                          | Purpose                                                   |
-| ---------------------------------- | --------------------------------------------------------- |
-| Prometheus / kube-prometheus-stack | Scrapes portal, monitor, Kubernetes, and platform metrics |
-| Grafana                            | Displays the OTP Relay live dashboard                     |
-| ServiceMonitor `otp-relay`         | Scrapes portal metrics                                    |
-| ServiceMonitor `otp-monitor`       | Scrapes monitor metrics                                   |
-| Loki                               | Stores logs when deployed                                 |
-| Alloy                              | Collects and forwards logs when deployed                  |
-| Grafana dashboard ConfigMap        | Provisions the OTP Relay live dashboard                   |
-
----
-
-## Normal Grafana access
-
-Grafana should be accessed through Traefik/IngressRoute.
-
-Current browser access path:
-
-```text
-https://grafana.init-db.lan
-```
-
-Port-forwarding is not the normal Grafana access model. Use port-forwarding only for temporary debugging or when checking Prometheus directly from the control-plane host.
-
----
-
-## Repository files
-
-Observability manifests live under:
+Observability source files may exist under:
 
 ```text
 k8s/observability/
 ```
 
-Important files:
+Dashboard source JSON may exist under:
 
 ```text
-k8s/observability/prometheus-stack-values.yaml
-k8s/observability/loki-values.yaml
-k8s/observability/alloy-values.yaml
-k8s/observability/grafana-ingressroute.yaml
-k8s/observability/servicemonitor-otp-relay.yaml
-k8s/observability/servicemonitor-otp-monitor.yaml
-k8s/observability/dashboards/otp-relay-live.json
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
+k8s/observability/dashboards/
 ```
 
-The dashboard generator is:
+If the repository contains a dashboard source such as:
+
+```text
+k8s/observability/dashboards/otp-relay-live.json
+```
+
+the builder may generate a static ConfigMap YAML using the local generator script.
+
+Expected generator path:
 
 ```text
 scripts/build_grafana_dashboard_configmap.py
 ```
 
----
+This generation is local file generation only.
 
-## Dashboard source-generated model
+It does not contact Grafana.
 
-The Grafana dashboard follows a source-generated workflow.
+It does not apply the generated ConfigMap.
 
-```text
-Source:    k8s/observability/dashboards/otp-relay-live.json
-Generated: k8s/observability/grafana-dashboard-otp-relay-live.yaml
-Generator: scripts/build_grafana_dashboard_configmap.py
-ConfigMap: otp-relay-live-dashboard
-Namespace: observability
-Data key:  otp-relay-live.json
-UID:       otp-relay-live
-```
+## Packaging behavior
 
-Rules:
-
-* Edit `k8s/observability/dashboards/otp-relay-live.json`.
-* Do not hand-edit `k8s/observability/grafana-dashboard-otp-relay-live.yaml` as the source.
-* Regenerate the ConfigMap after dashboard source changes.
-* Commit both the source JSON and generated YAML when dashboard changes are made.
-* The Grafana UI should not be used as the permanent source of truth.
-* Provisioned dashboards may not be saveable from the Grafana UI; this is expected.
-
----
-
-## Generate the dashboard ConfigMap
-
-From the repo root:
-
-```bash
-python3 scripts/build_grafana_dashboard_configmap.py
-```
-
-The generator supports Grafana `dashboard.grafana.app/v2` exports and converts them to classic Grafana dashboard JSON for sidecar provisioning.
-
-The generated dashboard JSON must preserve:
+During a bundle build, observability files may be staged under:
 
 ```text
-id: null
-uid: otp-relay-live
-refresh: 15s
-timepicker.refresh_intervals
-panel type from vizConfig.group
-dashboard layout and panel sizing
+observability/
 ```
 
----
+inside the release bundle.
 
-## Validate generated output
-
-After running the generator:
-
-```bash
-grep -n '"refresh"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"timepicker"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"refresh_intervals"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-Expected:
-
-* `"refresh": "15s"` exists.
-* `"timepicker"` exists.
-* `"refresh_intervals"` exists and includes `15s`.
-
-Confirm the generated ConfigMap embeds classic Grafana JSON, not the v2 wrapper:
-
-```bash
-python3 - <<'PY'
-import json
-import yaml
-from pathlib import Path
-
-cm = yaml.safe_load(Path("k8s/observability/grafana-dashboard-otp-relay-live.yaml").read_text())
-dash = json.loads(cm["data"]["otp-relay-live.json"])
-
-errors = []
-
-if dash.get("apiVersion"):
-    errors.append("generated dashboard still has apiVersion")
-if dash.get("kind") == "Dashboard":
-    errors.append("generated dashboard still has kind=Dashboard")
-if dash.get("id") is not None:
-    errors.append("dashboard id is not null")
-if dash.get("uid") != "otp-relay-live":
-    errors.append(f"dashboard uid is wrong: {dash.get('uid')!r}")
-if dash.get("refresh") != "15s":
-    errors.append(f"dashboard refresh is wrong: {dash.get('refresh')!r}")
-
-intervals = dash.get("timepicker", {}).get("refresh_intervals", [])
-if "15s" not in intervals:
-    errors.append(f"15s missing from refresh intervals: {intervals}")
-
-stat_titles = {
-    "📱 iPhone",
-    "🚪 Portal",
-    "📥 Queue",
-    "👤 Active user",
-    "✉️ Delivered today",
-    "👁️ Monitor",
-    "🎛️ Nodes",
-    "📊 Prometheus",
-    "⏰ Last ARP",
-}
-
-by_title = {panel.get("title"): panel for panel in dash.get("panels", [])}
-for title in stat_titles:
-    panel = by_title.get(title)
-    if not panel:
-        errors.append(f"missing panel: {title}")
-        continue
-    if panel.get("type") != "stat":
-        errors.append(f"{title} is {panel.get('type')!r}, expected stat")
-    if panel.get("options", {}).get("graphMode") != "none":
-        errors.append(f"{title} graphMode is not none")
-
-if errors:
-    print("VALIDATION FAILED")
-    for error in errors:
-        print(" -", error)
-    raise SystemExit(1)
-
-print("VALIDATION PASSED")
-PY
-```
-
----
-
-## Apply dashboard changes manually
-
-Normally the installer or GitHub Actions applies manifests.
-
-To apply only the dashboard ConfigMap manually:
-
-```bash
-sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-```
-
-Confirm the live ConfigMap contains the expected dashboard metadata:
-
-```bash
-sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability \
-  -o jsonpath='{.data.otp-relay-live\.json}' | grep -E '"refresh":|"timepicker"|"refresh_intervals"'
-```
-
----
-
-## Live observability checks
-
-```bash
-sudo k3s kubectl get pods -n observability -o wide
-sudo k3s kubectl get svc -n observability
-sudo k3s kubectl get ingressroute -n observability
-sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability
-sudo k3s kubectl get servicemonitor -n observability
-```
-
-Expected:
-
-* Grafana pod is Running/Ready.
-* Prometheus pod is Running/Ready.
-* Loki/Alloy components are Running/Ready when deployed.
-* Grafana IngressRoute exists when Grafana browser access is enabled.
-* `otp-relay-live-dashboard` exists.
-* ServiceMonitor resources exist for `otp-relay` and `otp-monitor`.
-
----
-
-## Grafana logs
-
-```bash
-sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana --tail=100
-sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana-sc-dashboard --tail=100
-```
-
-Use these logs when a dashboard ConfigMap has been applied but the dashboard does not appear or update in Grafana.
-
----
-
-## Dashboard metrics
-
-The OTP Relay live dashboard depends on these metrics:
-
-| Metric                                           | Meaning                                                  |
-| ------------------------------------------------ | -------------------------------------------------------- |
-| `up{job="otp-relay"}`                            | Portal scrape status                                     |
-| `up{job="otp-monitor"}`                          | Monitor scrape status                                    |
-| `otp_iphone_present`                             | iPhone presence signal from monitor                      |
-| `otp_monitor_arp_last_success_timestamp_seconds` | Timestamp of the monitor pod's last successful ARP probe |
-| `otp_queue_depth`                                | Number of users waiting behind the active OTP user       |
-| `otp_active_user`                                | Whether a user currently holds the active OTP slot       |
-| `otp_delivered_total`                            | Delivered OTP counter                                    |
-| `otp_claims_total`                               | Claim counter                                            |
-| `otp_iphone_absence_events_total`                | iPhone absence event counter                             |
-
----
-
-## Replica-aware PromQL guidance
-
-Dashboard queries must be safe when more than one portal or monitor pod exists.
-
-For counters, prefer aggregate increase expressions instead of reading a single series.
-
-Examples:
-
-```promql
-sum(increase(otp_delivered_total[$__range]))
-```
-
-```promql
-sum(increase(otp_claims_total[$__range]))
-```
-
-For status or current-state gauges, use an aggregate that matches the panel meaning.
-
-Examples:
-
-```promql
-max(up{job="otp-relay"})
-```
-
-```promql
-max(up{job="otp-monitor"})
-```
-
-```promql
-max(otp_queue_depth)
-```
-
-```promql
-max(otp_active_user)
-```
-
-```promql
-max(otp_iphone_present)
-```
-
-For node count, use a cluster-level expression rather than a pod-local metric.
-
-Example:
-
-```promql
-count(kube_node_info)
-```
-
-For Last ARP age, calculate the age from the latest valid timestamp:
-
-```promql
-clamp_min(time() - max(otp_monitor_arp_last_success_timestamp_seconds > 0), 0)
-```
-
----
-
-## Prometheus query checks
-
-Port-forward Prometheus only when direct Prometheus debugging is needed:
-
-```bash
-sudo k3s kubectl port-forward svc/kube-prometheus-stack-prometheus 9090:9090 -n observability
-```
-
-Query from another shell:
-
-```bash
-curl -s 'http://127.0.0.1:9090/api/v1/query?query=max(up{job="otp-relay"})'
-curl -s 'http://127.0.0.1:9090/api/v1/query?query=max(up{job="otp-monitor"})'
-curl -s 'http://127.0.0.1:9090/api/v1/query?query=max(otp_queue_depth)'
-curl -s 'http://127.0.0.1:9090/api/v1/query?query=max(otp_active_user)'
-curl -s 'http://127.0.0.1:9090/api/v1/query?query=max(otp_iphone_present)'
-curl -s 'http://127.0.0.1:9090/api/v1/query?query=clamp_min(time()%20-%20max(otp_monitor_arp_last_success_timestamp_seconds%20%3E%200),%200)'
-```
-
-Expected behavior:
-
-* Portal and monitor `up` queries return `1`.
-* `otp_queue_depth` shows users waiting behind the active OTP user.
-* `otp_active_user` shows whether a user currently holds the OTP slot.
-* `otp_iphone_present` reflects monitor phone presence.
-* Last ARP is based on `otp_monitor_arp_last_success_timestamp_seconds`, not simply whether the fake iPhone VM process is running.
-
----
-
-## Dashboard behavior notes
-
-### Queue vs active user
-
-If only one user has claimed the OTP slot, the expected dashboard state can be:
+A full release bundle may look like:
 
 ```text
-Queue:       0
-Active user: IN USE
+otp-relay-k8s-<namespace>-<timestamp>-<gitsha>/
+├── PROD-HANDOFF.md
+├── manifests/
+├── observability/
+├── images/
+└── metadata/
+    ├── release.env
+    ├── secret-handoff.txt
+    ├── file-index.txt
+    └── SHA256SUMS
 ```
 
-The queue tile represents users waiting behind the currently active OTP user. It does not count the active user as waiting.
+Exact contents depend on the selected artifact mode and the files present in the repository.
 
-### Delivered today
+## Artifact modes
 
-The delivered counter should be queried with a replica-aware counter expression.
+The historical variable `DEPLOY_MODE` is an artifact selector only.
 
-Recommended pattern:
+| Mode | Observability behavior |
+|---|---|
+| `full` | May package observability files and metadata |
+| `app` | May package runtime manifests and app artifacts; observability packaging depends on staged source files |
+| `monitor` | May package monitor artifacts; observability packaging depends on staged source files |
+| `none` | Metadata-only validation; runtime observability files may be absent |
 
-```promql
-sum(increase(otp_delivered_total[$__range]))
-```
+No mode deploys observability.
 
-Do not depend on one pod's counter series when the portal may run with multiple replicas.
+## Build examples
 
-### Last ARP
-
-`Last ARP` is the age of the monitor pod's last successful ARP probe:
-
-```promql
-clamp_min(time() - max(otp_monitor_arp_last_success_timestamp_seconds > 0), 0)
-```
-
-If a fake iPhone VM says `phone up` but Last ARP is stale, check:
-
-* monitor pod connectivity
-* `PHONE_IP`
-* `PHONE_INTERFACE`
-* host networking
-* exported ARP timestamp metric
-* monitor logs
-
-Do not fix Last ARP by making the dashboard depend on the fake VM process state. The dashboard should reflect the monitor pod's actual observed phone reachability.
-
-### Dashboard refresh
-
-The provisioned dashboard should include:
-
-```json
-"refresh": "15s"
-```
-
-and:
-
-```json
-"timepicker": {
-  "refresh_intervals": [
-    "5s",
-    "10s",
-    "15s"
-  ]
-}
-```
-
-If the dashboard does not update automatically, first verify the live ConfigMap contains both fields.
-
----
-
-## Troubleshooting
-
-### Grafana URL does not load
-
-Expected URL:
-
-```text
-https://grafana.init-db.lan
-```
-
-Check IngressRoute and service:
+Full bundle:
 
 ```bash
-sudo k3s kubectl get ingressroute -n observability
-sudo k3s kubectl get svc -n observability | grep grafana
-sudo k3s kubectl get pods -n observability -o wide | grep grafana
+bash setup.sh \
+  --mode full \
+  --skip-repo-sync 1 \
+  --git-clean 0 \
+  --noninteractive \
+  --dist-dir dist
 ```
 
-Check DNS resolution from the client machine:
+Metadata-only smoke test:
 
 ```bash
-nslookup grafana.init-db.lan
+bash setup.sh \
+  --mode none \
+  --skip-repo-sync 1 \
+  --git-clean 0 \
+  --noninteractive \
+  --dist-dir dist
 ```
 
-Check Grafana pod logs:
+## What a successful build means
 
-```bash
-sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana --tail=100
-```
+A successful build means observability files, if present and selected, were packaged into the release bundle.
 
-### Panels show as mini graphs instead of Stat tiles
+It does not mean:
 
-Cause: the v2-to-classic conversion did not preserve `vizConfig.group`, so Stat panels were converted as time-series panels.
+- Grafana is installed
+- Prometheus is installed
+- Loki is installed
+- Alloy is installed
+- dashboards were imported into a live Grafana instance
+- Prometheus targets are healthy
+- Loki ingestion is working
+- Grafana is reachable
+- production observability is healthy
 
-Fix:
+Those checks are production-side responsibilities.
 
-```bash
-python3 scripts/build_grafana_dashboard_configmap.py
-sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-```
+## Production-side responsibility
 
-Then verify the generated dashboard panels use `"type": "stat"`.
+The approved production procedure is responsible for:
 
-### Auto-refresh is missing from the UI
+- unpacking the release bundle
+- reviewing packaged observability files
+- installing or upgrading observability components if required
+- applying observability manifests if required
+- importing or applying Grafana dashboards if required
+- validating Prometheus targets
+- validating ServiceMonitors
+- validating Grafana access
+- validating Loki and Alloy health
+- validating OTP Relay dashboards
 
-Cause: the generated dashboard has `"refresh": "15s"` but is missing `timepicker.refresh_intervals`.
+These steps are intentionally outside the dev/build path.
 
-Fix:
+## Legacy behavior
 
-```bash
-python3 scripts/build_grafana_dashboard_configmap.py
-grep -n '"refresh"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"timepicker"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-grep -n '"refresh_intervals"' k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-```
+Older versions of this repository could install or validate observability through Helm or live Kubernetes commands.
 
-### Tile text is cut off
+That behavior is disabled in this branch.
 
-Cause: Stat panel grid size is too small or the value text size is too large.
+Any script in this branch that runs Helm, applies observability manifests, or queries live observability resources from the dev/build path is wrong.
 
-Fix:
+## Safety rule
 
-1. Edit:
-
-   ```text
-   k8s/observability/dashboards/otp-relay-live.json
-   ```
-
-2. Adjust the relevant dashboard layout and Stat text options.
-
-3. Regenerate:
-
-   ```bash
-   python3 scripts/build_grafana_dashboard_configmap.py
-   ```
-
-4. Apply and restart Grafana:
-
-   ```bash
-   sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-   sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-   sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-   ```
-
-### Dashboard changes do not appear
-
-Check the live ConfigMap:
-
-```bash
-sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability \
-  -o jsonpath='{.data.otp-relay-live\.json}' | head -c 300
-echo
-```
-
-Reapply and restart Grafana:
-
-```bash
-sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-```
-
-Check sidecar logs:
-
-```bash
-sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana-sc-dashboard --tail=100
-```
-
-### Dashboard cannot be saved from the UI
-
-This is expected for a provisioned dashboard.
-
-Update the source file instead:
-
-```text
-k8s/observability/dashboards/otp-relay-live.json
-```
-
-Then regenerate:
-
-```bash
-python3 scripts/build_grafana_dashboard_configmap.py
-```
-
-### Prometheus shows no data for portal or monitor
-
-Check ServiceMonitor resources:
-
-```bash
-sudo k3s kubectl get servicemonitor -n observability
-sudo k3s kubectl describe servicemonitor otp-relay -n observability
-sudo k3s kubectl describe servicemonitor otp-monitor -n observability
-```
-
-Check portal and monitor services/pods:
-
-```bash
-sudo k3s kubectl get pods -n otp-relay -o wide
-sudo k3s kubectl get svc -n otp-relay
-```
-
-Check whether `/metrics` is reachable from inside the cluster if needed.
-
-### Intermittent Grafana "No data" on Stat panels
-
-If Prometheus instant queries return valid values but Grafana Stat panels intermittently show "No data", review the panel query mode.
-
-For current-state tiles, instant queries may be more appropriate than range queries. Confirm this against the dashboard source before changing the generated ConfigMap.
-
----
-
-## Commit checklist
-
-When changing the Grafana dashboard, commit:
-
-```text
-k8s/observability/dashboards/otp-relay-live.json
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
-
-Also commit the generator only when the generator itself changed:
-
-```text
-scripts/build_grafana_dashboard_configmap.py
-```
-
-Do not commit the old generator name:
-
-```text
-scripts/generate_grafana_dashboard_configmap.py
-```
-
-unless that file is intentionally restored in the repo.
-
----
-
-## Quick validation checklist
-
-After observability changes are deployed:
-
-* [ ] `https://grafana.init-db.lan` loads.
-* [ ] Grafana pod is Running/Ready.
-* [ ] Prometheus pod is Running/Ready.
-* [ ] `otp-relay-live-dashboard` ConfigMap exists.
-* [ ] Dashboard appears in Grafana.
-* [ ] Dashboard refresh is set to 15 seconds.
-* [ ] Portal panel shows correct state.
-* [ ] Monitor panel shows correct state.
-* [ ] Prometheus panel shows correct state.
-* [ ] Queue panel returns current queue depth.
-* [ ] Active user panel returns current active state.
-* [ ] Delivered today uses a replica-aware counter query.
-* [ ] iPhone panel reflects monitor phone presence.
-* [ ] Last ARP shows a sensible recent value when the phone is reachable.
-* [ ] Dashboard survives Grafana pod restart.
+If this branch runs Helm, runs `kubectl apply`, contacts Grafana, queries Prometheus, checks Loki pods, or validates a live observability stack, it is a bug.
