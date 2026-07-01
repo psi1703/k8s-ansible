@@ -104,7 +104,7 @@ _env_file_syntax_ok() {
 
 _env_is_default_placeholder() {
   case "${1:-}" in
-    ""|"CHANGE_ME_TLS_HOST"|"otp-relay.local"|"CHANGE_ME_VM_PASSWORD") return 0 ;;
+    ""|"CHANGE_ME_TLS_HOST"|"CHANGE_ME_NFS_SERVER"|"CHANGE_ME_NFS_PATH"|"CHANGE_ME_METALLB_IP_RANGE"|"otp-relay.local"|"CHANGE_ME_VM_PASSWORD") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -189,45 +189,37 @@ _env_clear_recoverable_placeholders() {
   if _env_is_default_placeholder "${TLS_HOST:-}"; then
     unset TLS_HOST
   fi
+
+  if _env_is_default_placeholder "${NFS_SERVER:-}"; then
+    unset NFS_SERVER
+  fi
+
+  if _env_is_default_placeholder "${NFS_PATH:-}"; then
+    unset NFS_PATH
+  fi
+
+  if _env_is_default_placeholder "${METALLB_IP_RANGE:-}"; then
+    unset METALLB_IP_RANGE
+  fi
 }
 
 _env_existing_file_is_recoverable_first_run() {
-  # Only reject incomplete .env files when the selected artifact mode actually
-  # requires the missing values. Metadata-only mode must not be blocked by
-  # production runtime placeholders.
+  # Bundle builder .env files are allowed to contain production-side
+  # placeholders. The production import/merge procedure is responsible for
+  # comparing .env.bundle against the existing production .env and prompting
+  # before critical changes.
+  #
+  # Only an unsupported artifact selector is treated as recoverable bad state.
 
   case "${DEPLOY_MODE:-full}" in
-    full|app|monitor|none) ;;
+    full|app|monitor|none)
+      return 1
+      ;;
     *)
       warn "saved .env has unsupported DEPLOY_MODE=${DEPLOY_MODE:-}"
       return 0
       ;;
   esac
-
-  if ! _env_mode_requires_runtime_manifests; then
-    return 1
-  fi
-
-  if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
-    if _env_is_default_placeholder "${TLS_HOST:-}"; then
-      warn "saved .env has no usable ingress/TLS hostname"
-      return 0
-    fi
-  fi
-
-  if [ "${NFS_ENABLED:-0}" = "1" ]; then
-    if [ -z "${NFS_SERVER:-}" ] || [ -z "${NFS_PATH:-}" ]; then
-      warn "saved .env is missing NFS_SERVER or NFS_PATH while NFS_ENABLED=1"
-      return 0
-    fi
-  fi
-
-  if [ "${INSTALL_METALLB:-0}" = "1" ] && [ -z "${METALLB_IP_RANGE:-}" ]; then
-    warn "saved .env is missing METALLB_IP_RANGE while INSTALL_METALLB=1"
-    return 0
-  fi
-
-  return 1
 }
 
 _write_env_file() {
@@ -295,8 +287,8 @@ PORTAL_URL=$(_env_quote "${PORTAL_URL:-}")
 PVC_STORAGE_CLASS=$(_env_quote "${PVC_STORAGE_CLASS:-otp-relay-devprod-nfs}")
 PVC_SIZE=$(_env_quote "${PVC_SIZE:-1Gi}")
 NFS_ENABLED=$(_env_quote "${NFS_ENABLED:-1}")
-NFS_SERVER=$(_env_quote "${NFS_SERVER:-}")
-NFS_PATH=$(_env_quote "${NFS_PATH:-}")
+NFS_SERVER=$(_env_quote "${NFS_SERVER:-CHANGE_ME_NFS_SERVER}")
+NFS_PATH=$(_env_quote "${NFS_PATH:-CHANGE_ME_NFS_PATH}")
 NFS_STORAGE_CLASS=$(_env_quote "${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs}")
 NFS_PV_NAME=$(_env_quote "${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}")
 NFS_MOUNT_OPTIONS=$(_env_quote "${NFS_MOUNT_OPTIONS:-nfsvers=4.1}")
@@ -312,7 +304,7 @@ REDIS_NODE_SELECTOR_VALUE=$(_env_quote "${REDIS_NODE_SELECTOR_VALUE:-true}")
 REQUIRE_METALLB=$(_env_quote "${REQUIRE_METALLB:-0}")
 INSTALL_METALLB=$(_env_quote "${INSTALL_METALLB:-0}")
 METALLB_VERSION=$(_env_quote "${METALLB_VERSION:-v0.15.3}")
-METALLB_IP_RANGE=$(_env_quote "${METALLB_IP_RANGE:-}")
+METALLB_IP_RANGE=$(_env_quote "${METALLB_IP_RANGE:-CHANGE_ME_METALLB_IP_RANGE}")
 METALLB_POOL_NAME=$(_env_quote "${METALLB_POOL_NAME:-otp-relay-pool}")
 
 PHONE_IP=$(_env_quote "${PHONE_IP:-}")
@@ -420,7 +412,8 @@ source_env_file() {
 
 create_env_interactive() {
   log "creating first-run bundle-builder environment file at $ENV_FILE"
-  log "interactive setup asks only for release/runtime values required by the selected artifact mode"
+  log "interactive setup asks only for the release artifact selector"
+  log "production-specific runtime values may remain as placeholders and are finalized by the production import/merge procedure"
 
   _env_set_default REPO_URL ""
   _env_set_default REPO_REF "k8s-ansible-DEVtoPROD"
@@ -434,10 +427,13 @@ create_env_interactive() {
   _env_set_default TLS_HOST "CHANGE_ME_TLS_HOST"
 
   _env_set_default NFS_ENABLED "1"
+  _env_set_default NFS_SERVER "CHANGE_ME_NFS_SERVER"
+  _env_set_default NFS_PATH "CHANGE_ME_NFS_PATH"
   _env_set_default PVC_STORAGE_CLASS "otp-relay-devprod-nfs"
   _env_set_default NFS_STORAGE_CLASS "otp-relay-devprod-nfs"
 
   _env_set_default INSTALL_METALLB "0"
+  _env_set_default METALLB_IP_RANGE "CHANGE_ME_METALLB_IP_RANGE"
   _env_set_default REDIS_ENABLED "1"
   _env_set_default REDIS_REQUIRED "1"
   _env_set_default REDIS_URL "redis://otp-redis-haproxy:6379/0"
@@ -452,6 +448,11 @@ create_env_interactive() {
   _env_set_default REDIS_NODE_SELECTOR_KEY "otp-relay/redis-node"
   _env_set_default REDIS_NODE_SELECTOR_VALUE "true"
 
+  _env_set_default PHONE_IP ""
+  if [ -z "${PHONE_INTERFACE:-}" ]; then
+    PHONE_INTERFACE="$(_env_default_interface)"
+    export PHONE_INTERFACE
+  fi
   _env_set_default PHONE_PING_INTERVAL "10"
   _env_set_default PHONE_OFFLINE_THRESHOLD "30"
 
@@ -461,64 +462,6 @@ create_env_interactive() {
   _env_set_default GRAFANA_HOST "grafana-devprod.init-db.lan"
 
   _env_prompt DEPLOY_MODE "Artifact selector: full, app, monitor, or none" 1 0
-  normalize_loaded_env
-
-  if _env_mode_requires_runtime_manifests; then
-    _env_prompt NAMESPACE "Kubernetes namespace to render into manifests" 1 0
-    _env_prompt SERVICE_TYPE "Service type to render: ClusterIP, NodePort, or LoadBalancer" 1 0
-    _env_prompt INGRESS_ENABLED "Render ingress? 1=yes, 0=no" 1 0
-    _env_prompt TLS_ENABLED "Render TLS reference? 1=yes, 0=no" 1 0
-
-    if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
-      _env_prompt TLS_HOST "Ingress/TLS hostname" 1 0
-    fi
-
-    _env_prompt NFS_ENABLED "Render external NFS-backed PVCs? 1=yes, 0=no" 1 0
-    if [ "${NFS_ENABLED:-0}" = "1" ]; then
-      _env_prompt NFS_SERVER "External NFS server IP/DNS to render" 1 0
-      _env_prompt NFS_PATH "External NFS export path to render" 1 0
-      PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs}}"
-      REDIS_NFS_SERVER="${REDIS_NFS_SERVER:-$NFS_SERVER}"
-      REDIS_NFS_BASE_PATH="${REDIS_NFS_BASE_PATH:-$NFS_PATH/redis}"
-      export PVC_STORAGE_CLASS REDIS_NFS_SERVER REDIS_NFS_BASE_PATH
-    fi
-
-    _env_prompt INSTALL_METALLB "Record MetalLB as planned in bundle metadata? 1=yes, 0=no" 1 0
-    if [ "${INSTALL_METALLB:-0}" = "1" ]; then
-      _env_prompt METALLB_IP_RANGE "MetalLB IP range to record" 1 0
-    fi
-
-    _env_prompt REDIS_ENABLED "Render Redis manifests? 1=yes, 0=no" 1 0
-    if [ "${REDIS_ENABLED:-0}" = "1" ]; then
-      _env_prompt REDIS_URL "Redis URL to render" 1 0
-      _env_prompt REDIS_REQUIRED "Require Redis for readiness? 1=yes, 0=no" 1 0
-    fi
-
-    _env_prompt REPLICA_COUNT "App replica count to render" 1 0
-  fi
-
-  if _env_mode_requires_monitor; then
-    _env_prompt PHONE_IP "Monitored phone IP to render into ConfigMap" 0 0
-
-    if [ -z "${PHONE_INTERFACE:-}" ]; then
-      PHONE_INTERFACE="$(_env_default_interface)"
-      export PHONE_INTERFACE
-    fi
-
-    _env_prompt PHONE_INTERFACE "Monitor network interface value to render" 0 0
-    _env_prompt PHONE_PING_INTERVAL "Phone ping interval seconds" 1 0
-    _env_prompt PHONE_OFFLINE_THRESHOLD "Phone offline threshold seconds" 1 0
-    _env_prompt TELEGRAM_BOT_TOKEN "Telegram bot token (optional)" 0 1
-    _env_prompt TELEGRAM_CHAT_ID "Telegram chat ID (optional)" 0 0
-  fi
-
-  if _env_mode_requires_app; then
-    if [ -z "${SMS_SECRET_TOKEN:-}" ]; then
-      SMS_SECRET_TOKEN="$(make_secret)"
-      export SMS_SECRET_TOKEN
-    fi
-    _env_prompt SMS_SECRET_TOKEN "SMS webhook secret token" 0 1
-  fi
 
   normalize_loaded_env
   _write_env_file "$ENV_FILE"
@@ -640,20 +583,21 @@ validate_env_required() {
   esac
 
   if [ "${INGRESS_ENABLED:-0}" = "1" ] || [ "${TLS_ENABLED:-0}" = "1" ]; then
-    [ -n "${TLS_HOST:-}" ] || fatal "TLS_HOST is required in $ENV_FILE when ingress or TLS is enabled"
-
-    if [ "${TLS_HOST:-}" = "CHANGE_ME_TLS_HOST" ] || [ "${TLS_HOST:-}" = "otp-relay.local" ]; then
-      fatal "TLS_HOST must be changed from the default when ingress or TLS is enabled"
+    if _env_is_default_placeholder "${TLS_HOST:-}"; then
+      warn "TLS_HOST is not finalized; bundle will carry placeholder value for production import/merge"
     fi
   fi
 
   if [ "${NFS_ENABLED:-0}" = "1" ]; then
-    [ -n "${NFS_SERVER:-}" ] || fatal "NFS_SERVER is required in $ENV_FILE when NFS_ENABLED=1"
-    [ -n "${NFS_PATH:-}" ] || fatal "NFS_PATH is required in $ENV_FILE when NFS_ENABLED=1"
+    if _env_is_default_placeholder "${NFS_SERVER:-}" || _env_is_default_placeholder "${NFS_PATH:-}"; then
+      warn "NFS_SERVER or NFS_PATH is not finalized; bundle will carry placeholder values for production import/merge"
+    fi
   fi
 
   if [ "${INSTALL_METALLB:-0}" = "1" ]; then
-    [ -n "${METALLB_IP_RANGE:-}" ] || fatal "METALLB_IP_RANGE is required in $ENV_FILE when INSTALL_METALLB=1"
+    if _env_is_default_placeholder "${METALLB_IP_RANGE:-}"; then
+      warn "METALLB_IP_RANGE is not finalized; bundle metadata will carry a placeholder value for production import/merge"
+    fi
   fi
 
   if _env_mode_requires_monitor; then
@@ -871,8 +815,8 @@ normalize_loaded_env() {
   PVC_STORAGE_CLASS="${PVC_STORAGE_CLASS:-otp-relay-devprod-nfs}"
   PVC_SIZE="${PVC_SIZE:-1Gi}"
   NFS_ENABLED="${NFS_ENABLED:-1}"
-  NFS_SERVER="${NFS_SERVER:-}"
-  NFS_PATH="${NFS_PATH:-}"
+  NFS_SERVER="${NFS_SERVER:-CHANGE_ME_NFS_SERVER}"
+  NFS_PATH="${NFS_PATH:-CHANGE_ME_NFS_PATH}"
   NFS_STORAGE_CLASS="${NFS_STORAGE_CLASS:-otp-relay-devprod-nfs}"
   NFS_PV_NAME="${NFS_PV_NAME:-otp-relay-data-devprod-nfs-pv}"
   NFS_MOUNT_OPTIONS="${NFS_MOUNT_OPTIONS:-nfsvers=4.1}"
@@ -889,7 +833,7 @@ normalize_loaded_env() {
   INSTALL_METALLB="${INSTALL_METALLB:-0}"
   METALLB_VERSION="${METALLB_VERSION:-v0.15.3}"
   METALLB_MANIFEST_URL="${METALLB_MANIFEST_URL:-https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml}"
-  METALLB_IP_RANGE="${METALLB_IP_RANGE:-}"
+  METALLB_IP_RANGE="${METALLB_IP_RANGE:-CHANGE_ME_METALLB_IP_RANGE}"
   METALLB_POOL_NAME="${METALLB_POOL_NAME:-otp-relay-pool}"
 
   SERVER_HOSTNAME="${SERVER_HOSTNAME:-$(hostname -f 2>/dev/null || hostname)}"
