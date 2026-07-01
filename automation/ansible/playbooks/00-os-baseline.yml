@@ -1,6 +1,25 @@
 ---
-- name: Prepare all Debian or Ubuntu headless VMs
+# Bundle-only release policy:
+#
+# This repository no longer prepares, patches, installs, or mutates Kubernetes
+# hosts during the DEVtoPROD release-build path.
+#
+# The old OS-baseline playbook used to prepare Debian/Ubuntu hosts for live
+# cluster installation. That behavior is intentionally disabled.
+#
+# Production servers must receive only the finished sealed release bundle.
+# Host provisioning, OS patching, package installation, K3s installation,
+# NFS setup, and live-cluster mutation are outside this bundle builder.
+
+- name: Disabled legacy OS baseline host preparation
   hosts: all
-  become: true
-  roles:
-    - common
+  gather_facts: false
+
+  tasks:
+    - name: Refuse legacy OS baseline execution
+      ansible.builtin.fail:
+        msg: >-
+          This playbook is disabled by the bundle-only DEVtoPROD release policy.
+          Do not prepare or mutate hosts from this repository. Build the sealed
+          production release bundle on the dev/build host instead, then hand off
+          only the finished bundle to production.
