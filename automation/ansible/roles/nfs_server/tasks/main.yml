@@ -1,61 +1,19 @@
 ---
-- name: Resolve NFS export settings
-  ansible.builtin.set_fact:
-    resolved_nfs_export_path: "{{ nfs_export_path | default(lookup('env', 'NFS_PATH'), true) }}"
-    resolved_nfs_allowed_cidr: "{{ nfs_allowed_cidr | default(lookup('env', 'NFS_ALLOWED_CIDR'), true) | default('*', true) }}"
+# Bundle-only release policy:
+#
+# This role used to install and configure an NFS server for the old direct
+# deployment/provisioning flow. That behavior is intentionally disabled.
+#
+# The DEVtoPROD path now builds a sealed production release bundle only.
+# It must not install nfs-kernel-server, create export directories, edit
+# /etc/exports, reload exports, enable services, restart services, or mutate
+# production/storage infrastructure.
 
-- name: Require NFS export path
-  ansible.builtin.assert:
-    that:
-      - resolved_nfs_export_path | length > 0
-    fail_msg: "NFS export path is required. Set nfs_export_path or NFS_PATH."
-
-- name: Show NFS server configuration target
-  ansible.builtin.debug:
-    msg:
-      - "NFS export path: {{ resolved_nfs_export_path }}"
-      - "NFS allowed CIDR/client: {{ resolved_nfs_allowed_cidr }}"
-
-- name: Install NFS server packages
-  ansible.builtin.apt:
-    name: nfs-kernel-server
-    state: present
-    update_cache: true
-
-- name: Create OTP Relay NFS export directory
-  ansible.builtin.file:
-    path: "{{ resolved_nfs_export_path }}"
-    state: directory
-    owner: "999"
-    group: "999"
-    mode: "0770"
-
-- name: Configure OTP Relay NFS export
-  ansible.builtin.lineinfile:
-    path: /etc/exports
-    regexp: "^{{ resolved_nfs_export_path | regex_escape }}\\s+"
-    line: "{{ resolved_nfs_export_path }} {{ resolved_nfs_allowed_cidr }}(rw,sync,no_subtree_check,no_root_squash)"
-    create: true
-    mode: "0644"
-  notify: Reload NFS exports
-
-- name: Ensure NFS server is enabled and running
-  ansible.builtin.service:
-    name: nfs-kernel-server
-    state: started
-    enabled: true
-
-- name: Reload NFS exports immediately
-  ansible.builtin.command:
-    cmd: exportfs -ra
-  changed_when: false
-
-- name: Show active NFS exports
-  ansible.builtin.command:
-    cmd: exportfs -v
-  register: nfs_exports
-  changed_when: false
-
-- name: Print active NFS exports
-  ansible.builtin.debug:
-    var: nfs_exports.stdout_lines
+- name: Refuse legacy NFS server role execution
+  ansible.builtin.fail:
+    msg: >-
+      The automation/ansible/roles/nfs_server role is disabled by the
+      bundle-only DEVtoPROD release policy. Do not install, configure, export,
+      or restart NFS services from this repository. Build the sealed production
+      release bundle on the dev/build host instead, then hand off only the
+      finished bundle to production.
