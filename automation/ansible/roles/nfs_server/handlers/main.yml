@@ -1,5 +1,17 @@
 ---
-- name: Reload NFS exports
-  ansible.builtin.command:
-    cmd: exportfs -ra
-  changed_when: false
+# Bundle-only release policy:
+#
+# The old NFS server role used this handler to reload exported filesystems with
+# exportfs. That behavior is intentionally disabled.
+#
+# The DEVtoPROD release-build path must not mutate storage hosts, reload NFS
+# exports, restart services, or touch production infrastructure.
+
+- name: reload nfs exports
+  ansible.builtin.fail:
+    msg: >-
+      The legacy NFS export reload handler is disabled by the bundle-only
+      DEVtoPROD release policy. Do not run exportfs, reload NFS exports, restart
+      NFS services, or mutate storage hosts from this repository. Build the
+      sealed production release bundle on the dev/build host instead, then hand
+      off only the finished bundle to production.
