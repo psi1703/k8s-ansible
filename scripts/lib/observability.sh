@@ -37,6 +37,9 @@ OBSERVABILITY_ALLOY_CHART_VERSION="${OBSERVABILITY_ALLOY_CHART_VERSION:-1.8.1}"
 OBSERVABILITY_HELM_TIMEOUT="${OBSERVABILITY_HELM_TIMEOUT:-15m}"
 HELM_KUBECONFIG="${HELM_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 GRAFANA_HOST="${GRAFANA_HOST:-grafana-test.lan}"
+GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
+GRAFANA_ADMIN_SECRET_NAME="${GRAFANA_ADMIN_SECRET_NAME:-${OBSERVABILITY_STACK_RELEASE}-grafana}"
 
 ensure_helm_kubeconfig() {
   if [ -f "$HELM_KUBECONFIG" ]; then
@@ -220,8 +223,30 @@ _update_helm_repos() {
   helm_k3s repo update || fatal_observability "Helm repo update failed"
 }
 
+ensure_grafana_admin_secret_if_configured() {
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
+    log "GRAFANA_ADMIN_PASSWORD is not set; Helm will keep or generate the Grafana admin password"
+    return 0
+  fi
+
+  [ -n "${GRAFANA_ADMIN_USER:-}" ] || fatal "GRAFANA_ADMIN_USER is required when GRAFANA_ADMIN_PASSWORD is set"
+  [ -n "${GRAFANA_ADMIN_SECRET_NAME:-}" ] || fatal "GRAFANA_ADMIN_SECRET_NAME is required when GRAFANA_ADMIN_PASSWORD is set"
+
+  ensure_observability_namespace
+
+  log "ensuring Grafana admin credential secret exists: ${OBSERVABILITY_NAMESPACE}/${GRAFANA_ADMIN_SECRET_NAME}"
+  k3s kubectl create secret generic "$GRAFANA_ADMIN_SECRET_NAME" \
+    -n "$OBSERVABILITY_NAMESPACE" \
+    --from-literal=admin-user="$GRAFANA_ADMIN_USER" \
+    --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD" \
+    --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null
+
+  log "Grafana admin credential secret is configured from environment"
+}
+
 install_kube_prometheus_stack() {
   local source_dir values_file
+  local grafana_secret_args=()
 
   source_dir="$(_observability_source_dir)"
   [ -n "$source_dir" ] || {
@@ -242,6 +267,16 @@ install_kube_prometheus_stack() {
   [ -f "$values_file" ] || fatal "OBSERVABILITY_INSTALL_STACK=1 but missing Helm values file: $values_file"
 
   ensure_observability_namespace
+  ensure_grafana_admin_secret_if_configured
+
+  if [ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
+    grafana_secret_args=(
+      --set "grafana.admin.existingSecret=${GRAFANA_ADMIN_SECRET_NAME}"
+      --set "grafana.admin.userKey=admin-user"
+      --set "grafana.admin.passwordKey=admin-password"
+    )
+  fi
+
   ensure_helm_available
   _add_or_update_helm_repo "$OBSERVABILITY_STACK_REPO_NAME" "$OBSERVABILITY_STACK_REPO_URL"
   _update_helm_repos
@@ -256,6 +291,7 @@ install_kube_prometheus_stack() {
     --create-namespace \
     --version "$OBSERVABILITY_STACK_CHART_VERSION" \
     -f "$values_file" \
+    "${grafana_secret_args[@]}" \
     --wait \
     --timeout "$OBSERVABILITY_HELM_TIMEOUT"; then
     fatal_observability "kube-prometheus-stack Helm install/upgrade failed"
