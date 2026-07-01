@@ -30,6 +30,20 @@
     group: "999"
     mode: "0770"
 
+- name: Create OTP Relay app and Redis NFS data directories
+  ansible.builtin.file:
+    path: "{{ resolved_nfs_export_path }}/{{ item }}"
+    state: directory
+    owner: "999"
+    group: "999"
+    mode: "0770"
+  loop:
+    - app
+    - redis
+    - redis/otp-redis-0
+    - redis/otp-redis-1
+    - redis/otp-redis-2
+
 - name: Configure OTP Relay NFS export
   ansible.builtin.lineinfile:
     path: /etc/exports
