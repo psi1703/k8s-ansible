@@ -332,6 +332,55 @@ if (manifest_dir / "service.yaml").exists():
     write("service.yaml", text)
 
 
+
+# Redis static NFS PVs. These are required when Redis uses the otp-redis-nfs storage class.
+def nfs_child_path(base: str, child: str) -> str:
+    base = base.rstrip("/")
+    child = child.lstrip("/")
+    return f"{base}/{child}"
+
+
+if (manifest_dir / "redis-nfs-pv.yaml").exists():
+    redis_storage_class = os.environ.get("REDIS_STORAGE_CLASS", "").strip()
+    redis_uses_static_nfs = os.environ.get("NFS_ENABLED") == "1" and redis_storage_class == "otp-redis-nfs"
+
+    if redis_uses_static_nfs:
+        nfs_server = os.environ.get("NFS_SERVER", "").strip()
+        nfs_path = os.environ.get("NFS_PATH", "").strip()
+        redis_size = os.environ.get("REDIS_SIZE", "1Gi").strip() or "1Gi"
+
+        if not nfs_server:
+            raise SystemExit("NFS_SERVER is required when REDIS_STORAGE_CLASS=otp-redis-nfs")
+        if not nfs_path:
+            raise SystemExit("NFS_PATH is required when REDIS_STORAGE_CLASS=otp-redis-nfs")
+
+        text = read("redis-nfs-pv.yaml")
+        text = re.sub(r"(\n    storage: ).*", rf"\g<1>{redis_size}", text)
+        text = re.sub(r"(\n  storageClassName: ).*", rf"\g<1>{redis_storage_class}", text)
+        text = re.sub(r"(\n    namespace: )otp-relay", rf"\g<1>{namespace}", text)
+        text = re.sub(r"(\n    server: ).*", rf"\g<1>{nfs_server}", text)
+
+        opts = [x.strip() for x in os.environ.get("NFS_MOUNT_OPTIONS", "").split(",") if x.strip()]
+        mount_block = ""
+        if opts:
+            mount_block = "  mountOptions:\n" + "".join(f"    - {opt}\n" for opt in opts)
+        text = re.sub(r"\n  mountOptions:\n(?:    - .*\n)+", "\n" + mount_block, text)
+
+        redis_paths = {
+            "otp-redis-0": nfs_child_path(nfs_path, "redis/otp-redis-0"),
+            "otp-redis-1": nfs_child_path(nfs_path, "redis/otp-redis-1"),
+            "otp-redis-2": nfs_child_path(nfs_path, "redis/otp-redis-2"),
+        }
+        for pod_name, redis_path in redis_paths.items():
+            pattern = rf"(redis-pod: {re.escape(pod_name)}.*?\n  nfs:\n    server: .*?\n    path: ).*?(\n(?:---\n|\Z))"
+            text = re.sub(pattern, rf"\g<1>{redis_path}\g<2>", text, flags=re.DOTALL)
+
+        write("redis-nfs-pv.yaml", text)
+    else:
+        # Do not apply static Redis NFS PVs when Redis is intentionally using another storage class.
+        (manifest_dir / "redis-nfs-pv.yaml").unlink()
+
+
 # Redis HA manifests.
 redis_manifests = [
     "redis-service.yaml",
