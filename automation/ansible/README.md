@@ -1,26 +1,40 @@
-# OTP Relay headless automation
+# Disabled Legacy Ansible Automation
 
-This automation supports the SCH phase map without changing application behavior.
+This directory is intentionally retained only as a compatibility/safety boundary.
 
-## Current target design
+## Current DEVtoPROD contract
 
-The server/real host is the Kubernetes control-plane and Ansible runner. The provisioner creates only two worker VMs.
+The `k8s-ansible-DEVtoPROD` branch is now **bundle-only**.
 
-```text
-Server / real host:
-  - K3s control-plane
-  - Ansible runner
-  - Docker/image build host
-  - OTP Relay deployment orchestrator
-  - Repository path: /opt/k8s-ansible
+The dev/build side may only:
 
-Worker VM 1:
-  - K3s worker
+- prepare source files
+- render Kubernetes manifests into a staging directory
+- build/export local Docker image archives
+- package observability files and metadata
+- create a sealed production release tarball
+- create a checksum and handoff report
 
-Worker VM 2:
-  - K3s worker
+The dev/build side must not:
 
-External NFS server:
-  - Provides persistent storage for OTP Relay app data
-  - Not joined to Kubernetes
-  - Not provisioned or destroyed by this automation
+- install K3s
+- configure K3s control-plane nodes
+- join K3s worker nodes
+- label live Kubernetes nodes
+- inspect live Kubernetes storage
+- apply Kubernetes manifests
+- run Helm install/upgrade
+- import images into a live cluster
+- restart deployments
+- validate a live production cluster
+- provision VMs
+- install GitHub Actions runners
+
+The production server receives only the finished release bundle.
+
+## Correct entrypoint
+
+Use one of these from the repository root:
+
+```bash
+bash setup.sh
