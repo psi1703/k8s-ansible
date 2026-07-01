@@ -2,7 +2,7 @@
 
 **Repository:** [psi1703/k8s-ansible](https://github.com/psi1703/k8s-ansible)  
 **License:** MIT  
-**Status:** DEV/PROD K3s automation baseline refreshed on 2026-07-01 after NFS hostname, Redis placement, and Grafana environment-password updates
+**Status:** K3s automation baseline refreshed on 2026-07-01 after NFS hostname, Redis placement, and Grafana environment-password updates
 
 ---
 
