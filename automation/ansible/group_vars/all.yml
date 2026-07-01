@@ -1,12 +1,23 @@
 ---
-# Keep deployment-specific values in the repository root .env file.
-# The Ansible workflow runs the installer from INSTALL_DIR and passes the
-# matching .env file to the control-plane deployment role.
+# Bundle-only release policy:
+#
+# Runtime Ansible deployment is disabled in this branch.
+#
+# This file is retained only so legacy Ansible inventory/playbook references do
+# not break structurally. These values must not be used to install K3s, configure
+# hosts, apply manifests, run Helm, import images into a live cluster, validate
+# production, or mutate infrastructure.
+#
+# Build the sealed release bundle from the repository root instead:
+#
+#   bash setup.sh
+#
+# Production receives only the finished release bundle, checksum, and report.
 
 cluster_name: otp-relay-devprod
 
-k3s_disable_servicelb: true
-k3s_disable_traefik: false
+bundle_only_release: true
+legacy_ansible_runtime_disabled: true
 
 otp_namespace: "{{ lookup('env', 'NAMESPACE') | default('otp-relay', true) }}"
 otp_install_dir: "{{ lookup('env', 'INSTALL_DIR') | default('/opt/k8s-ansible-DEVtoPROD', true) }}"
