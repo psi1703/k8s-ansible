@@ -90,6 +90,16 @@ export "$name"
 fi
 }
 
+_env_default_redis_storage_class() {
+local nfs_enabled="${NFS_ENABLED:-1}"
+
+if [ "$nfs_enabled" = "1" ]; then
+  printf '%s' "otp-redis-nfs"
+else
+  printf '%s' "local-path"
+fi
+}
+
 _env_default_interface() {
 ip route show default 2>/dev/null | awk '{print $5; exit}'
 }
@@ -301,7 +311,7 @@ TELEGRAM_CHAT_ID=$(_env_quote "${TELEGRAM_CHAT_ID:-}")
 REDIS_ENABLED=$(_env_quote "${REDIS_ENABLED:-1}")
 REDIS_URL=$(_env_quote "${REDIS_URL:-redis://otp-redis-haproxy:6379/0}")
 REDIS_REQUIRED=$(_env_quote "${REDIS_REQUIRED:-1}")
-REDIS_STORAGE_CLASS=$(_env_quote "${REDIS_STORAGE_CLASS:-local-path}")
+REDIS_STORAGE_CLASS=$(_env_quote "${REDIS_STORAGE_CLASS:-$(_env_default_redis_storage_class)}")
 REDIS_SIZE=$(_env_quote "${REDIS_SIZE:-1Gi}")
 REDIS_SPREAD_RECREATE_PVCS=$(_env_quote "${REDIS_SPREAD_RECREATE_PVCS:-auto}")
 
@@ -410,6 +420,7 @@ _env_set_default INSTALL_METALLB "0"
 _env_set_default REDIS_ENABLED "1"
 _env_set_default REDIS_REQUIRED "1"
 _env_set_default REDIS_URL "redis://otp-redis-haproxy:6379/0"
+_env_set_default REDIS_STORAGE_CLASS "$(_env_default_redis_storage_class)"
 _env_set_default REPLICA_COUNT "2"
 
 _env_set_default APP_NODE_SELECTOR_KEY "otp-relay/app-node"
@@ -904,7 +915,7 @@ DOCKER_BIN="${DOCKER_BIN:-}"
 REDIS_ENABLED="${REDIS_ENABLED:-1}"
 REDIS_URL="${REDIS_URL:-redis://otp-redis-haproxy:6379/0}"
 REDIS_REQUIRED="${REDIS_REQUIRED:-1}"
-REDIS_STORAGE_CLASS="${REDIS_STORAGE_CLASS:-local-path}"
+REDIS_STORAGE_CLASS="${REDIS_STORAGE_CLASS:-$(_env_default_redis_storage_class)}"
 REDIS_SIZE="${REDIS_SIZE:-1Gi}"
 REDIS_SPREAD_RECREATE_PVCS="${REDIS_SPREAD_RECREATE_PVCS:-auto}"
 
