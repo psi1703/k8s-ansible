@@ -1,6 +1,31 @@
 ---
-- name: Deploy OTP Relay from the control-plane
-  hosts: control_plane
-  become: true
-  roles:
-    - otp_relay_deploy
+# Disabled legacy Ansible playbook.
+#
+# Historical behavior:
+#   This playbook deployed OTP Relay into a live Kubernetes cluster.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No Kubernetes manifest apply is allowed from this repository path.
+#   - No Helm execution is allowed from this repository path.
+#   - No image import is allowed from this repository path.
+#   - No rollout restart/status operation is allowed from this repository path.
+#   - No production server deployment is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
+
+- name: Disabled legacy OTP Relay Kubernetes deployment
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Refuse legacy OTP Relay deployment
+      ansible.builtin.fail:
+        msg: >-
+          Legacy OTP Relay Kubernetes deployment is disabled in the
+          bundle-only DEVtoPROD architecture. Use bash setup.sh or
+          bash build-release-bundle.sh to create a sealed production
+          release bundle. Production-side manifest application, image
+          loading, Helm execution, rollout validation, and operational
+          checks must be performed only by the approved production procedure.
