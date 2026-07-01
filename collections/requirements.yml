@@ -1,12 +1,11 @@
 ---
-# Ansible collection dependencies required by this repository.
+# Bundle-only release policy:
 #
-# Install with:
+# Runtime Ansible deployment is disabled in this branch.
 #
-#   ansible-galaxy collection install -r collections/requirements.yml
-#
-# The otp_relay_deploy role uses ansible.posix.synchronize, which is not
-# guaranteed to be available from ansible-core alone on a fresh host.
+# This file is retained only for compatibility with legacy tooling that expects
+# an Ansible collections requirements file to exist. The DEVtoPROD release-build
+# path must not install K3s, configure hosts, apply manifests, run Helm, import
+# images into a live cluster, or mutate production infrastructure.
 
-collections:
-  - name: ansible.posix
+collections: []
