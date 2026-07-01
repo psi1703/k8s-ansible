@@ -69,6 +69,24 @@ _release_require_dir() {
   [ -d "$dir" ] || fatal "required release directory missing: $label ($dir)"
 }
 
+_release_abs_path() {
+  local input_path="$1"
+  local base_dir="${2:-$SCRIPT_DIR}"
+
+  if [ -z "$input_path" ]; then
+    return 1
+  fi
+
+  case "$input_path" in
+    /*)
+      printf '%s' "$input_path"
+      ;;
+    *)
+      printf '%s/%s' "$base_dir" "$input_path"
+      ;;
+  esac
+}
+
 _release_forbid_live_tooling_in_path() {
   local scan_dir="$1"
   local found=""
@@ -333,7 +351,7 @@ stage_release_bundle_if_required() {
   RELEASE_NAME="${RELEASE_NAME:-otp-relay-k8s-${safe_namespace}-${RELEASE_TAG}}"
   RELEASE_BUNDLE_NAME="${RELEASE_BUNDLE_NAME:-${RELEASE_NAME}.tar.gz}"
 
-  dist_dir="${DIST_DIR:-${SCRIPT_DIR}/dist}"
+  dist_dir="$(_release_abs_path "${DIST_DIR:-dist}" "$SCRIPT_DIR")"
   mkdir -p "$dist_dir"
 
   bundle_root="${GENERATED_DIR}/${RELEASE_NAME}"
