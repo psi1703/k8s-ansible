@@ -1,113 +1,22 @@
 ---
-- name: Ensure K3s server prerequisites are installed
-  ansible.builtin.apt:
-    name:
-      - ca-certificates
-      - curl
-      - iproute2
-    state: present
-    update_cache: true
+# Disabled legacy Ansible role tasks.
+#
+# Historical behavior:
+#   This role installed and configured the K3s server/control-plane.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No K3s server installation is allowed from this repository path.
+#   - No Kubernetes control-plane mutation is allowed from this repository path.
+#   - No production server deployment is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
 
-- name: Check if K3s server is installed
-  ansible.builtin.stat:
-    path: /usr/local/bin/k3s
-  register: k3s_bin
-
-- name: Install K3s server on localhost control-plane
-  ansible.builtin.shell: |
-    set -eu
-
-    INSTALL_K3S_EXEC="server --write-kubeconfig-mode 644"
-
-    if [ "{{ k3s_disable_servicelb | default(true) | bool | ternary('1', '0') }}" = "1" ]; then
-      INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC --disable servicelb"
-    fi
-
-    if [ "{{ k3s_disable_traefik | default(false) | bool | ternary('1', '0') }}" = "1" ]; then
-      INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC --disable traefik"
-    fi
-
-    echo "Installing K3s with: ${INSTALL_K3S_EXEC}"
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC" sh -
-  args:
-    executable: /bin/bash
-  when: not k3s_bin.stat.exists
-
-- name: Ensure K3s service is enabled and running
-  ansible.builtin.systemd:
-    name: k3s
-    enabled: true
-    state: started
-
-- name: Wait for K3s API to answer
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes
-  register: k3s_get_nodes
-  changed_when: false
-  retries: 60
-  delay: 5
-  until:
-    - k3s_get_nodes.rc == 0
-    - "'No resources found' not in k3s_get_nodes.stderr"
-    - k3s_get_nodes.stdout_lines | length > 1
-
-- name: Wait for K3s control-plane node readiness
-  ansible.builtin.command:
-    cmd: k3s kubectl wait --for=condition=Ready node --all --timeout=300s
-  changed_when: false
-
-- name: Show K3s nodes after control-plane install
-  ansible.builtin.command:
-    cmd: k3s kubectl get nodes -o wide
-  register: k3s_server_nodes
-  changed_when: false
-
-- name: Print K3s nodes after control-plane install
-  ansible.builtin.debug:
-    var: k3s_server_nodes.stdout_lines
-
-- name: Read K3s node token
-  ansible.builtin.slurp:
-    src: /var/lib/rancher/k3s/server/node-token
-  register: k3s_token_raw
-
-- name: Publish K3s join token
-  ansible.builtin.set_fact:
-    k3s_join_token: "{{ k3s_token_raw.content | b64decode | trim }}"
-
-- name: Detect control-plane advertise IP for worker joins
-  ansible.builtin.shell: |
-    set -eu
-
-    HOST_IP_CIDR="{{ host_ip_cidr | default(lookup('env', 'HOST_IP_CIDR'), true) }}"
-    BRIDGE_NAME="{{ bridge_name | default(lookup('env', 'BRIDGE_NAME'), true) | default('br0', true) }}"
-
-    if [ -n "$HOST_IP_CIDR" ]; then
-      printf '%s\n' "${HOST_IP_CIDR%%/*}"
-      exit 0
-    fi
-
-    if ip -o -4 addr show dev "$BRIDGE_NAME" >/dev/null 2>&1; then
-      ip -o -4 addr show dev "$BRIDGE_NAME" | awk '{print $4; exit}' | cut -d/ -f1
-      exit 0
-    fi
-
-    ip route get 8.8.8.8 | awk '/src/ {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}'
-  args:
-    executable: /bin/bash
-  register: k3s_server_ip_detect
-  changed_when: false
-
-- name: Require detected K3s server IP
-  ansible.builtin.assert:
-    that:
-      - k3s_server_ip_detect.stdout | trim | length > 0
-    fail_msg: "Could not detect K3s server IP for worker joins. Set HOST_IP_CIDR in .env."
-
-- name: Publish K3s server URL for workers
-  ansible.builtin.set_fact:
-    k3s_server_url: "https://{{ k3s_server_ip_detect.stdout | trim }}:6443"
-
-- name: Show K3s worker join endpoint
-  ansible.builtin.debug:
-    msg: "Workers will join K3s using {{ k3s_server_url }}"
+- name: Refuse legacy K3s server installation
+  ansible.builtin.fail:
+    msg: >-
+      Legacy K3s server/control-plane installation is disabled in the
+      bundle-only DEVtoPROD architecture. Use bash setup.sh or
+      bash build-release-bundle.sh to create a sealed production release
+      bundle. Production-side installation must be performed only by the
+      approved production procedure.
