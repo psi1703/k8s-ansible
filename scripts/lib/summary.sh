@@ -59,6 +59,22 @@ summary_normalize_url() {
   printf '%s' "${url%/}/"
 }
 
+summary_staged_path() {
+  local path_value="${1:-}"
+  local fallback="${2:-not-staged}"
+
+  if [ "${DEPLOY_MODE:-full}" = "none" ]; then
+    printf '%s' "$fallback"
+    return 0
+  fi
+
+  if [ -n "$path_value" ] && [ -d "$path_value" ]; then
+    printf '%s' "$path_value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
 summary_release_report_path() {
   local release_bundle="${RELEASE_BUNDLE_PATH:-${BUNDLE_PATH:-}}"
   local dist_dir="${DIST_DIR:-${SCRIPT_DIR:-$(pwd)}/dist}"
@@ -116,10 +132,15 @@ write_release_report() {
   local generated_dir="${GENERATED_DIR:-not-set}"
   local release_bundle="${RELEASE_BUNDLE_PATH:-${BUNDLE_PATH:-not-set}}"
   local checksum_file="${RELEASE_BUNDLE_SHA256_PATH:-${BUNDLE_SHA256_PATH:-not-set}}"
+  local manifest_summary=""
+  local observability_summary=""
 
   if [ -z "$report_file" ]; then
     report_file="$(summary_release_report_path)"
   fi
+
+  manifest_summary="$(summary_staged_path "${MANIFEST_DIR:-}" "not-staged")"
+  observability_summary="$(summary_staged_path "${OBSERVABILITY_DIR:-}" "not-staged")"
 
   mkdir -p "$(dirname "$report_file")" 2>/dev/null || true
 
@@ -144,8 +165,8 @@ Bundle artifacts
 Generated dir:           $generated_dir
 Release bundle:          $release_bundle
 Release checksum:        $checksum_file
-Manifest dir:            $(summary_value "${MANIFEST_DIR:-}" "not-staged")
-Observability dir:       $(summary_value "${OBSERVABILITY_DIR:-}" "not-staged")
+Manifest dir:            $manifest_summary
+Observability dir:       $observability_summary
 
 Configuration summary
 ---------------------
@@ -204,6 +225,8 @@ print_release_bundle_summary() {
   local portal_url_summary=""
   local release_bundle="${RELEASE_BUNDLE_PATH:-${BUNDLE_PATH:-not-set}}"
   local checksum_file="${RELEASE_BUNDLE_SHA256_PATH:-${BUNDLE_SHA256_PATH:-not-set}}"
+  local manifest_summary=""
+  local observability_summary=""
 
   NODEPORT_SUMMARY="disabled"
   if [ "${SERVICE_TYPE:-}" = "NodePort" ]; then
@@ -216,6 +239,8 @@ print_release_bundle_summary() {
   fi
 
   portal_url_summary="$(summary_normalize_url "${PORTAL_URL:-}")"
+  manifest_summary="$(summary_staged_path "${MANIFEST_DIR:-}" "not-staged")"
+  observability_summary="$(summary_staged_path "${OBSERVABILITY_DIR:-}" "not-staged")"
 
   write_release_report
 
@@ -238,8 +263,8 @@ Release artifacts:
   SHA256:          $checksum_file
   Release report:  ${RELEASE_REPORT_PATH:-not-written}
   Generated dir:   ${GENERATED_DIR:-not-set}
-  Manifest dir:    ${MANIFEST_DIR:-not-staged}
-  Observability:   ${OBSERVABILITY_DIR:-not-staged}
+  Manifest dir:    $manifest_summary
+  Observability:   $observability_summary
 
 Planned runtime configuration inside the bundle:
   Portal URL:            $portal_url_summary
