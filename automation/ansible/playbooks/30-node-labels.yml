@@ -1,6 +1,29 @@
 ---
-- name: Apply OTP Relay scheduling labels
-  hosts: control_plane
-  become: true
-  roles:
-    - node_labels
+# Disabled legacy Ansible playbook.
+#
+# Historical behavior:
+#   This playbook labeled live Kubernetes nodes for app, monitor, and Redis
+#   placement.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No live Kubernetes node labeling is allowed from this repository path.
+#   - No kubectl/k3s command is allowed from this repository path.
+#   - No production server deployment is allowed from this repository path.
+#
+# The production server receives only the finished release bundle.
+
+- name: Disabled legacy Kubernetes node labeling
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Refuse legacy node labeling
+      ansible.builtin.fail:
+        msg: >-
+          Legacy Kubernetes node labeling is disabled in the bundle-only
+          DEVtoPROD architecture. Use bash setup.sh or
+          bash build-release-bundle.sh to create a sealed production
+          release bundle. Production-side node labeling, if required,
+          must be performed only by the approved production procedure.
