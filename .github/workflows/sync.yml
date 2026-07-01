@@ -1,6 +1,6 @@
 name: Sync k8s-ansible repo to server
 
-run-name: "sync/deploy @ ${{ github.ref_name }}"
+run-name: "sync @ ${{ github.ref_name }}"
 
 permissions:
   contents: read
@@ -10,20 +10,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      deploy_mode:
-        description: "Deployment mode override"
-        required: true
-        default: "auto"
-        type: choice
-        options:
-          - auto
-          - none
-          - observability
-          - manifests
-          - app
-          - monitor
-          - full
 
 concurrency:
   group: sync-k8s-ansible-to-server-${{ github.ref }}
@@ -34,7 +20,7 @@ env:
 
 jobs:
   sync:
-    name: Sync repository and deploy changed components
+    name: Sync repository to server
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
 
@@ -50,99 +36,6 @@ jobs:
           clean: true
           persist-credentials: false
 
-      - name: Detect deployment mode
-        id: detect
-        run: |
-          set -Eeuo pipefail
-
-          MANUAL_MODE="${{ github.event.inputs.deploy_mode || 'auto' }}"
-          BEFORE="${{ github.event.before || '' }}"
-          AFTER="${GITHUB_SHA}"
-
-          echo "Manual deploy mode: ${MANUAL_MODE}"
-          echo "Before: ${BEFORE:-none}"
-          echo "After: ${AFTER}"
-
-          if [ "${MANUAL_MODE}" != "auto" ]; then
-            echo "deploy_mode=${MANUAL_MODE}" >> "$GITHUB_OUTPUT"
-            echo "reason=manual override: ${MANUAL_MODE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ -z "${BEFORE}" ] || [ "${BEFORE}" = "0000000000000000000000000000000000000000" ]; then
-            CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "${AFTER}" || true)"
-          else
-            CHANGED_FILES="$(git diff --name-only "${BEFORE}" "${AFTER}" || true)"
-          fi
-
-          echo "Changed files:"
-          if [ -n "${CHANGED_FILES}" ]; then
-            printf '%s\n' "${CHANGED_FILES}"
-          else
-            echo "(none detected)"
-          fi
-
-          FULL_CHANGED=0
-          APP_CHANGED=0
-          MONITOR_CHANGED=0
-          MANIFESTS_CHANGED=0
-          OBSERVABILITY_CHANGED=0
-
-          # requirements.txt affects both app and monitor runtime images.
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^requirements\.txt$'; then
-            FULL_CHANGED=1
-          fi
-
-          # App/backend/frontend files require app image rebuild and rollout.
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_relay/|main\.py$|frontend/|docs/help/|scripts/build_help_docs\.py$|k8s/Dockerfile$|package\.json$|package-lock\.json$)'; then
-            APP_CHANGED=1
-          fi
-
-          # Monitor files require monitor image rebuild and rollout.
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(otp_monitor/|monitor\.py$|k8s/Dockerfile\.monitor$)'; then
-            MONITOR_CHANGED=1
-          fi
-
-          # Raw OTP Relay Kubernetes manifest changes can be applied without rebuilding images.
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/manifests/)'; then
-            MANIFESTS_CHANGED=1
-          fi
-
-          # Observability-only changes are handled by the installer in observability mode.
-          # Keep the workflow as a dispatcher only; do not duplicate Helm/kubectl logic here.
-          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(k8s/observability/|scripts/build_grafana_dashboard_configmap\.py$)'; then
-            OBSERVABILITY_CHANGED=1
-          fi
-
-          DEPLOY_MODE="none"
-          REASON="sync-only change"
-
-          if [ "${FULL_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="full"
-            REASON="requirements.txt changed"
-          elif [ "${APP_CHANGED}" = "1" ] && [ "${MONITOR_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="full"
-            REASON="app and monitor files changed"
-          elif [ "${APP_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="app"
-            REASON="app/backend/frontend files changed"
-          elif [ "${MONITOR_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="monitor"
-            REASON="monitor files changed"
-          elif [ "${MANIFESTS_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="manifests"
-            REASON="OTP Relay Kubernetes manifests changed"
-          elif [ "${OBSERVABILITY_CHANGED}" = "1" ]; then
-            DEPLOY_MODE="observability"
-            REASON="observability files changed"
-          fi
-
-          echo "Selected deploy mode: ${DEPLOY_MODE}"
-          echo "Reason: ${REASON}"
-
-          echo "deploy_mode=${DEPLOY_MODE}" >> "$GITHUB_OUTPUT"
-          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
-
       - name: Sync checkout to active server repo
         run: |
           set -Eeuo pipefail
@@ -153,8 +46,6 @@ jobs:
           echo "Workspace: ${GITHUB_WORKSPACE}"
           echo "Target: ${DEPLOY_REPO_DIR}"
           echo "Commit: ${GITHUB_SHA}"
-          echo "Detected deploy mode: ${{ steps.detect.outputs.deploy_mode }}"
-          echo "Detection reason: ${{ steps.detect.outputs.reason }}"
 
           if ! command -v rsync >/dev/null 2>&1; then
             echo "rsync is missing; installing it now."
@@ -175,6 +66,8 @@ jobs:
           chmod +x "${DEPLOY_REPO_DIR}"/automation/libvirt/*.sh 2>/dev/null || true
           chmod +x "${DEPLOY_REPO_DIR}"/automation/ansible/*.sh 2>/dev/null || true
           chmod +x "${DEPLOY_REPO_DIR}/install-otp-relay-k8s.sh" 2>/dev/null || true
+          chmod +x "${DEPLOY_REPO_DIR}/setup.sh" 2>/dev/null || true
+          chmod +x "${DEPLOY_REPO_DIR}/destroy-all.sh" 2>/dev/null || true
 
           echo
           echo "Synced repo status:"
@@ -197,46 +90,4 @@ jobs:
           find "${DEPLOY_REPO_DIR}/automation/ansible" -maxdepth 1 -type f -name '*.sh' -print 2>/dev/null | sort || true
 
           echo
-          echo "Sync complete."
-
-      - name: Deploy changed components
-        if: steps.detect.outputs.deploy_mode != 'none'
-        run: |
-          set -Eeuo pipefail
-
-          DEPLOY_MODE="${{ steps.detect.outputs.deploy_mode }}"
-
-          echo "Starting deployment after sync"
-          echo "Deploy mode: ${DEPLOY_MODE}"
-          echo "Reason: ${{ steps.detect.outputs.reason }}"
-          echo "Repo: ${DEPLOY_REPO_DIR}"
-
-          cd "${DEPLOY_REPO_DIR}"
-
-          if [ ! -f ".env" ]; then
-            echo "[ERROR] ${DEPLOY_REPO_DIR}/.env is missing. Refusing noninteractive deployment."
-            exit 1
-          fi
-
-          if [ ! -f "install-otp-relay-k8s.sh" ]; then
-            echo "[ERROR] install-otp-relay-k8s.sh is missing."
-            exit 1
-          fi
-
-          sudo env \
-            ENV_FILE="${DEPLOY_REPO_DIR}/.env" \
-            NONINTERACTIVE=1 \
-            SKIP_REPO_SYNC=1 \
-            GIT_CLEAN=0 \
-            INSTALLER_DEPLOY_MODE="${DEPLOY_MODE}" \
-            IMAGE_DISTRIBUTION_PORT="${IMAGE_DISTRIBUTION_PORT:-18080}" \
-            bash install-otp-relay-k8s.sh
-
-          echo "Deployment completed for DEPLOY_MODE=${DEPLOY_MODE}"
-
-      - name: Skip deployment
-        if: steps.detect.outputs.deploy_mode == 'none'
-        run: |
-          set -Eeuo pipefail
-          echo "No deployable app, monitor, manifest, observability, or requirements change detected."
-          echo "Repository sync completed only."
+          echo "Sync complete. No deployment was run."
