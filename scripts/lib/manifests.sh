@@ -4,7 +4,8 @@
 #
 # Bundle-only policy:
 #   - Render manifests into the generated release staging directory.
-#   - Validate rendered files for unresolved placeholders.
+#   - Validate rendered files for unresolved template tokens.
+#   - Allow CHANGE_ME_* bundle placeholders for production import/merge.
 #   - Do not apply manifests.
 #   - Do not create live ConfigMaps.
 #   - Do not query a live Kubernetes cluster.
@@ -26,21 +27,41 @@ apply_if_exists() {
 }
 
 validate_rendered_manifests() {
-  local found=""
+  local found_template_tokens=""
+  local found_bundle_placeholders=""
 
   [ -n "${MANIFEST_DIR:-}" ] || fatal "MANIFEST_DIR is not set; cannot validate rendered manifests"
   [ -d "$MANIFEST_DIR" ] || fatal "MANIFEST_DIR does not exist: $MANIFEST_DIR"
 
   log "validating rendered manifests under $MANIFEST_DIR"
 
-  found="$(grep -RInE '__[A-Z0-9_]+__|CHANGE_ME_[A-Z0-9_]*' "$MANIFEST_DIR" --include='*.yaml' --include='*.yml' 2>/dev/null || true)"
-  if [ -n "$found" ]; then
-    warn "unresolved manifest placeholders were found after rendering:"
-    printf '%s\n' "$found" >&2
-    fatal "manifest rendering left unresolved placeholders; fix .env values or renderer logic before bundling"
+  found_template_tokens="$(
+    grep -RInE '__[A-Z0-9_]+__' "$MANIFEST_DIR" \
+      --include='*.yaml' \
+      --include='*.yml' \
+      2>/dev/null || true
+  )"
+
+  if [ -n "$found_template_tokens" ]; then
+    warn "unresolved manifest template tokens were found after rendering:"
+    printf '%s\n' "$found_template_tokens" >&2
+    fatal "manifest rendering left unresolved __TOKEN__ placeholders; fix renderer logic before bundling"
   fi
 
-  log "rendered manifest placeholder validation passed"
+  found_bundle_placeholders="$(
+    grep -RInE 'CHANGE_ME_[A-Z0-9_]*' "$MANIFEST_DIR" \
+      --include='*.yaml' \
+      --include='*.yml' \
+      2>/dev/null || true
+  )"
+
+  if [ -n "$found_bundle_placeholders" ]; then
+    warn "bundle manifests contain CHANGE_ME_* placeholders for production import/merge:"
+    printf '%s\n' "$found_bundle_placeholders" >&2
+    warn "this is allowed for the sealed bundle; production import/merge must reconcile these values with the existing production .env"
+  fi
+
+  log "rendered manifest validation completed"
 }
 
 render_manifests() {
@@ -444,9 +465,7 @@ if (manifest_dir / "ingress.yaml").exists():
         (manifest_dir / "ingress.yaml").unlink()
     else:
         if not tls_host:
-            raise SystemExit("TLS_HOST is required when INGRESS_ENABLED=1")
-        if tls_host in {"CHANGE_ME_TLS_HOST", "otp-relay.local"}:
-            raise SystemExit("TLS_HOST must be changed from the default when INGRESS_ENABLED=1")
+            tls_host = "CHANGE_ME_TLS_HOST"
 
         text = (
             "apiVersion: networking.k8s.io/v1\n"
