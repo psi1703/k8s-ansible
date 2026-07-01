@@ -1,6 +1,29 @@
 ---
-- name: Validate OTP Relay production deployment
-  hosts: control_plane
-  become: true
-  roles:
-    - validation
+# Disabled legacy Ansible playbook.
+#
+# Historical behavior:
+#   This playbook validated a live production Kubernetes deployment.
+#
+# Current DEVtoPROD contract:
+#   - The dev/build side creates a sealed production release bundle only.
+#   - No live production validation is allowed from this repository path.
+#   - No Kubernetes pod, service, ingress, PVC, Redis, Grafana, or rollout
+#     inspection is allowed from this repository path.
+#   - No production server deployment or validation is allowed from this path.
+#
+# The production server receives only the finished release bundle.
+
+- name: Disabled legacy production validation
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Refuse legacy production validation
+      ansible.builtin.fail:
+        msg: >-
+          Legacy live production validation is disabled in the bundle-only
+          DEVtoPROD architecture. Use bash setup.sh or
+          bash build-release-bundle.sh to create a sealed production
+          release bundle. Production-side validation must be performed
+          only by the approved production procedure.
