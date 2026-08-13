@@ -264,14 +264,7 @@ _preflight_print_install_guidance() {
   sudo apt-get update
   sudo apt-get install -y $apt_packages
 
-If Docker was newly installed or your user was newly added to the docker group, run:
-
-  sudo systemctl enable --now docker
-  sudo usermod -aG docker $(id -un)
-
-Then log out and log back in, or run:
-
-  newgrp docker
+If Docker was newly installed, the bundle preflight will enable/start Docker, add the current user to the docker group, and automatically restart the bundle builder once with refreshed docker-group access.
 
 Then retry:
 
@@ -309,6 +302,93 @@ _preflight_validate_docker_ready() {
   docker info >/dev/null 2>&1
 }
 
+_preflight_current_process_has_docker_group() {
+  local docker_gid=""
+
+  if ! _preflight_cmd_exists getent; then
+    return 1
+  fi
+
+  docker_gid="$(getent group docker 2>/dev/null | awk -F: 'NR == 1 { print $3 }')"
+  [ -n "$docker_gid" ] || return 1
+
+  case " $(id -G 2>/dev/null) " in
+    *" $docker_gid "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_preflight_account_has_docker_group() {
+  local current_user=""
+
+  current_user="$(id -un)"
+  id -nG "$current_user" 2>/dev/null | tr ' ' '\n' | grep -Fxq docker
+}
+
+_preflight_docker_group_refresh_needed() {
+  if [ "${PREFLIGHT_DOCKER_GROUP_REEXEC:-0}" = "1" ]; then
+    return 1
+  fi
+
+  if ! _preflight_cmd_exists docker; then
+    return 1
+  fi
+
+  if _preflight_validate_docker_ready; then
+    return 1
+  fi
+
+  if _preflight_current_process_has_docker_group; then
+    return 1
+  fi
+
+  _preflight_account_has_docker_group
+}
+
+_preflight_reexec_with_docker_group() {
+  local -a original_cmd=()
+  local arg=""
+  local quoted_cmd=""
+
+  if [ "${PREFLIGHT_DOCKER_GROUP_REEXEC:-0}" = "1" ]; then
+    return 1
+  fi
+
+  if ! _preflight_cmd_exists sg; then
+    warn "Docker group membership changed, but 'sg' is unavailable for automatic session refresh"
+    return 1
+  fi
+
+  if [ ! -r "/proc/$$/cmdline" ]; then
+    warn "Docker group membership changed, but the current command line cannot be reconstructed"
+    return 1
+  fi
+
+  mapfile -d '' -t original_cmd < "/proc/$$/cmdline"
+  if [ "${#original_cmd[@]}" -eq 0 ]; then
+    warn "Docker group membership changed, but the current command line is empty"
+    return 1
+  fi
+
+  for arg in "${original_cmd[@]}"; do
+    printf -v quoted_cmd '%s %q' "$quoted_cmd" "$arg"
+  done
+
+  log "Docker group membership is recorded for $(id -un), but this shell has stale group membership"
+  log "restarting the bundle builder once with docker group access; no logout or newgrp is required"
+
+  export PREFLIGHT_DOCKER_GROUP_REEXEC=1
+  exec sg docker -c "exec env PREFLIGHT_DOCKER_GROUP_REEXEC=1$quoted_cmd"
+}
+
+_preflight_refresh_docker_group_if_needed() {
+  if _preflight_docker_group_refresh_needed; then
+    _preflight_reexec_with_docker_group || return 1
+  fi
+
+  return 0
+}
+
 _preflight_install_mode() {
   case "${INSTALL_BUILD_DEPS:-auto}" in
     1|yes|YES|true|TRUE|on|ON) printf 'yes' ;;
@@ -340,6 +420,7 @@ _preflight_confirm_install() {
 
 _preflight_install_build_deps() {
   local apt_packages="$1"
+  local -a apt_package_list=()
 
   if ! is_debian_family; then
     fatal "automatic build dependency installation is supported only on Debian-family hosts"
@@ -351,7 +432,8 @@ _preflight_install_build_deps() {
 
   log "installing missing build dependencies on dev/build host"
   run_apt_get update
-  run_apt_get install -y $apt_packages
+  read -r -a apt_package_list <<< "$apt_packages"
+  run_apt_get install -y "${apt_package_list[@]}"
 
   if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
     if _preflight_cmd_exists systemctl; then
@@ -441,6 +523,7 @@ check_bundle_builder_tools() {
 
   if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
     if _preflight_cmd_exists docker; then
+      _preflight_refresh_docker_group_if_needed || true
       if ! _preflight_validate_docker_ready; then
         missing_features="$(_preflight_append_missing "$missing_features" "working Docker daemon access for user $(id -un)")"
       fi
@@ -450,6 +533,10 @@ check_bundle_builder_tools() {
   if [ -n "$missing_tools" ] || [ -n "$missing_features" ]; then
     apt_packages="$(_preflight_apt_packages_for_mode)"
     _preflight_handle_missing_deps "$missing_tools" "$missing_features" "$apt_packages"
+
+    if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+      _preflight_refresh_docker_group_if_needed || true
+    fi
 
     missing_tools=""
     missing_features=""
@@ -475,9 +562,11 @@ check_bundle_builder_tools() {
       _preflight_print_missing_list "still missing required command-line tools after install attempt:" "$missing_tools"
       _preflight_print_missing_list "still missing required build features/services after install attempt:" "$missing_features"
       if printf '%s\n' "$missing_features" | grep -q 'working Docker daemon access'; then
-        warn "Docker may require a new login session after group membership changes"
-        warn "run: newgrp docker"
-        warn "or log out and log back in, then rerun the build"
+        if _preflight_account_has_docker_group && ! _preflight_current_process_has_docker_group; then
+          warn "Docker group membership is present, but automatic shell refresh did not succeed"
+        else
+          warn "Docker is installed but daemon access is still unavailable to user $(id -un)"
+        fi
       fi
       fatal "required local build dependencies are still missing for DEPLOY_MODE=${DEPLOY_MODE:-full}"
     fi
