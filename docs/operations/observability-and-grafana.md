@@ -229,7 +229,7 @@ PY
 
 ## Apply dashboard changes manually
 
-Normally the installer or GitHub Actions applies manifests.
+Normally the installer applies manifests after the local checkout has been synchronized from GitHub. The repo-sync timer itself is sync-only and must not apply manifests.
 
 To apply only the dashboard ConfigMap manually:
 
