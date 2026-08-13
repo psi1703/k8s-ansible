@@ -7,18 +7,18 @@
       - iproute2
     state: present
     update_cache: true
+  become: true
 
 - name: Check if K3s server is installed
   ansible.builtin.stat:
     path: /usr/local/bin/k3s
   register: k3s_bin
 
-- name: Install K3s server on localhost control-plane
+- name: Install K3s server on localhost control-plane with resilient download handling
   ansible.builtin.shell: |
     set -eu
 
     INSTALL_K3S_EXEC="server --write-kubeconfig-mode 644"
-
     if [ "{{ k3s_disable_servicelb | default(true) | bool | ternary('1', '0') }}" = "1" ]; then
       INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC --disable servicelb"
     fi
@@ -28,9 +28,42 @@
     fi
 
     echo "Installing K3s with: ${INSTALL_K3S_EXEC}"
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC" sh -
+
+    installer="$(mktemp)"
+    curl_wrapper_dir="$(mktemp -d)"
+    cleanup() {
+      rm -f "$installer"
+      rm -rf "$curl_wrapper_dir"
+    }
+    trap cleanup EXIT
+
+    cat >"$curl_wrapper_dir/curl" <<'CURL_WRAPPER'
+    #!/usr/bin/env sh
+    exec /usr/bin/curl -4 --http1.1 --retry 5 --retry-delay 5 --connect-timeout 15 --max-time 300 "$@"
+    CURL_WRAPPER
+    chmod +x "$curl_wrapper_dir/curl"
+
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+      echo "Downloading K3s installer, attempt ${attempt}/3"
+      if /usr/bin/curl -4 --http1.1 --retry 5 --retry-delay 5 --connect-timeout 15 --max-time 300 -fsSL https://get.k3s.io -o "$installer"; then
+        chmod +x "$installer"
+        echo "Running K3s server installer, attempt ${attempt}/3"
+        if PATH="$curl_wrapper_dir:$PATH" INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC" sh "$installer"; then
+          exit 0
+        fi
+      fi
+
+      echo "K3s server install attempt ${attempt}/3 failed" >&2
+      attempt=$((attempt + 1))
+      sleep 10
+    done
+
+    echo "K3s server install failed after 3 attempts" >&2
+    exit 1
   args:
     executable: /bin/bash
+  become: true
   when: not k3s_bin.stat.exists
 
 - name: Ensure K3s service is enabled and running
@@ -38,6 +71,7 @@
     name: k3s
     enabled: true
     state: started
+  become: true
 
 - name: Wait for K3s API to answer
   ansible.builtin.command:
@@ -51,10 +85,59 @@
     - "'No resources found' not in k3s_get_nodes.stderr"
     - k3s_get_nodes.stdout_lines | length > 1
 
-- name: Wait for K3s control-plane node readiness
-  ansible.builtin.command:
-    cmd: k3s kubectl wait --for=condition=Ready node --all --timeout=300s
+- name: Wait for K3s control-plane node readiness only
+  ansible.builtin.shell: |
+    set -eu
+    node_name="$(hostname -s)"
+    k3s kubectl wait --for=condition=Ready "node/${node_name}" --timeout=300s
+  args:
+    executable: /bin/bash
   changed_when: false
+
+- name: Remove stale NotReady worker node records with mismatched inventory IPs
+  ansible.builtin.shell: |
+    set -eu
+    changed=0
+
+    check_worker_node() {
+      node_name="$1"
+      expected_ip="$2"
+
+      [ -n "$node_name" ] || return 0
+      [ -n "$expected_ip" ] || return 0
+
+      if ! k3s kubectl get node "$node_name" >/dev/null 2>&1; then
+        return 0
+      fi
+
+      actual_ip="$(k3s kubectl get node "$node_name" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)"
+      ready_status="$(k3s kubectl get node "$node_name" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+
+      if [ -n "$actual_ip" ] && [ "$actual_ip" != "$expected_ip" ]; then
+        if [ "$ready_status" = "True" ]; then
+          echo "ERROR: Kubernetes node ${node_name} is Ready at ${actual_ip}, but inventory expects ${expected_ip}. Refusing to delete a Ready node." >&2
+          exit 1
+        fi
+
+        echo "Deleting stale Kubernetes node ${node_name}: actual=${actual_ip}, expected=${expected_ip}, ready=${ready_status}"
+        k3s kubectl delete node "$node_name"
+        changed=1
+      fi
+    }
+
+    {% for worker in groups['workers'] | default([]) %}
+    check_worker_node "otp-{{ worker }}" "{{ hostvars[worker].ansible_host | default('') }}"
+    {% endfor %}
+
+    if [ "$changed" = "1" ]; then
+      echo "stale worker nodes removed"
+    else
+      echo "no stale worker nodes found"
+    fi
+  args:
+    executable: /bin/bash
+  register: stale_worker_node_cleanup
+  changed_when: "'stale worker nodes removed' in stale_worker_node_cleanup.stdout"
 
 - name: Show K3s nodes after control-plane install
   ansible.builtin.command:
@@ -81,7 +164,6 @@
 
     HOST_IP_CIDR="{{ host_ip_cidr | default(lookup('env', 'HOST_IP_CIDR'), true) }}"
     BRIDGE_NAME="{{ bridge_name | default(lookup('env', 'BRIDGE_NAME'), true) | default('br0', true) }}"
-
     if [ -n "$HOST_IP_CIDR" ]; then
       printf '%s\n' "${HOST_IP_CIDR%%/*}"
       exit 0
