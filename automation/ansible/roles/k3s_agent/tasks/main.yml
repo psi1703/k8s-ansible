@@ -6,6 +6,7 @@
       - curl
     state: present
     update_cache: true
+  become: true
 
 - name: Read K3s node token from localhost control-plane
   ansible.builtin.slurp:
@@ -43,17 +44,50 @@
     path: /usr/local/bin/k3s
   register: k3s_bin
 
-- name: Install K3s agent
+- name: Install K3s agent with resilient download handling
   ansible.builtin.shell: |
     set -eu
 
     echo "Installing K3s agent and joining {{ k3s_worker_server_url }}"
-    curl -sfL https://get.k3s.io | \
-      K3S_URL="{{ k3s_worker_server_url }}" \
-      K3S_TOKEN="{{ k3s_join_token }}" \
-      sh -
+
+    installer="$(mktemp)"
+    curl_wrapper_dir="$(mktemp -d)"
+    cleanup() {
+      rm -f "$installer"
+      rm -rf "$curl_wrapper_dir"
+    }
+    trap cleanup EXIT
+
+    cat >"$curl_wrapper_dir/curl" <<'CURL_WRAPPER'
+    #!/usr/bin/env sh
+    exec /usr/bin/curl -4 --http1.1 --retry 5 --retry-delay 5 --connect-timeout 15 --max-time 300 "$@"
+    CURL_WRAPPER
+    chmod +x "$curl_wrapper_dir/curl"
+
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+      echo "Downloading K3s installer, attempt ${attempt}/3"
+      if /usr/bin/curl -4 --http1.1 --retry 5 --retry-delay 5 --connect-timeout 15 --max-time 300 -fsSL https://get.k3s.io -o "$installer"; then
+        chmod +x "$installer"
+        echo "Running K3s agent installer, attempt ${attempt}/3"
+        if PATH="$curl_wrapper_dir:$PATH" \
+          K3S_URL="{{ k3s_worker_server_url }}" \
+          K3S_TOKEN="{{ k3s_join_token }}" \
+          sh "$installer"; then
+          exit 0
+        fi
+      fi
+
+      echo "K3s agent install attempt ${attempt}/3 failed" >&2
+      attempt=$((attempt + 1))
+      sleep 10
+    done
+
+    echo "K3s agent install failed after 3 attempts" >&2
+    exit 1
   args:
     executable: /bin/bash
+  become: true
   when: not k3s_bin.stat.exists
 
 - name: Ensure K3s agent service is enabled and running
@@ -61,6 +95,7 @@
     name: k3s-agent
     enabled: true
     state: started
+  become: true
 
 - name: Wait for K3s agent service to become active
   ansible.builtin.command:
