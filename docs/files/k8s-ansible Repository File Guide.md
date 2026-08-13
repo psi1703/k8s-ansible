@@ -72,7 +72,7 @@ iPhone receives SMS
 
 ### `README.md`
 
-**What it does:** Main operator entry point for the repo. It describes the current architecture, access paths, `.env` behavior, NFS expectations, Redis placement, TLS behavior, GitHub Actions behavior, and recommended documentation order.
+**What it does:** Main operator entry point for the repo. It describes the current architecture, access paths, `.env` behavior, NFS expectations, Redis placement, TLS behavior, repository sync behavior, and recommended documentation order.
 
 **Why it is important:** This is the first document operators and managers read. It explains source-of-truth rules such as `.env` for runtime configuration, `frontend/app.jsx` as frontend source, help docs as Markdown source, and Grafana JSON as dashboard source.
 
@@ -190,15 +190,25 @@ iPhone receives SMS
 
 ---
 
-## 4. GitHub Actions
+## 4. Repository sync scripts
 
-### `.github/workflows/sync.yml`
+### `scripts/sync-repo.sh`
 
-**What it does:** GitHub Actions workflow for repository synchronization to the self-hosted runner/server path.
+**What it does:** Pulls the latest GitHub source into the local build/server checkout with a hard reset to the configured branch. It preserves local runtime files such as `.env`, generated inventory, build/release output, and sync state.
 
-**Why it is important:** Current README describes GitHub Actions as sync-only: it should sync repository content to `/opt/k8s-ansible`, not deploy, run Helm, apply manifests, import images, or install K3s.
+**Why it is important:** Repository synchronization is now local, pull-based, explicit, and must not deploy or mutate the live cluster.
 
-**Risk if broken:** Server repo may not update, or worse, CI could accidentally mutate production if deployment steps are reintroduced.
+**Risk if broken:** The server may run stale code, lose local runtime files, or accidentally mix generated runtime state with source-controlled files.
+
+---
+
+### `scripts/install-repo-sync-timer.sh`
+
+**What it does:** Installs a systemd service/timer that periodically runs `scripts/sync-repo.sh` on the build/server machine.
+
+**Why it is important:** Provides automated pull-based repository sync without any CI/CD service or webhook listener on the server.
+
+**Risk if broken:** Repository updates may not reach the build/server machine unless the operator runs `scripts/sync-repo.sh` manually.
 
 ---
 
@@ -988,16 +998,6 @@ iPhone receives SMS
 
 ---
 
-### `scripts/lib/github-runner.sh`
-
-**What it does:** Supports GitHub self-hosted runner setup/sync behavior.
-
-**Why it is important:** Current GitHub Actions model depends on a runner for repo synchronization.
-
-**Risk if broken:** Sync automation may fail.
-
----
-
 ### `scripts/lib/summary.sh`
 
 **What it does:** Produces install-report/operator handover summaries.
@@ -1254,8 +1254,9 @@ Each role has a `tasks/main.yml` entrypoint. The visible roles are:
 2. **Do not edit generated outputs as source.** Edit `frontend/app.jsx`, `docs/help/*`, and `k8s/observability/dashboards/otp-relay-live.json`, then regenerate outputs.
 3. **Do not assume Loki has a gateway deployment.** This deployment uses single-binary Loki StatefulSet unless values change.
 4. **Redis requires all three nodes to be Redis-eligible** in the current 1 control-plane + 2 worker topology.
-5. **GitHub Actions must remain sync-only** unless the deployment model is intentionally changed.
-6. **Production release-bundle design should separate build host from production runtime.** Build tools belong on dev/build host; prod should receive sealed runtime artifacts.
+5. **Repository sync must remain sync-only.** `scripts/sync-repo.sh` and its systemd timer must not install K3s, run Helm, apply manifests, import images, restart workloads, or run Ansible mutation tasks.
+6. **No external CI/CD agent is required for repo sync.** Pull-based sync is handled locally by `scripts/sync-repo.sh` and the optional systemd timer.
+7. **Production release-bundle design should separate build host from production runtime.** Build tools belong on dev/build host; prod should receive sealed runtime artifacts.
 
 ---
 
