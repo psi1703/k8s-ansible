@@ -1,12 +1,14 @@
 # Helm values for Loki
 #
 # Chart version policy:
-# - Unpinned by default so Helm uses the current chart from grafana-community/loki.
-# - Pin OBSERVABILITY_LOKI_CHART_VERSION only after validating the exact chart version.
+# - The current validated chart is grafana-community/loki chart 7.3.0.
+# - Chart 7.3.0 does not create workloads when this file uses
+#   deploymentMode: Monolithic. Use deploymentMode: SingleBinary for this
+#   small K3s cluster.
 #
 # Purpose:
 # - Store logs shipped by Grafana Alloy.
-# - Run in Monolithic/single-binary mode for this small K3s cluster.
+# - Run in single-binary mode for this small K3s cluster.
 # - Keep logs for 7 days.
 # - Use local-path PVC on the observability data worker.
 #
@@ -17,7 +19,7 @@
 # - SCH k8s observability design
 # - SCH current k8s/observability/loki-values.yaml
 
-deploymentMode: Monolithic
+deploymentMode: SingleBinary
 
 singleBinary:
   replicas: 1
