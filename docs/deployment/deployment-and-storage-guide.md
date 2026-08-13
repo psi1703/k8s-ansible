@@ -6,7 +6,7 @@ This guide is the deployment and storage reference for OTP Relay Kubernetes.
 
 It owns:
 
-* GitHub Actions deployment flow
+* repository sync and deployment flow
 * installer behavior
 * `.env` source-of-truth configuration
 * cluster/node deployment model
@@ -38,13 +38,14 @@ docs/development/build-and-development-guide.md
 
 ## Recommended deployment path
 
-Use GitHub Actions with the self-hosted runner.
+Use the local repository sync script to keep the build/control-plane machine aligned with GitHub, then run deployment intentionally from that machine.
 
 ```text
-GitHub push or workflow run
-  -> GitHub Actions job starts
-  -> self-hosted runner checks out the repo
-  -> installer runs from the runner/control-plane host
+GitHub main branch changes
+  -> build/control-plane machine runs scripts/sync-repo.sh manually or by systemd timer
+  -> local checkout is hard-reset to origin/main
+  -> local runtime files such as .env and generated inventory are preserved
+  -> operator runs setup.sh or install-otp-relay-k8s.sh intentionally
   -> installer loads or creates .env
   -> installer builds required generated assets
   -> installer builds/imports app and monitor images
@@ -55,13 +56,25 @@ GitHub push or workflow run
   -> installer prints deployment summary
 ```
 
-The workflow should call:
+Repository sync command:
 
-```text
-install-otp-relay-k8s.sh
+```bash
+bash scripts/sync-repo.sh
 ```
 
-Deployment logic belongs in the installer and repository scripts, not duplicated in GitHub Actions YAML.
+Optional systemd timer setup:
+
+```bash
+bash scripts/install-repo-sync-timer.sh
+```
+
+Deployment command:
+
+```bash
+bash setup.sh
+```
+
+Repository sync must remain sync-only. It must not install K3s, run Helm, apply Kubernetes manifests, import images, restart workloads, run Ansible deployment tasks, or mutate a live cluster. Deployment logic belongs in the installer and repository scripts, not in an external CI workflow.
 
 ---
 
@@ -120,9 +133,11 @@ documentation examples
 
 ---
 
-## Required GitHub Actions secrets
+## Required runtime secrets and local configuration
 
-Create these in GitHub Actions secrets when the workflow expects them:
+Runtime values belong in the repository-root `.env` file on the build/control-plane machine.
+
+Typical required secret or site-specific values include:
 
 ```text
 PHONE_IP
@@ -130,9 +145,10 @@ PHONE_INTERFACE
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
 PORTAL_URL
+SMS_SECRET_TOKEN
 ```
 
-Depending on workflow implementation, some values may instead be read from `.env` on the runner host.
+The `.env` file is local runtime state. It must be preserved by repository sync and must not be committed to Git.
 
 Do not commit:
 
@@ -180,7 +196,7 @@ The current `k8s-ansible` deployment model uses:
 
 | Role          | Description                                                  |
 | ------------- | ------------------------------------------------------------ |
-| Control-plane | Real server / localhost K3s control-plane and Ansible runner |
+| Control-plane | Real server / localhost K3s control-plane and Ansible control host |
 | Worker 1      | VM worker node                                               |
 | Worker 2      | VM worker node                                               |
 | NFS server    | External storage server, not joined as a Kubernetes node     |
@@ -188,7 +204,7 @@ The current `k8s-ansible` deployment model uses:
 Deployment rules:
 
 * VM provisioning should create worker VMs only.
-* The real server is the K3s control-plane and Ansible runner.
+* The real server is the K3s control-plane and Ansible control host.
 * The external NFS server should not be joined to Kubernetes.
 * The monitor should run on the node with phone-network visibility.
 * Redis-capable nodes should be labelled for Redis/storage placement.
@@ -455,9 +471,9 @@ docs/development/build-and-development-guide.md
 
 ## Manual image build fallback
 
-GitHub Actions is preferred.
+The installer path is preferred.
 
-Manual build is only a fallback when intentionally operating from the runner/control-plane host.
+Manual image build is only a fallback when intentionally operating from the build/control-plane host.
 
 Build locally from the repo root:
 
@@ -614,7 +630,7 @@ audit.log
 ## Deployment sign-off checklist
 
 * [x] `.env` exists and contains the intended runtime values.
-* [x] GitHub Actions workflow uses the self-hosted runner.
+* [x] Repository sync path is configured with `scripts/sync-repo.sh` or an approved manual sync process.
 * [x] Installer runs without replacing `.env` unexpectedly.
 * [x] Required generated assets are produced before image build/apply.
 * [x] App and monitor images build successfully.
