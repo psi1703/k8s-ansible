@@ -1,9 +1,34 @@
 ---
+- name: Detect OTP Relay repository root on Ansible runner
+  ansible.builtin.shell: |
+    set -eu
+
+    for candidate in \
+      "{{ otp_source_dir | default('') }}" \
+      "{{ otp_install_dir | default('') }}" \
+      "{{ lookup('env', 'PWD') }}" \
+      "/opt/k8s-ansible"; do
+      [ -n "$candidate" ] || continue
+      if [ -f "$candidate/install-otp-relay-k8s.sh" ]; then
+        cd "$candidate"
+        pwd
+        exit 0
+      fi
+    done
+
+    echo "Could not detect k8s-ansible repo root. Set otp_source_dir or run Ansible from the repo root." >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  register: otp_relay_detected_repo_root
+  changed_when: false
+
 - name: Define OTP Relay deployment paths
   ansible.builtin.set_fact:
-    otp_relay_source_dir: "{{ otp_source_dir | default('/opt/k8s-ansible') }}"
-    otp_relay_install_dir: "{{ otp_install_dir | default('/opt/k8s-ansible') }}"
-    otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default('/opt/k8s-ansible')) ~ '/.env') }}"
+    otp_relay_source_dir: "{{ otp_source_dir | default(otp_relay_detected_repo_root.stdout | trim, true) }}"
+    otp_relay_install_dir: "{{ otp_install_dir | default(otp_relay_detected_repo_root.stdout | trim, true) }}"
+    otp_relay_env_file: "{{ otp_env_file | default((otp_install_dir | default(otp_relay_detected_repo_root.stdout | trim, true)) ~ '/.env', true) }}"
     otp_relay_installer_log: "/tmp/otp-relay-installer-current.log"
     otp_relay_installer_status_file: "/tmp/otp-relay-installer-current.status"
     otp_relay_installer_wait_seconds: "{{ otp_installer_wait_seconds | default(7200) }}"
@@ -58,7 +83,6 @@
     archive: true
     delete: true
     rsync_opts:
-      # Safe top-level files.
       - "--include=/.env.example"
       - "--include=/.dockerignore"
       - "--include=/LICENSE"
@@ -70,8 +94,6 @@
       - "--include=/requirements.txt"
       - "--include=/package.json"
       - "--include=/package-lock.json"
-
-      # Safe deploy/app directories.
       - "--include=/automation/"
       - "--include=/automation/ansible/"
       - "--include=/automation/ansible/***"
@@ -83,8 +105,6 @@
       - "--include=/otp_monitor/***"
       - "--include=/otp_relay/***"
       - "--include=/scripts/***"
-
-      # Explicitly protect secrets, runtime files, generated artifacts, and dev junk.
       - "--exclude=.git/"
       - "--exclude=.github/"
       - "--exclude=.installer-venv/"
@@ -98,8 +118,6 @@
       - "--exclude=release/"
       - "--exclude=automation/libvirt/build/"
       - "--exclude=automation/ansible/inventory.generated.ini"
-
-      # Runtime configuration and secrets must stay operator-owned on prod.
       - "--exclude=.env"
       - "--exclude=.env.*"
       - "--exclude=secret.env"
@@ -115,15 +133,11 @@
       - "--exclude=*.pem"
       - "--exclude=*.key"
       - "--exclude=*.crt"
-
-      # Build outputs and logs.
       - "--exclude=*.log"
       - "--exclude=*.tar"
       - "--exclude=*.tar.gz"
       - "--exclude=*.tgz"
       - "--exclude=*.zip"
-
-      # Anything not explicitly included above stays out.
       - "--exclude=*"
   delegate_to: localhost
   when: not otp_relay_control_plane_is_local | bool
@@ -149,8 +163,14 @@
   ansible.builtin.shell: |
     set -eu
 
-    chmod +x "{{ otp_relay_install_dir }}/install-otp-relay-k8s.sh"
+    if [ ! -f "{{ otp_relay_install_dir }}/install-otp-relay-k8s.sh" ]; then
+      echo "Missing installer script: {{ otp_relay_install_dir }}/install-otp-relay-k8s.sh" >&2
+      echo "Detected source dir: {{ otp_relay_source_dir }}" >&2
+      echo "Detected install dir: {{ otp_relay_install_dir }}" >&2
+      exit 1
+    fi
 
+    chmod +x "{{ otp_relay_install_dir }}/install-otp-relay-k8s.sh"
     if [ -d "{{ otp_relay_install_dir }}/scripts/lib" ]; then
       find "{{ otp_relay_install_dir }}/scripts/lib" -type f -name '*.sh' -exec chmod +x {} \;
     fi
@@ -178,7 +198,6 @@
     ENV_SOURCE="{{ otp_relay_env_file }}"
 
     rm -f "$STATUS_FILE"
-
     {
       echo "[INFO] Starting OTP Relay installer on $(hostname)"
       echo "[INFO] Started at: $(date -Is)"
@@ -191,7 +210,6 @@
     } > "$LOG"
 
     cd "$INSTALL_DIR"
-
     set +e
     ENV_FILE="$ENV_SOURCE" \
     NONINTERACTIVE=1 \
@@ -240,7 +258,6 @@
     echo "sudo tail -f {{ otp_relay_installer_log }}"
     echo
     echo "===== recent installer log ====="
-
     if [ -f "{{ otp_relay_installer_log }}" ]; then
       tail -100 "{{ otp_relay_installer_log }}"
     else
@@ -255,7 +272,6 @@
 - name: Wait for OTP Relay installer to finish cleanly
   ansible.builtin.shell: |
     set -eu
-
     LOG="{{ otp_relay_installer_log }}"
     STATUS_FILE="{{ otp_relay_installer_status_file }}"
     MAX_SECONDS="{{ otp_relay_installer_wait_seconds }}"
@@ -270,7 +286,6 @@
     echo "Status file: ${STATUS_FILE}"
     echo "Timeout: ${MAX_SECONDS}s"
     echo
-
     while [ "$elapsed" -lt "$MAX_SECONDS" ]; do
       if [ -f "$STATUS_FILE" ]; then
         rc="$(cat "$STATUS_FILE" 2>/dev/null || echo missing)"
@@ -278,7 +293,6 @@
         echo "OTP Relay installer finished after ${elapsed}s with rc=${rc}"
         exit 0
       fi
-
       if [ "$elapsed" -ge "$next_snapshot" ]; then
         echo
         echo "Still running after ${elapsed}s..."
@@ -295,7 +309,6 @@
       sleep "$INTERVAL_SECONDS"
       elapsed=$((elapsed + INTERVAL_SECONDS))
     done
-
     echo
     echo "Timed out after ${MAX_SECONDS}s waiting for OTP Relay installer."
     if [ -f "$LOG" ]; then
@@ -323,7 +336,6 @@
 - name: Read OTP Relay installer status file
   ansible.builtin.shell: |
     set -eu
-
     if [ -f "{{ otp_relay_installer_status_file }}" ]; then
       cat "{{ otp_relay_installer_status_file }}"
     else
@@ -339,7 +351,6 @@
 - name: Show final OTP Relay installer log
   ansible.builtin.shell: |
     set -eu
-
     echo "===== installer status ====="
     echo "wait rc={{ otp_relay_installer_wait_result.rc | default('unknown') }}"
     echo "async finished={{ otp_relay_installer_status.finished | default('unknown') }}"
@@ -347,7 +358,6 @@
     echo "status file rc={{ otp_relay_installer_status_file_result.stdout | default('unknown') }}"
     echo
     echo "===== final installer log tail ====="
-
     if [ -f "{{ otp_relay_installer_log }}" ]; then
       tail -260 "{{ otp_relay_installer_log }}"
     else
