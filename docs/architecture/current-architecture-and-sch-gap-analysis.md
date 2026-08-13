@@ -123,7 +123,7 @@ The current `k8s-ansible` deployment model uses:
 
 | Role          | Description                                                  |
 | ------------- | ------------------------------------------------------------ |
-| Control-plane | Real server / localhost K3s control-plane and Ansible runner |
+| Control-plane | Real server / localhost K3s control-plane and Ansible control host |
 | Worker 1      | VM worker node                                               |
 | Worker 2      | VM worker node                                               |
 | NFS server    | External storage server, not joined to Kubernetes            |
@@ -131,7 +131,7 @@ The current `k8s-ansible` deployment model uses:
 Important placement rules:
 
 * VM provisioning creates worker VMs only.
-* The real server is the K3s control-plane and Ansible runner.
+* The real server is the K3s control-plane and Ansible control host.
 * The NFS server remains external storage and should not be joined to Kubernetes.
 * The monitor must run on a node with phone-network visibility.
 * Redis-capable nodes are labelled for storage placement.
@@ -372,14 +372,16 @@ docs/operations/observability-and-grafana.md
 
 ---
 
-## Deployment workflow model
+## Repository sync and deployment workflow model
 
-The normal deployment path is GitHub Actions with a self-hosted runner.
+The active repository-update model is local polling from the build/control host. GitHub is the source of truth, but the previous external CI listener model is no longer part of the deployment path.
 
 ```text
-GitHub workflow
-  -> self-hosted runner
-  -> installer script
+GitHub main
+  -> scripts/sync-repo.sh on the control host
+  -> hard reset local checkout to origin/main
+  -> preserve local runtime state such as .env and generated inventory
+  -> operator runs setup.sh / installer when deployment is intended
   -> .env load/validation
   -> generated assets
   -> image build/import
@@ -394,9 +396,10 @@ install-otp-relay-k8s.sh
 scripts/lib/
 k8s/manifests/
 k8s/observability/
+automation/ansible/
 ```
 
-GitHub Actions workflow YAML should orchestrate deployment, not duplicate installer logic.
+The repo-sync script must stay sync-only. It must not install K3s, run Helm, run `kubectl apply`, import images, restart workloads, or run Ansible mutation tasks. Deployment remains an explicit operator action.
 
 Dependency rule:
 
@@ -404,7 +407,7 @@ Dependency rule:
 requirements.txt affects both app and monitor images.
 ```
 
-A `requirements.txt` change should trigger app and monitor rebuilds.
+A `requirements.txt` change should trigger app and monitor rebuilds when the installer/deployment path is run.
 
 ---
 
@@ -444,7 +447,7 @@ Monitor pod remains internal and unexposed.
 | Observability   | Dashboard, metrics, and logs for production visibility           | Prometheus/Grafana/Loki/Alloy assets deployed and recovered after restart/drain validation                                                                  |
 | Grafana access  | Stable internal access path                                      | `https://grafana.init-db.lan` through Traefik/IngressRoute                                                                                                  |
 | Documentation   | Clear active docs with no conflicting legacy guidance            | README and docs describe source/generated workflows for frontend, help docs, and Grafana                                                                    |
-| Workflow        | Repeatable CI/CD deployment                                      | GitHub Actions with self-hosted runner; installer remains deployment source of truth                                                                        |
+| Workflow        | Repeatable source-to-deploy path                                  | Local repo-sync timer keeps the checkout aligned to GitHub; installer remains deployment source of truth and deployment is explicit                         |
 
 ---
 
