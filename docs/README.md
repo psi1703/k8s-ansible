@@ -2,7 +2,7 @@
 
 This directory is the documentation home for OTP Relay Kubernetes.
 
-Kubernetes manifests, Dockerfiles, installer scripts, automation, and observability manifests stay in their functional repo locations such as `k8s/`, `scripts/`, `.github/`, and `automation/`.
+Kubernetes manifests, Dockerfiles, installer scripts, automation, and observability manifests stay in their functional repo locations such as `k8s/`, `scripts/`, `systemd/`, and `automation/`.
 
 Explanations, architecture notes, deployment guides, runbooks, validation notes, and portal help source stay under `docs/`.
 
@@ -31,7 +31,7 @@ Remaining production-alignment items are tracked in the architecture and operati
 | Area          | Document                                                                                               | Purpose                                                                                                                                       |
 | ------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Architecture  | [Current Architecture and SCH Gap Analysis](architecture/current-architecture-and-sch-gap-analysis.md) | Current topology, SCH target architecture, production gaps, and safe design rules.                                                            |
-| Deployment    | [Deployment and Storage Guide](deployment/deployment-and-storage-guide.md)                             | GitHub Actions deployment path, installer behavior, `.env` model, NFS/RWX storage, Redis deployment safety, and post-deployment verification. |
+| Deployment    | [Deployment and Storage Guide](deployment/deployment-and-storage-guide.md)                             | Repository sync path, installer behavior, `.env` model, NFS/RWX storage, Redis deployment safety, and post-deployment verification. |
 | Operations    | [Operations and Validation Runbook](operations/operations-and-validation-runbook.md)                   | Daily health checks, Redis/NFS/TLS/monitor validation, OTP checks, worker-drain validation, and SCH sign-off gates.                           |
 | Observability | [Observability and Grafana Guide](operations/observability-and-grafana.md)                             | Prometheus, Grafana, Loki/Alloy, ServiceMonitor resources, dashboard source/generated workflow, PromQL guidance, and Grafana troubleshooting. |
 | Development   | [Build and Development Guide](development/build-and-development-guide.md)                              | App/monitor image build model, package layout, dependency-change behavior, frontend/help/Grafana generation, and generated artifact rules.    |
