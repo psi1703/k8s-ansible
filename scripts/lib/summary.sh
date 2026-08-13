@@ -149,8 +149,6 @@ Namespace:               $namespace
 Repo path:               $(summary_value "${INSTALL_DIR:-}")
 OS/arch:                 $(summary_value "${OS_NAME:-}") / $(summary_value "${ARCH_RAW:-}")
 Deploy mode:             ${DEPLOY_MODE:-full}
-Runner requested:        ${INSTALL_GITHUB_RUNNER:-0}
-Runner only:             ${RUNNER_ONLY:-0}
 App replicas:            ${REPLICA_COUNT:-1}
 App node selector:       $(summary_value "${APP_NODE_SELECTOR_KEY:-}" "none")=${APP_NODE_SELECTOR_VALUE:-}
 Monitor node selector:   $(summary_value "${MONITOR_NODE_SELECTOR_KEY:-}" "none")=${MONITOR_NODE_SELECTOR_VALUE:-}
@@ -234,8 +232,6 @@ Repo path:    ${INSTALL_DIR:-unknown}
 Install report: ${INSTALL_REPORT_PATH:-not-written}
 OS/arch:      ${OS_NAME:-unknown} / ${ARCH_RAW:-unknown}
 Monitor:      installed as required component
-Runner:       ${INSTALL_GITHUB_RUNNER:-0}
-Runner only:  ${RUNNER_ONLY:-0}
 Deploy mode:  ${DEPLOY_MODE:-full}
 App replicas:          ${REPLICA_COUNT:-1}
 App rollout strategy:  managed by rendered Kubernetes deployment manifest
