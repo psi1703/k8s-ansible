@@ -6,11 +6,16 @@
 #   - Detect the dev/build host environment.
 #   - Check for required local build tools.
 #   - Print all missing dependencies at once.
-#   - Do not install packages automatically by default.
+#   - Optionally install build-host dependencies only.
 #   - Do not install K3s.
 #   - Do not wait for Kubernetes readiness.
 #   - Do not query Kubernetes nodes, storage classes, PVCs, or pods.
-#   - Do not configure MetalLB, firewall, networking, or runners.
+#   - Do not configure MetalLB, firewall, networking, production, or runners.
+#
+# INSTALL_BUILD_DEPS behavior:
+#   - auto/default: ask in interactive terminal, fail in non-interactive terminal
+#   - 1/yes/true: install missing build dependencies automatically
+#   - 0/no/false: never install; only print guidance and fail
 #
 # The production server receives only the finished bundle.
 
@@ -21,6 +26,7 @@ OS_LIKE="${OS_LIKE:-}"
 ARCH_RAW="${ARCH_RAW:-}"
 RUNNER_ARCH="${RUNNER_ARCH:-}"
 IS_RPI="${IS_RPI:-0}"
+BUILD_DEPS_INSTALLED="${BUILD_DEPS_INSTALLED:-0}"
 
 _preflight_cmd_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -52,11 +58,52 @@ _preflight_retry() {
 }
 
 _wait_for_apt_locks() {
-  log "skipping apt lock wait in bundle-only mode; this builder does not run apt-get automatically"
+  local lock_paths="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+  local waited=0
+  local max_wait="${APT_LOCK_WAIT_SEC:-300}"
+  local lock_path=""
+
+  if ! _preflight_cmd_exists fuser; then
+    log "fuser is unavailable; skipping apt lock wait"
+    return 0
+  fi
+
+  while [ "$waited" -lt "$max_wait" ]; do
+    local locked=0
+    for lock_path in $lock_paths; do
+      if [ -e "$lock_path" ] && sudo fuser "$lock_path" >/dev/null 2>&1; then
+        locked=1
+        break
+      fi
+    done
+
+    if [ "$locked" = "0" ]; then
+      return 0
+    fi
+
+    warn "apt/dpkg lock is busy; waiting 5s"
+    sleep 5
+    waited=$((waited + 5))
+  done
+
+  fatal "timed out waiting for apt/dpkg locks"
 }
 
 run_apt_get() {
-  fatal "apt-get is forbidden in the default bundle-only build path; install required build tools on the dev/build host before running the builder"
+  if [ "$#" -eq 0 ]; then
+    fatal "run_apt_get called without arguments"
+  fi
+
+  if ! is_debian_family; then
+    fatal "apt-get install is supported only on Debian-family build hosts"
+  fi
+
+  if ! _preflight_cmd_exists sudo; then
+    fatal "sudo is required to install build dependencies automatically"
+  fi
+
+  _wait_for_apt_locks
+  sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
 }
 
 detect_host_environment() {
@@ -192,6 +239,20 @@ _preflight_print_missing_list() {
   printf '%s\n' "$values" | sed '/^$/d; s/^/  - /' >&2
 }
 
+_preflight_apt_packages_for_mode() {
+  local packages="git python3 python3-venv tar gzip coreutils findutils grep sed gawk"
+
+  if requires_app_image 2>/dev/null; then
+    packages="$packages nodejs npm"
+  fi
+
+  if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+    packages="$packages docker.io"
+  fi
+
+  printf '%s' "$packages"
+}
+
 _preflight_print_install_guidance() {
   local apt_packages="$1"
 
@@ -233,20 +294,6 @@ EOF_DEPS
   fi
 }
 
-_preflight_apt_packages_for_mode() {
-  local packages="git python3 python3-venv tar gzip coreutils findutils grep sed gawk"
-
-  if requires_app_image 2>/dev/null; then
-    packages="$packages nodejs npm"
-  fi
-
-  if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
-    packages="$packages docker.io"
-  fi
-
-  printf '%s' "$packages"
-}
-
 _preflight_validate_python_venv() {
   python3 - <<'PY_VENV_CHECK' >/dev/null 2>&1
 import ensurepip
@@ -260,6 +307,94 @@ _preflight_validate_docker_ready() {
   fi
 
   docker info >/dev/null 2>&1
+}
+
+_preflight_install_mode() {
+  case "${INSTALL_BUILD_DEPS:-auto}" in
+    1|yes|YES|true|TRUE|on|ON) printf 'yes' ;;
+    0|no|NO|false|FALSE|off|OFF) printf 'no' ;;
+    auto|AUTO|"") printf 'auto' ;;
+    *) fatal "invalid INSTALL_BUILD_DEPS value: ${INSTALL_BUILD_DEPS}. Use auto, 1, or 0" ;;
+  esac
+}
+
+_preflight_can_prompt() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+_preflight_confirm_install() {
+  local answer=""
+
+  if ! _preflight_can_prompt; then
+    return 1
+  fi
+
+  printf '[otp-relay-k8s] Install missing build dependencies now with apt-get? [Y/n]: ' >&2
+  read -r answer || return 1
+
+  case "$answer" in
+    ""|y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_preflight_install_build_deps() {
+  local apt_packages="$1"
+
+  if ! is_debian_family; then
+    fatal "automatic build dependency installation is supported only on Debian-family hosts"
+  fi
+
+  if ! _preflight_cmd_exists sudo; then
+    fatal "sudo is required for automatic build dependency installation"
+  fi
+
+  log "installing missing build dependencies on dev/build host"
+  run_apt_get update
+  run_apt_get install -y $apt_packages
+
+  if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+    if _preflight_cmd_exists systemctl; then
+      sudo systemctl enable --now docker || warn "could not enable/start docker with systemctl"
+    fi
+
+    if _preflight_cmd_exists usermod; then
+      sudo usermod -aG docker "$(id -un)" || warn "could not add user $(id -un) to docker group"
+    fi
+  fi
+
+  BUILD_DEPS_INSTALLED=1
+  export BUILD_DEPS_INSTALLED
+}
+
+_preflight_handle_missing_deps() {
+  local missing_tools="$1"
+  local missing_features="$2"
+  local apt_packages="$3"
+  local install_mode=""
+
+  _preflight_print_missing_list "missing required command-line tools:" "$missing_tools"
+  _preflight_print_missing_list "missing required build features/services:" "$missing_features"
+  _preflight_print_install_guidance "$apt_packages"
+
+  install_mode="$(_preflight_install_mode)"
+
+  case "$install_mode" in
+    yes)
+      _preflight_install_build_deps "$apt_packages"
+      return 0
+      ;;
+    no)
+      fatal "required local build dependencies are missing for DEPLOY_MODE=${DEPLOY_MODE:-full}"
+      ;;
+    auto)
+      if _preflight_confirm_install; then
+        _preflight_install_build_deps "$apt_packages"
+        return 0
+      fi
+      fatal "required local build dependencies are missing for DEPLOY_MODE=${DEPLOY_MODE:-full}"
+      ;;
+  esac
 }
 
 check_bundle_builder_tools() {
@@ -313,20 +448,46 @@ check_bundle_builder_tools() {
   fi
 
   if [ -n "$missing_tools" ] || [ -n "$missing_features" ]; then
-    _preflight_print_missing_list "missing required command-line tools:" "$missing_tools"
-    _preflight_print_missing_list "missing required build features/services:" "$missing_features"
-
     apt_packages="$(_preflight_apt_packages_for_mode)"
-    _preflight_print_install_guidance "$apt_packages"
+    _preflight_handle_missing_deps "$missing_tools" "$missing_features" "$apt_packages"
 
-    fatal "required local build dependencies are missing for DEPLOY_MODE=${DEPLOY_MODE:-full}"
+    missing_tools=""
+    missing_features=""
+
+    if ! _preflight_cmd_exists python3; then missing_tools="$(_preflight_append_missing "$missing_tools" python3)"; fi
+    if requires_app_image 2>/dev/null; then
+      if ! _preflight_cmd_exists node; then missing_tools="$(_preflight_append_missing "$missing_tools" node)"; fi
+      if ! _preflight_cmd_exists npm; then missing_tools="$(_preflight_append_missing "$missing_tools" npm)"; fi
+    fi
+    if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+      if ! _preflight_cmd_exists docker; then missing_tools="$(_preflight_append_missing "$missing_tools" docker)"; fi
+    fi
+    if _preflight_cmd_exists python3 && ! _preflight_validate_python_venv; then
+      missing_features="$(_preflight_append_missing "$missing_features" "python3 venv support")"
+    fi
+    if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
+      if _preflight_cmd_exists docker && ! _preflight_validate_docker_ready; then
+        missing_features="$(_preflight_append_missing "$missing_features" "working Docker daemon access for user $(id -un)")"
+      fi
+    fi
+
+    if [ -n "$missing_tools" ] || [ -n "$missing_features" ]; then
+      _preflight_print_missing_list "still missing required command-line tools after install attempt:" "$missing_tools"
+      _preflight_print_missing_list "still missing required build features/services after install attempt:" "$missing_features"
+      if printf '%s\n' "$missing_features" | grep -q 'working Docker daemon access'; then
+        warn "Docker may require a new login session after group membership changes"
+        warn "run: newgrp docker"
+        warn "or log out and log back in, then rerun the build"
+      fi
+      fatal "required local build dependencies are still missing for DEPLOY_MODE=${DEPLOY_MODE:-full}"
+    fi
   fi
 
   log "required local build tool check completed"
 }
 
 install_base_os_packages() {
-  log "skipping base OS package installation in bundle-only mode"
+  log "checking/installing build-host dependencies for bundle-only mode"
   check_bundle_builder_tools
 }
 
