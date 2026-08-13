@@ -149,12 +149,31 @@ require_sudo() {
 }
 
 detect_iface() {
+  local default_iface
+  local member
+
   if [[ -n "$HOST_IFACE" ]]; then
     echo "$HOST_IFACE"
     return 0
   fi
 
-  ip route | awk '/^default / {print $5; exit}'
+  default_iface="$(ip route | awk '/^default / {print $5; exit}')"
+
+  if [[ "$default_iface" == "$BRIDGE_NAME" && -d "/sys/class/net/${BRIDGE_NAME}/brif" ]]; then
+    for member in "/sys/class/net/${BRIDGE_NAME}/brif/"*; do
+      [[ -e "$member" ]] || continue
+      member="$(basename "$member")"
+      case "$member" in
+        vnet*|tap*|docker*|virbr*|br-*|lo)
+          continue
+          ;;
+      esac
+      echo "$member"
+      return 0
+    done
+  fi
+
+  echo "$default_iface"
 }
 
 install_packages() {
@@ -365,16 +384,101 @@ ensure_bridge() {
   fi
 
   ip -br addr show "$BRIDGE_NAME" || fatal "$BRIDGE_NAME does not exist after setup"
+  validate_bridge_topology "$iface"
+  ensure_bridge_forwarding
 
   if ping -c 2 "$GATEWAY" >/dev/null 2>&1; then
     ok "Bridge network can reach gateway $GATEWAY"
   else
     warn "Bridge/gateway ping failed immediately after setup."
     warn "Continuing because NetworkManager bridges can take time to activate."
-    warn "If VMs are unreachable later, inspect br0 and the bridge slave connection."
+    warn "If VMs are unreachable later, inspect br0, bridge members, and bridge firewall sysctls."
   fi
 
   ok "Bridge network check completed"
+}
+
+validate_bridge_topology() {
+  local iface="$1"
+  local member
+  local physical_members=()
+
+  if [[ ! -d "/sys/class/net/${BRIDGE_NAME}/brif" ]]; then
+    fatal "${BRIDGE_NAME} exists but has no bridge member directory. Bridge setup is incomplete."
+  fi
+
+  log "Bridge members for ${BRIDGE_NAME}:"
+  for member in "/sys/class/net/${BRIDGE_NAME}/brif/"*; do
+    [[ -e "$member" ]] || continue
+    member="$(basename "$member")"
+    echo "  - $member"
+    case "$member" in
+      vnet*|tap*|docker*|virbr*|br-*|lo)
+        ;;
+      *)
+        physical_members+=("$member")
+        ;;
+    esac
+  done
+
+  if [[ "${#physical_members[@]}" -eq 0 ]]; then
+    fatal "${BRIDGE_NAME} has no physical uplink member. VMs attached to ${BRIDGE_NAME} will not reach the LAN gateway."
+  fi
+
+  if [[ "$iface" != "$BRIDGE_NAME" && ! -e "/sys/class/net/${BRIDGE_NAME}/brif/${iface}" ]]; then
+    warn "Detected host NIC $iface is not a member of ${BRIDGE_NAME}."
+    warn "Physical bridge members detected: ${physical_members[*]}"
+  fi
+
+  if ip -4 addr show "$iface" 2>/dev/null | grep -q 'inet ' && ip -4 addr show "$BRIDGE_NAME" 2>/dev/null | grep -q 'inet '; then
+    warn "$iface and ${BRIDGE_NAME} both have IPv4 addresses."
+    warn "For a clean bridge setup, only ${BRIDGE_NAME} should normally own the host IP."
+  fi
+}
+
+ensure_bridge_forwarding() {
+  local changed=0
+  local key
+  local value
+  local forward_policy=""
+
+  for key in     net.bridge.bridge-nf-call-iptables     net.bridge.bridge-nf-call-ip6tables     net.bridge.bridge-nf-call-arptables
+  do
+    value="$(sysctl -n "$key" 2>/dev/null || true)"
+    if [[ "$value" == "1" ]]; then
+      warn "$key is 1. Bridged VM traffic may be forced through host firewall rules."
+      sudo sysctl -w "${key}=0" >/dev/null
+      changed=1
+    fi
+  done
+
+  if command -v iptables >/dev/null 2>&1; then
+    forward_policy="$(sudo iptables -S FORWARD 2>/dev/null | awk '/^-P FORWARD / {print $3; exit}' || true)"
+    if [[ "$forward_policy" == "DROP" ]]; then
+      warn "Host iptables FORWARD policy is DROP."
+      warn "This is common after Docker installs and can block VMs when bridge netfilter is enabled."
+    fi
+  fi
+
+  if [[ "$changed" == "1" ]]; then
+    log "Persisting libvirt bridge netfilter settings..."
+    sudo tee /etc/sysctl.d/99-otp-relay-libvirt-bridge.conf >/dev/null <<'SYSCTLEOF'
+net.bridge.bridge-nf-call-iptables = 0
+net.bridge.bridge-nf-call-ip6tables = 0
+net.bridge.bridge-nf-call-arptables = 0
+SYSCTLEOF
+    sudo sysctl --system >/dev/null || true
+  fi
+
+  for key in     net.bridge.bridge-nf-call-iptables     net.bridge.bridge-nf-call-ip6tables     net.bridge.bridge-nf-call-arptables
+  do
+    value="$(sysctl -n "$key" 2>/dev/null || true)"
+    if [[ "$value" == "1" ]]; then
+      fatal "$key is still 1 after attempted repair. VM bridge traffic may be blocked."
+    fi
+  done
+
+  ok "Bridge forwarding/netfilter check completed"
 }
 
 ip_is_reserved() {
@@ -806,7 +910,7 @@ repair_guest_dns_and_validate() {
   local name="$2"
   local attempt
 
-  log "Repairing and validating DNS inside $name ($ip)..."
+  log "Repairing and validating network/DNS inside $name ($ip)..."
   log "Host DNS servers for $name: ${DNS_SERVERS}"
 
   repair_ssh_key_permissions
@@ -822,6 +926,7 @@ repair_guest_dns_and_validate() {
       "sudo sh -s" <<DNS_REMOTE >/dev/null 2>&1
 set -eu
 dns_servers='${DNS_SERVERS}'
+gateway='${GATEWAY}'
 rm -f /etc/resolv.conf
 : >/etc/resolv.conf
 for dns in \$dns_servers; do
@@ -849,17 +954,40 @@ for dns in \$dns_servers; do
   printf 'nameserver %s\n' "\$dns" >>/etc/resolv.conf
 done
 printf 'options timeout:2 attempts:2 rotate\n' >>/etc/resolv.conf
-timeout 10 getent hosts deb.debian.org >/dev/null
+
+ip route | grep -q '^default '
+ping -c 1 -W 2 "\$gateway" >/dev/null
+
+dns_ok=0
+for dns in \$dns_servers; do
+  case "\$dns" in
+    ''|127.*|::1|169.254.*) continue ;;
+  esac
+  if ping -c 1 -W 2 "\$dns" >/dev/null 2>&1; then
+    dns_ok=1
+    break
+  fi
+done
+[ "\$dns_ok" -eq 1 ]
+
+name_ok=0
+for host in deb.debian.org cloud.debian.org github.com; do
+  if timeout 10 getent hosts "\$host" >/dev/null 2>&1; then
+    name_ok=1
+    break
+  fi
+done
+[ "\$name_ok" -eq 1 ]
 DNS_REMOTE
     then
-      ok "DNS validated: $name ($ip) can resolve deb.debian.org"
+      ok "Network/DNS validated: $name ($ip) can reach gateway and resolve external names"
       return 0
     fi
 
     sleep 5
   done
 
-  warn "DNS validation failed for $name ($ip). Diagnostics:"
+  warn "Network/DNS validation failed for $name ($ip). Diagnostics:"
   repair_ssh_key_permissions
   ssh \
     -o BatchMode=yes \
@@ -868,9 +996,30 @@ DNS_REMOTE
     -o ConnectTimeout=10 \
     -i "$SSH_KEY" \
     "${VM_USER}@${ip}" \
-    "hostname; ip route; cat /etc/resolv.conf || true; resolvectl status 2>/dev/null || true; getent hosts deb.debian.org || true" || true
+    "hostname; echo '### route'; ip route; echo '### addresses'; ip -br addr; echo '### resolv.conf'; cat /etc/resolv.conf || true; echo '### systemd-resolved'; resolvectl status 2>/dev/null || true; echo '### gateway'; ping -c 2 -W 2 '${GATEWAY}' || true; echo '### dns servers'; for dns in ${DNS_SERVERS}; do echo \"### \$dns\"; ping -c 2 -W 2 \"\$dns\" || true; done; echo '### name resolution'; getent hosts deb.debian.org || true; getent hosts cloud.debian.org || true; getent hosts github.com || true" || true
 
-  fatal "VM DNS is not working on $name ($ip); refusing to write inventory"
+  cat <<DIAG >&2
+
+[ERROR] VM network/DNS validation failed for ${name} (${ip}); refusing to write inventory.
+
+Most common causes:
+  - host bridge firewall is blocking bridged VM traffic
+  - net.bridge.bridge-nf-call-iptables/ip6tables/arptables is still 1
+  - Docker set iptables FORWARD policy to DROP
+  - ${BRIDGE_NAME} is missing a physical uplink
+  - corporate switch port security blocks VM MAC addresses behind the host port
+  - gateway/DNS values in .env are wrong
+
+Host checks to run:
+  cat /proc/sys/net/bridge/bridge-nf-call-iptables
+  cat /proc/sys/net/bridge/bridge-nf-call-ip6tables
+  cat /proc/sys/net/bridge/bridge-nf-call-arptables
+  sudo iptables -S FORWARD
+  ls -l /sys/class/net/${BRIDGE_NAME}/brif
+  ssh -i ${SSH_KEY} ${VM_USER}@${ip} 'ping -c 2 -W 2 ${GATEWAY}; getent hosts github.com'
+
+DIAG
+  exit 1
 }
 
 write_ansible_inventory() {
