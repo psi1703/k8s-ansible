@@ -618,7 +618,7 @@ Before declaring the deployment production-aligned for SCH:
 
 * [x] Root README and docs are current.
 * [x] `.env` is the single operator input source.
-* [x] Workflow uses the self-hosted runner correctly.
+* [x] Repository sync uses `scripts/sync-repo.sh` / the systemd timer, and deployment remains an explicit installer/Ansible action.
 * [x] Observability applies cleanly from source/generated files.
 * [x] Grafana is reachable through `https://grafana.init-db.lan`.
 * [x] Portal is reachable through the intended TLS host.
