@@ -27,6 +27,16 @@ ARCH_RAW="${ARCH_RAW:-}"
 RUNNER_ARCH="${RUNNER_ARCH:-}"
 IS_RPI="${IS_RPI:-0}"
 BUILD_DEPS_INSTALLED="${BUILD_DEPS_INSTALLED:-0}"
+PREFLIGHT_REVISION="docker-group-reexec-20260813-v3"
+DOCKER_GROUP_REFRESH_REQUIRED="${DOCKER_GROUP_REFRESH_REQUIRED:-0}"
+
+if [ -z "${PREFLIGHT_ENTRY_CAPTURED:-}" ]; then
+  PREFLIGHT_ENTRY_SCRIPT="${BASH_SOURCE[1]:-$0}"
+  PREFLIGHT_ENTRY_ARGS=("$@")
+  PREFLIGHT_ENTRY_CAPTURED=1
+fi
+
+export PREFLIGHT_REVISION DOCKER_GROUP_REFRESH_REQUIRED PREFLIGHT_ENTRY_CAPTURED PREFLIGHT_ENTRY_SCRIPT
 
 _preflight_cmd_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -107,6 +117,7 @@ run_apt_get() {
 }
 
 detect_host_environment() {
+  log "preflight revision: ${PREFLIGHT_REVISION}"
   log "detecting build host OS, architecture, and hardware profile"
 
   OS_ID="unknown"
@@ -322,59 +333,105 @@ _preflight_account_has_docker_group() {
   local current_user=""
 
   current_user="$(id -un)"
-  id -nG "$current_user" 2>/dev/null | tr ' ' '\n' | grep -Fxq docker
+
+  if id -nG "$current_user" 2>/dev/null | tr ' ' '\n' | grep -Fxq docker; then
+    return 0
+  fi
+
+  if _preflight_cmd_exists getent; then
+    getent group docker 2>/dev/null | awk -F: -v user="$current_user" '
+      NR == 1 {
+        count = split($4, members, ",")
+        for (i = 1; i <= count; i++) {
+          if (members[i] == user) {
+            found = 1
+          }
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    '
+    return $?
+  fi
+
+  return 1
 }
 
-_preflight_docker_group_refresh_needed() {
-  if [ "${PREFLIGHT_DOCKER_GROUP_REEXEC:-0}" = "1" ]; then
-    return 1
+_preflight_ensure_docker_group_membership() {
+  local current_user=""
+
+  current_user="$(id -un)"
+
+  if ! _preflight_cmd_exists sudo; then
+    fatal "sudo is required to configure Docker group access for ${current_user}"
   fi
 
-  if ! _preflight_cmd_exists docker; then
-    return 1
+  if ! getent group docker >/dev/null 2>&1; then
+    log "creating local docker group"
+    sudo groupadd --system docker || fatal "could not create docker group"
   fi
 
-  if _preflight_validate_docker_ready; then
-    return 1
+  if ! _preflight_current_process_has_docker_group; then
+    log "ensuring user ${current_user} is a member of the docker group"
+    sudo usermod -aG docker "$current_user" || fatal "could not add user ${current_user} to docker group"
+    DOCKER_GROUP_REFRESH_REQUIRED=1
+    export DOCKER_GROUP_REFRESH_REQUIRED
   fi
 
-  if _preflight_current_process_has_docker_group; then
-    return 1
+  if ! _preflight_account_has_docker_group; then
+    fatal "docker group membership for user ${current_user} was not recorded after usermod"
   fi
+}
 
-  _preflight_account_has_docker_group
+_preflight_wait_for_docker_daemon() {
+  local attempts="${DOCKER_DAEMON_WAIT_ATTEMPTS:-30}"
+  local i=1
+
+  while [ "$i" -le "$attempts" ]; do
+    if sudo docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  return 1
 }
 
 _preflight_reexec_with_docker_group() {
-  local -a original_cmd=()
-  local arg=""
+  local entry_script="${PREFLIGHT_ENTRY_SCRIPT:-}"
+  local -a command_parts=()
   local quoted_cmd=""
+  local part=""
 
   if [ "${PREFLIGHT_DOCKER_GROUP_REEXEC:-0}" = "1" ]; then
     return 1
   fi
 
   if ! _preflight_cmd_exists sg; then
-    warn "Docker group membership changed, but 'sg' is unavailable for automatic session refresh"
+    warn "Docker group membership is configured, but 'sg' is unavailable for automatic group refresh"
     return 1
   fi
 
-  if [ ! -r "/proc/$$/cmdline" ]; then
-    warn "Docker group membership changed, but the current command line cannot be reconstructed"
+  if ! sg docker -c 'docker info >/dev/null 2>&1'; then
+    warn "Docker daemon is running, but a fresh docker-group shell still cannot access it"
     return 1
   fi
 
-  mapfile -d '' -t original_cmd < "/proc/$$/cmdline"
-  if [ "${#original_cmd[@]}" -eq 0 ]; then
-    warn "Docker group membership changed, but the current command line is empty"
+  if [ -z "$entry_script" ]; then
+    warn "could not determine bundle-builder entry script for automatic Docker group refresh"
     return 1
   fi
 
-  for arg in "${original_cmd[@]}"; do
-    printf -v quoted_cmd '%s %q' "$quoted_cmd" "$arg"
+  if [[ "$entry_script" != /* ]]; then
+    entry_script="$(cd "$(dirname "$entry_script")" && pwd)/$(basename "$entry_script")"
+  fi
+
+  command_parts=(bash "$entry_script" "${PREFLIGHT_ENTRY_ARGS[@]}")
+  for part in "${command_parts[@]}"; do
+    printf -v quoted_cmd '%s %q' "$quoted_cmd" "$part"
   done
 
-  log "Docker group membership is recorded for $(id -un), but this shell has stale group membership"
+  log "Docker access is ready in a fresh docker-group shell"
   log "restarting the bundle builder once with docker group access; no logout or newgrp is required"
 
   export PREFLIGHT_DOCKER_GROUP_REEXEC=1
@@ -382,11 +439,52 @@ _preflight_reexec_with_docker_group() {
 }
 
 _preflight_refresh_docker_group_if_needed() {
-  if _preflight_docker_group_refresh_needed; then
-    _preflight_reexec_with_docker_group || return 1
+  if _preflight_validate_docker_ready; then
+    return 0
   fi
 
-  return 0
+  if [ "${DOCKER_GROUP_REFRESH_REQUIRED:-0}" = "1" ]; then
+    _preflight_reexec_with_docker_group
+    return $?
+  fi
+
+  if _preflight_account_has_docker_group && ! _preflight_current_process_has_docker_group; then
+    _preflight_reexec_with_docker_group
+    return $?
+  fi
+
+  return 1
+}
+
+_preflight_diagnose_docker_access() {
+  if ! _preflight_cmd_exists docker; then
+    warn "Docker CLI is not installed"
+    return 1
+  fi
+
+  if _preflight_cmd_exists systemctl && ! systemctl is-active --quiet docker 2>/dev/null; then
+    warn "Docker service is not active"
+    return 1
+  fi
+
+  if ! sudo docker info >/dev/null 2>&1; then
+    warn "Docker daemon is not usable even with sudo"
+    return 1
+  fi
+
+  if _preflight_account_has_docker_group && ! _preflight_current_process_has_docker_group; then
+    warn "Docker group membership is recorded, but this process has stale supplementary groups"
+  elif ! _preflight_account_has_docker_group; then
+    warn "user $(id -un) is not recorded as a member of the docker group"
+  else
+    warn "user $(id -un) has docker group membership but Docker access still fails"
+  fi
+
+  if [ -S /var/run/docker.sock ]; then
+    ls -l /var/run/docker.sock >&2 || true
+  fi
+
+  return 1
 }
 
 _preflight_install_mode() {
@@ -437,11 +535,13 @@ _preflight_install_build_deps() {
 
   if requires_app_image 2>/dev/null || requires_monitor_image 2>/dev/null; then
     if _preflight_cmd_exists systemctl; then
-      sudo systemctl enable --now docker || warn "could not enable/start docker with systemctl"
+      sudo systemctl enable --now docker || fatal "could not enable/start docker with systemctl"
     fi
 
-    if _preflight_cmd_exists usermod; then
-      sudo usermod -aG docker "$(id -un)" || warn "could not add user $(id -un) to docker group"
+    _preflight_ensure_docker_group_membership
+
+    if ! _preflight_wait_for_docker_daemon; then
+      fatal "Docker daemon did not become ready after installation/start"
     fi
   fi
 
@@ -562,11 +662,7 @@ check_bundle_builder_tools() {
       _preflight_print_missing_list "still missing required command-line tools after install attempt:" "$missing_tools"
       _preflight_print_missing_list "still missing required build features/services after install attempt:" "$missing_features"
       if printf '%s\n' "$missing_features" | grep -q 'working Docker daemon access'; then
-        if _preflight_account_has_docker_group && ! _preflight_current_process_has_docker_group; then
-          warn "Docker group membership is present, but automatic shell refresh did not succeed"
-        else
-          warn "Docker is installed but daemon access is still unavailable to user $(id -un)"
-        fi
+        _preflight_diagnose_docker_access || true
       fi
       fatal "required local build dependencies are still missing for DEPLOY_MODE=${DEPLOY_MODE:-full}"
     fi
