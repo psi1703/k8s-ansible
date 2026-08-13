@@ -1,0 +1,25 @@
+Install the repo sync timer after the updated files are in /opt/k8s-ansible:
+
+cd /opt/k8s-ansible
+bash scripts/install-repo-sync-timer.sh
+
+Defaults:
+- REPO_DIR=/opt/k8s-ansible
+- REPO_URL=https://github.com/psi1703/k8s-ansible.git
+- BRANCH=main
+- SYNC_INTERVAL=1min
+- RUN_AFTER_SYNC=0
+
+The timer only syncs the repo. It does not run setup.sh or deploy.
+
+Manual sync:
+
+sudo systemctl start k8s-ansible-repo-sync.service
+
+Watch logs:
+
+sudo tail -f /var/log/k8s-ansible/repo-sync.log
+
+Change polling interval example:
+
+SYNC_INTERVAL=5min bash scripts/install-repo-sync-timer.sh
