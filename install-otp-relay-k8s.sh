@@ -18,7 +18,6 @@ INSTALLER_LIBS=(
   common.sh
   env.sh
   os.sh
-  github-runner.sh
   docker.sh
   deploy-mode.sh
   k3s.sh
@@ -69,9 +68,7 @@ require_installer_functions() {
     load_or_create_env
     normalize_loaded_env
     detect_host_environment
-    prompt_optional_runner_setup
     run_preflight_and_prepare_cluster
-    install_github_runner
     install_kubernetes_tooling_and_k3s
     sync_deployment_repo
     validate_source_tree
@@ -160,14 +157,8 @@ main() {
   explain_deploy_mode
 
   run_phase "detect host environment" detect_host_environment
-  run_phase "check optional GitHub runner setup" prompt_optional_runner_setup
   run_phase "run preflight checks and prepare cluster host" run_preflight_and_prepare_cluster
-  run_phase "install or validate GitHub runner" install_github_runner
 
-  if [ "${RUNNER_ONLY:-0}" = "1" ]; then
-    log "RUNNER_ONLY=1 set; GitHub runner setup complete. Skipping Docker, K3s, image build, and deployment."
-    exit 0
-  fi
 
   if [ "$DEPLOY_MODE" = "none" ]; then
     log "DEPLOY_MODE=none; no deployment changes required. Exiting before Docker/K3s work."
