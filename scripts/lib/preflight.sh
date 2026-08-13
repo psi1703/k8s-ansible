@@ -7,7 +7,6 @@ OS_NAME="${OS_NAME:-unknown}"
 OS_VERSION_ID="${OS_VERSION_ID:-unknown}"
 OS_LIKE="${OS_LIKE:-}"
 ARCH_RAW="${ARCH_RAW:-}"
-RUNNER_ARCH="${RUNNER_ARCH:-}"
 IS_RPI="${IS_RPI:-0}"
 
 _preflight_cmd_exists() {
@@ -100,19 +99,13 @@ detect_host_environment() {
   fi
 
   ARCH_RAW="$(uname -m)"
-  case "$ARCH_RAW" in
-    x86_64|amd64) RUNNER_ARCH="x64" ;;
-    aarch64|arm64) RUNNER_ARCH="arm64" ;;
-    armv7l|armv6l|armhf) RUNNER_ARCH="arm" ;;
-    *) RUNNER_ARCH="" ;;
-  esac
 
   IS_RPI=0
   if grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null || grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null; then
     IS_RPI=1
   fi
 
-  export OS_ID OS_NAME OS_VERSION_ID OS_LIKE ARCH_RAW RUNNER_ARCH IS_RPI
+  export OS_ID OS_NAME OS_VERSION_ID OS_LIKE ARCH_RAW IS_RPI
 
   log "detected OS/arch: $OS_NAME / $ARCH_RAW"
 
@@ -135,22 +128,6 @@ is_debian_family() {
   return 1
 }
 
-prompt_optional_runner_setup() {
-  # Optional runner prompt before validation, matching the existing installer behavior.
-  # In non-interactive mode, default to 0 without prompting.
-  if [ -z "${INSTALL_GITHUB_RUNNER:-}" ]; then
-    if [ "${NONINTERACTIVE:-0}" = "1" ]; then
-      INSTALL_GITHUB_RUNNER=0
-    elif prompt_yes_no "Install a GitHub Actions self-hosted runner for CI/CD deployments from GitHub? [y/N]" "N"; then
-      INSTALL_GITHUB_RUNNER=1
-    else
-      INSTALL_GITHUB_RUNNER=0
-    fi
-  fi
-
-  export INSTALL_GITHUB_RUNNER
-  log "GitHub runner setup requested: $INSTALL_GITHUB_RUNNER"
-}
 
 save_network_firewall_snapshots() {
   _preflight_require_root
@@ -241,7 +218,7 @@ install_base_os_packages() {
   log "updating apt package index; this may take a few minutes on a fresh host"
   run_apt_get update
 
-  log "installing base OS packages required for repository sync and optional runner setup with apt-get"
+  log "installing base OS packages required for repository sync and deployment with apt-get"
   run_apt_get install -y --no-install-recommends ca-certificates curl git tar gzip sudo python3 openssl
   log "base OS package installation completed"
 }
