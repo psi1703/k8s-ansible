@@ -2,98 +2,108 @@
 
 ## Purpose
 
-This guide is the deployment and storage reference for OTP Relay Kubernetes.
+This guide explains how OTP Relay is deployed and how persistent runtime storage is handled.
 
-It owns:
+It covers:
 
-* repository sync and deployment flow
-* installer behavior
-* `.env` source-of-truth configuration
-* cluster/node deployment model
-* Traefik/TLS exposure
-* NFS/RWX application storage
-* Redis deployment model
-* Redis StatefulSet update safety
-* post-deployment verification
+- deployment flow
+- `.env` runtime configuration
+- cluster and node roles
+- Traefik and MetalLB exposure
+- NFS/RWX application storage
+- Redis deployment posture
+- generated deployment assets
+- post-deployment checks
 
-Detailed operational checks belong in:
+It does not own day-to-day operations, Grafana dashboard troubleshooting, or development build details.
+
+Use these documents for related areas:
 
 ```text
 docs/operations/operations-and-validation-runbook.md
-```
-
-Detailed Grafana, Prometheus, Loki, Alloy, and dashboard guidance belongs in:
-
-```text
 docs/operations/observability-and-grafana.md
-```
-
-Detailed build/source-generated artifact guidance belongs in:
-
-```text
 docs/development/build-and-development-guide.md
 ```
 
 ---
 
-## Recommended deployment path
+## Deployment model in one view
 
-Use the local repository sync script to keep the build/control-plane machine aligned with GitHub, then run deployment intentionally from that machine.
+The current repo model is intentionally operator-controlled.
 
 ```text
-GitHub main branch changes
-  -> build/control-plane machine runs scripts/sync-repo.sh manually or by systemd timer
-  -> local checkout is hard-reset to origin/main
-  -> local runtime files such as .env and generated inventory are preserved
-  -> operator runs setup.sh or install-otp-relay-k8s.sh intentionally
-  -> installer loads or creates .env
-  -> installer builds required generated assets
-  -> installer builds/imports app and monitor images
-  -> installer renders Kubernetes resources from .env
-  -> installer applies Kubernetes resources
-  -> installer applies observability resources when enabled
-  -> installer waits for rollouts
-  -> installer prints deployment summary
+GitHub main branch
+  -> local build/control-plane checkout
+  -> scripts/sync-repo.sh updates repo files only
+  -> local .env is preserved
+  -> operator runs setup.sh intentionally
+  -> installer validates runtime configuration
+  -> generated assets are rebuilt when needed
+  -> images are built/imported
+  -> Kubernetes manifests are rendered from .env
+  -> app, monitor, Redis, ingress, storage, and observability are applied
+  -> health and rollout checks confirm the deployment
 ```
 
-Repository sync command:
+Repository sync is not deployment.
+
+`sync-repo.sh` must not:
+
+- install K3s
+- run Helm
+- apply Kubernetes manifests
+- import container images
+- restart workloads
+- run Ansible deployment tasks
+- mutate a live cluster
+
+Deployment changes happen only when the operator intentionally runs the installer path.
+
+---
+
+## Operator commands
+
+Sync local checkout with GitHub:
 
 ```bash
+cd /opt/k8s-ansible
 bash scripts/sync-repo.sh
 ```
 
-Optional systemd timer setup:
+Run the normal setup/deployment path:
 
 ```bash
-bash scripts/install-repo-sync-timer.sh
-```
-
-Deployment command:
-
-```bash
+cd /opt/k8s-ansible
 bash setup.sh
 ```
 
-Repository sync must remain sync-only. It must not install K3s, run Helm, apply Kubernetes manifests, import images, restart workloads, run Ansible deployment tasks, or mutate a live cluster. Deployment logic belongs in the installer and repository scripts, not in an external CI workflow.
+Optional repo-sync timer:
+
+```bash
+cd /opt/k8s-ansible
+bash scripts/install-repo-sync-timer.sh
+```
+
+The timer is still sync-only. It should never deploy by itself.
 
 ---
 
 ## Runtime configuration source of truth
 
-The repository root `.env` file is the single source of operator-provided deployment values.
+The repository-root `.env` file is the source of truth for site-specific runtime configuration.
 
 Fresh install behavior:
 
-* If `.env` is missing, the installer should create it interactively unless non-interactive mode is explicitly enabled.
-* Required values should be validated before deployment continues.
-* Site-specific values should be written to `.env`, not hardcoded elsewhere.
+- If `.env` is missing, the installer creates or prompts for it.
+- Required values must be validated before deployment continues.
+- Site-specific values must be written to `.env`, not hardcoded into scripts or YAML.
 
 Update behavior:
 
-* Existing `.env` is loaded automatically.
-* Existing `.env` must not be overwritten silently.
-* Incomplete or invalid `.env` should fail clearly or trigger the documented recreate flow.
-* Normal updates must preserve existing Redis and PVC data.
+- Existing `.env` is loaded automatically.
+- Existing `.env` must not be overwritten silently.
+- Incomplete `.env` should fail clearly or follow the documented recreate path.
+- Normal updates must preserve Redis data and PVC contents.
 
 Values that belong in `.env` include:
 
@@ -105,6 +115,7 @@ INGRESS_ENABLED
 TLS_ENABLED
 TLS_SECRET_NAME
 TLS_SELF_SIGNED
+LOADBALANCER_IP
 PHONE_IP
 PHONE_INTERFACE
 TELEGRAM_BOT_TOKEN
@@ -119,6 +130,7 @@ NFS_PATH
 NFS_STORAGE_CLASS
 PVC_STORAGE_CLASS
 REPLICA_COUNT
+GRAFANA_HOST
 ```
 
 Do not place site-specific values directly in:
@@ -128,65 +140,55 @@ Python files
 shell scripts
 Kubernetes YAML
 Ansible tasks
-documentation examples
+documentation examples intended as active config
 ```
 
 ---
 
-## Required runtime secrets and local configuration
+## Secrets and local-only files
 
-Runtime values belong in the repository-root `.env` file on the build/control-plane machine.
-
-Typical required secret or site-specific values include:
-
-```text
-PHONE_IP
-PHONE_INTERFACE
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-PORTAL_URL
-SMS_SECRET_TOKEN
-```
-
-The `.env` file is local runtime state. It must be preserved by repository sync and must not be committed to Git.
+The `.env` file is local runtime state. It must be preserved by repository sync and must not be committed.
 
 Do not commit:
 
-* Telegram credentials
-* SMS secret token
-* runtime tokens
-* generated secrets
-* `.env`
-* production `users.xlsx`
+- `.env`
+- Telegram credentials
+- SMS secret token
+- runtime tokens
+- generated Kubernetes secrets
+- production `users.xlsx`
+- `admin_auth.json`
+- `admin_config.json`
+- `wizard_progress.json`
+- `audit.log`
+
+OTP values must remain runtime-only. They must not be written to disk, logs, manifests, install reports, or committed files.
 
 ---
 
-## Current Phase 3 deployment posture
+## Current production-style posture
 
-Current validation values:
+The current deployment posture is a resilience extension over the simple SCH baseline.
+
+Expected posture:
 
 ```text
 SERVICE_TYPE=ClusterIP
 INGRESS_ENABLED=1
-TLS_ENABLED=1
 TLS_HOST=srvotptest26.init-db.lan
-TLS_SECRET_NAME=otp-relay-tls
-TLS_SELF_SIGNED=1
+LOADBALANCER_IP=172.31.11.121
 REDIS_ENABLED=1
 REDIS_REQUIRED=1
 REDIS_URL=redis://otp-redis-haproxy:6379/0
 NFS_ENABLED=1
-NFS_SERVER=172.31.11.108
-NFS_PATH=/export/otp-relay-data
 NFS_STORAGE_CLASS=otp-relay-nfs
 PVC_STORAGE_CLASS=otp-relay-nfs
+GRAFANA_HOST=grafana-srvotptest26.init-db.lan
 ```
 
-`REPLICA_COUNT` is controlled by `.env`.
+The portal is exposed through Traefik Ingress. The `otp-relay` service remains internal and is used as the Ingress backend.
 
-Two app replicas were validated with real SMS/OTP portal confirmation and worker-drain recovery on **2026-06-03**.
-
-The portal is exposed through Traefik Ingress. The `otp-relay` service remains internal to the cluster and is used as the Ingress backend.
+The app may run more than one replica only because OTP queue and pending OTP state are Redis-backed.
 
 ---
 
@@ -194,59 +196,109 @@ The portal is exposed through Traefik Ingress. The `otp-relay` service remains i
 
 The current `k8s-ansible` deployment model uses:
 
-| Role          | Description                                                  |
-| ------------- | ------------------------------------------------------------ |
+| Role | Description |
+|---|---|
 | Control-plane | Real server / localhost K3s control-plane and Ansible control host |
-| Worker 1      | VM worker node                                               |
-| Worker 2      | VM worker node                                               |
-| NFS server    | External storage server, not joined as a Kubernetes node     |
+| Worker 1 | VM worker node |
+| Worker 2 | VM worker node |
+| NFS server | External storage server, not joined to Kubernetes |
 
-Deployment rules:
+Placement rules:
 
-* VM provisioning should create worker VMs only.
-* The real server is the K3s control-plane and Ansible control host.
-* The external NFS server should not be joined to Kubernetes.
-* The monitor should run on the node with phone-network visibility.
-* Redis-capable nodes should be labelled for Redis/storage placement.
+- VM provisioning creates worker VMs only.
+- The real server remains the K3s control-plane and Ansible control host.
+- The NFS server is external storage and should not be joined to Kubernetes.
+- The monitor should run on the node with phone-network visibility.
+- App replicas should run on worker nodes where possible.
+- Redis/Sentinel/HAProxy should be spread across nodes where possible.
 
-Known node labels:
+Known useful labels:
 
 ```text
 otp-relay/storage-node=true
 otp-relay/monitor-node=true
 ```
 
-During controlled worker-drain maintenance, one Redis pod may temporarily remain `Pending` because of one-per-node Redis placement. This is acceptable only if `/readyz`, Redis/Sentinel/HAProxy checks, app availability, and post-uncordon strict health all pass.
+During controlled worker maintenance, one Redis pod may temporarily remain pending because of one-per-node placement. That is acceptable only during a controlled operation and only if app readiness, Redis HAProxy/Sentinel health, and post-maintenance recovery pass.
 
 ---
 
-## Traefik and TLS
+## Network access layer
 
-The current validation path uses:
+Normal access model:
 
-* Traefik Ingress for HTTP/HTTPS routing
-* Kubernetes TLS secret for HTTPS
-* self-signed TLS until IT distributes/trusts the certificate
-* internal DNS name `srvotptest26.init-db.lan`
+```text
+Portal hostname  -> Traefik LoadBalancer IP -> OTP Relay Ingress
+Grafana hostname -> Traefik LoadBalancer IP -> Grafana Ingress
+```
 
-Validate exposure after deployment:
+Current expected hostnames:
+
+```text
+Portal:  srvotptest26.init-db.lan
+Grafana: grafana-srvotptest26.init-db.lan
+```
+
+Current expected Traefik LoadBalancer IP:
+
+```text
+172.31.11.121
+```
+
+Important behavior:
+
+- Bare IP access may hit the portal/default ingress.
+- Grafana should normally be accessed through its Grafana hostname.
+- If DNS is unavailable, a dedicated optional Grafana LoadBalancer mode may be used as a deliberate dev/test workaround.
+- Do not treat `grafana-test.lan` as the active hostname.
+
+Validate network resources:
 
 ```bash
-sudo k3s kubectl get svc -n otp-relay
-sudo k3s kubectl get ingress -n otp-relay
-sudo k3s kubectl get secret otp-relay-tls -n otp-relay
+sudo k3s kubectl -n kube-system get svc traefik -o wide
+sudo k3s kubectl -n otp-relay get ingress -o wide
+sudo k3s kubectl -n observability get ingress -o wide
+```
+
+Expected:
+
+```text
+traefik EXTERNAL-IP = 172.31.11.121
+otp-relay ingress host = srvotptest26.init-db.lan
+grafana ingress host = grafana-srvotptest26.init-db.lan
+```
+
+---
+
+## TLS posture
+
+The portal may use HTTPS through Traefik and a Kubernetes TLS secret.
+
+Typical portal TLS values:
+
+```text
+TLS_ENABLED=1
+TLS_HOST=srvotptest26.init-db.lan
+TLS_SECRET_NAME=otp-relay-tls
+TLS_SELF_SIGNED=1
+```
+
+Validate portal TLS:
+
+```bash
+sudo k3s kubectl -n otp-relay get secret otp-relay-tls
 curl -k https://srvotptest26.init-db.lan/healthz
 curl -k https://srvotptest26.init-db.lan/readyz
 ```
 
 Expected:
 
-* Ingress host is `srvotptest26.init-db.lan`.
-* TLS secret exists.
-* `/healthz` returns 200.
-* `/readyz` returns 200 with Redis healthy and Redis required.
+- TLS secret exists.
+- `/healthz` returns 200.
+- `/readyz` returns 200.
+- `/readyz` reports Redis healthy when `REDIS_REQUIRED=1`.
 
-Browser users may see a certificate warning until IT deploys trust for the internal/self-signed certificate.
+Browser users may see a certificate warning until IT distributes trust for the internal certificate or replaces it with an approved certificate.
 
 ---
 
@@ -254,14 +306,7 @@ Browser users may see a certificate warning until IT deploys trust for the inter
 
 The app data PVC should use shared NFS/RWX storage.
 
-Expected NFS export:
-
-```text
-NFS server: 172.31.11.108
-NFS path:   /export/otp-relay-data
-```
-
-Expected Kubernetes storage:
+Expected Kubernetes storage model:
 
 ```text
 PV:            otp-relay-data-nfs-pv
@@ -283,35 +328,15 @@ audit.log
 
 The monitor also reads the shared audit log from this storage path.
 
-OTP values must not be written to the NFS-backed files.
+OTP values must not be written to NFS-backed files.
 
-NFS/RWX app storage was validated on **2026-06-03** by writing a proof file from one app pod and reading it from another app pod.
-
----
-
-## Existing PVC migration rule
-
-Before moving an existing live deployment from local-path/RWO to NFS/RWX:
-
-1. Scale the app and monitor safely if needed.
-2. Back up the existing `/app/data` contents.
-3. Confirm the NFS export exists.
-4. Confirm Kubernetes can mount the NFS export.
-5. Restore app data onto the NFS export.
-6. Apply NFS PV/PVC configuration.
-7. Restart the app and monitor.
-8. Verify that `users.xlsx`, config files, wizard progress, and `audit.log` are present.
-9. Verify write access from the app pod.
-10. Verify monitor can read the shared audit log.
-
-Do not delete old PVC data until the NFS-backed deployment is verified.
-
-Validate write access:
+Validate PVC and mount state:
 
 ```bash
-sudo k3s kubectl -n otp-relay get pods -l app=otp-relay -o name | while read p; do
-  echo "=== $p ==="
-  sudo k3s kubectl -n otp-relay exec "${p#pod/}" -- sh -c '
+sudo k3s kubectl -n otp-relay get pvc
+sudo k3s kubectl -n otp-relay get pods -l app=otp-relay -o name | while read -r pod; do
+  echo "=== ${pod} ==="
+  sudo k3s kubectl -n otp-relay exec "${pod#pod/}" -- sh -c '
     id
     touch /app/data/write-test &&
     rm -f /app/data/write-test &&
@@ -330,9 +355,30 @@ from each app pod.
 
 ---
 
+## Existing PVC migration rule
+
+Before moving an existing live deployment from local-path/RWO to NFS/RWX:
+
+1. Stop or scale workloads safely if needed.
+2. Back up existing `/app/data` contents.
+3. Confirm the NFS export exists.
+4. Confirm Kubernetes can mount the NFS export.
+5. Restore app data onto the NFS export.
+6. Apply NFS PV/PVC configuration.
+7. Restart app and monitor workloads.
+8. Verify `users.xlsx`, config files, wizard state, and `audit.log` exist.
+9. Verify app pod write access.
+10. Verify monitor can read the shared audit log.
+
+Do not delete old PVC data until the NFS-backed deployment is verified.
+
+---
+
 ## Redis deployment model
 
-Redis is required in the Phase 3 validation posture.
+Redis is required for the current multi-replica posture.
+
+Expected app Redis connection:
 
 ```text
 REDIS_REQUIRED=1
@@ -353,23 +399,34 @@ redis-haproxy-deployment.yaml
 redis-haproxy-service.yaml
 ```
 
-The app uses:
+The app should connect through:
 
 ```text
-REDIS_URL=redis://otp-redis-haproxy:6379/0
+otp-redis-haproxy:6379
 ```
 
-`otp-redis-haproxy` routes to the current Redis master based on Sentinel state.
+The app should not connect directly to a single Redis pod.
 
-App pods should not connect directly to a single Redis pod.
+Validate Redis posture:
 
-Redis HA/Sentinel/HAProxy behavior was validated on **2026-06-03**, including Redis master pod deletion recovery and post-recovery strict health validation.
+```bash
+sudo k3s kubectl -n otp-relay get pods -o wide | grep -E 'otp-redis|sentinel|haproxy'
+sudo k3s kubectl -n otp-relay get svc | grep -E 'otp-redis|sentinel|haproxy'
+curl -k https://srvotptest26.init-db.lan/readyz
+```
+
+Expected:
+
+- Redis pods are Running.
+- Sentinel pods are Running.
+- HAProxy pods are Running.
+- `/readyz` reports Redis healthy.
 
 ---
 
 ## Redis StatefulSet update safety
 
-Kubernetes does not allow normal `apply`/patch updates to some StatefulSet fields after the StatefulSet is created.
+Kubernetes does not allow normal patch updates to some StatefulSet fields after creation.
 
 A normal update may fail with:
 
@@ -377,20 +434,18 @@ A normal update may fail with:
 The StatefulSet "otp-redis" is invalid: spec: Forbidden: updates to statefulset spec for fields other than ...
 ```
 
-This means the desired Redis StatefulSet manifest changed an immutable field.
+Normal deployment or update behavior must not:
 
-Normal deployment or workflow update behavior must not:
-
-* silently delete the Redis StatefulSet
-* delete Redis PVCs
-* recreate Redis as a side effect of an app or observability update
-* treat Redis data loss as acceptable by default
+- silently delete the Redis StatefulSet
+- delete Redis PVCs
+- recreate Redis as a side effect of unrelated changes
+- treat Redis data loss as acceptable by default
 
 Safe behavior is one of:
 
 1. preserve the existing StatefulSet and continue with a clear warning,
-2. fail clearly and require an explicit maintenance action, or
-3. run a documented destructive Redis reset path only when intentionally requested.
+2. fail clearly and require an explicit maintenance action,
+3. run a documented destructive Redis reset only when intentionally approved.
 
 Before any destructive Redis action, inspect:
 
@@ -400,7 +455,7 @@ sudo k3s kubectl -n otp-relay get pvc
 sudo k3s kubectl -n otp-relay get pods -l app=otp-redis -o wide
 ```
 
-A normal application, documentation, workflow, frontend, or observability update should not destroy Redis data.
+A normal application, documentation, frontend, workflow, or observability update must not destroy Redis data.
 
 ---
 
@@ -412,30 +467,24 @@ Observability resources live under:
 k8s/observability/
 ```
 
-The installer may apply observability resources when observability is enabled.
-
-Normal Grafana access:
-
-```text
-https://grafana.init-db.lan
-```
-
-The Grafana dashboard follows this source-generated model:
-
-```text
-Source:    k8s/observability/dashboards/otp-relay-live.json
-Generated: k8s/observability/grafana-dashboard-otp-relay-live.yaml
-Generator: scripts/build_grafana_dashboard_configmap.py
-```
-
-Observability recovery was validated on **2026-06-03**, including Prometheus/Grafana/Loki/Alloy checks and Grafana dashboard persistence after restart.
-
-This guide does not own dashboard query details or Grafana troubleshooting.
-
-See:
+The deployment guide only describes how observability is attached to deployment. Dashboard queries and Grafana troubleshooting belong in:
 
 ```text
 docs/operations/observability-and-grafana.md
+```
+
+Current Grafana hostname:
+
+```text
+grafana-srvotptest26.init-db.lan
+```
+
+Grafana dashboard source-generated model:
+
+```text
+Source:     k8s/observability/dashboards/otp-relay-live.json
+Generated:  k8s/observability/grafana-dashboard-otp-relay-live.yaml
+Generator:  scripts/build_grafana_dashboard_configmap.py
 ```
 
 ---
@@ -444,7 +493,7 @@ docs/operations/observability-and-grafana.md
 
 The installer is responsible for generating required deployment artifacts.
 
-Important generated paths:
+Generated paths:
 
 ```text
 frontend/app.js
@@ -452,7 +501,7 @@ frontend/help/
 k8s/observability/grafana-dashboard-otp-relay-live.yaml
 ```
 
-Source files:
+Source paths:
 
 ```text
 frontend/app.jsx
@@ -461,7 +510,9 @@ docs/help/assets/
 k8s/observability/dashboards/otp-relay-live.json
 ```
 
-Detailed source/generated rules belong in:
+Do not edit generated files as source.
+
+For build rules, see:
 
 ```text
 docs/development/build-and-development-guide.md
@@ -473,7 +524,7 @@ docs/development/build-and-development-guide.md
 
 The installer path is preferred.
 
-Manual image build is only a fallback when intentionally operating from the build/control-plane host.
+Manual image build is only a fallback for controlled operation from the build/control-plane host.
 
 Build locally from the repo root:
 
@@ -499,16 +550,10 @@ sudo k3s ctr images import otp-monitor-latest.tar
 Restart workloads:
 
 ```bash
-sudo k3s kubectl rollout restart deployment/otp-relay -n otp-relay
-sudo k3s kubectl rollout restart deployment/otp-monitor -n otp-relay
-sudo k3s kubectl rollout status deployment/otp-relay -n otp-relay
-sudo k3s kubectl rollout status deployment/otp-monitor -n otp-relay
-```
-
-For image build details, see:
-
-```text
-docs/development/build-and-development-guide.md
+sudo k3s kubectl -n otp-relay rollout restart deployment/otp-relay
+sudo k3s kubectl -n otp-relay rollout restart deployment/otp-monitor
+sudo k3s kubectl -n otp-relay rollout status deployment/otp-relay
+sudo k3s kubectl -n otp-relay rollout status deployment/otp-monitor
 ```
 
 ---
@@ -519,10 +564,11 @@ Run these after deployment:
 
 ```bash
 sudo k3s kubectl get nodes -o wide
-sudo k3s kubectl get pods -n otp-relay -o wide
-sudo k3s kubectl get svc -n otp-relay
-sudo k3s kubectl get ingress -n otp-relay
-sudo k3s kubectl get pvc -n otp-relay
+sudo k3s kubectl -n otp-relay get pods -o wide
+sudo k3s kubectl -n otp-relay get svc
+sudo k3s kubectl -n otp-relay get ingress -o wide
+sudo k3s kubectl -n otp-relay get pvc
+sudo k3s kubectl -n kube-system get svc traefik -o wide
 curl -k https://srvotptest26.init-db.lan/healthz
 curl -k https://srvotptest26.init-db.lan/readyz
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
@@ -530,14 +576,15 @@ sudo /usr/local/bin/otp-relayk3s-monitor.sh
 
 Expected:
 
-* nodes are Ready
-* app pods are Running/Ready
-* monitor pod is Running/Ready
-* Redis/Sentinel/HAProxy pods are Running/Ready
-* PVC is Bound
-* `/healthz` returns 200
-* `/readyz` returns 200 with Redis healthy and required
-* monitor health script reports OK
+- nodes are Ready
+- app pods are Running/Ready
+- monitor pod is Running/Ready
+- Redis/Sentinel/HAProxy pods are Running/Ready
+- PVC is Bound
+- Traefik has the expected MetalLB IP
+- `/healthz` returns 200
+- `/readyz` returns 200 with Redis healthy
+- monitor health script reports OK
 
 For complete operational validation, see:
 
@@ -549,7 +596,7 @@ docs/operations/operations-and-validation-runbook.md
 
 ## Deployment troubleshooting scope
 
-This guide only covers deployment-specific failure areas.
+This guide covers deployment-specific failure areas only.
 
 For day-to-day operations and validation, use:
 
@@ -557,7 +604,7 @@ For day-to-day operations and validation, use:
 docs/operations/operations-and-validation-runbook.md
 ```
 
-For Grafana/Prometheus issues, use:
+For Grafana/Prometheus/Loki/Alloy, use:
 
 ```text
 docs/operations/observability-and-grafana.md
@@ -575,9 +622,9 @@ Check Redis first when `REDIS_REQUIRED=1`:
 
 ```bash
 curl -k https://srvotptest26.init-db.lan/readyz
-sudo k3s kubectl get pods -n otp-relay -o wide | grep -E 'redis|haproxy'
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=100
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
+sudo k3s kubectl -n otp-relay get pods -o wide | grep -E 'redis|haproxy'
+sudo k3s kubectl -n otp-relay logs deployment/otp-redis-sentinel --tail=100
+sudo k3s kubectl -n otp-relay logs deployment/otp-redis-haproxy --tail=100
 ```
 
 ### NFS write fails after deployment
@@ -585,11 +632,11 @@ sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
 Check PVC and permissions:
 
 ```bash
-sudo k3s kubectl describe pvc otp-relay-data -n otp-relay
-sudo k3s kubectl exec -n otp-relay deployment/otp-relay -- ls -l /app/data
+sudo k3s kubectl -n otp-relay describe pvc otp-relay-data
+sudo k3s kubectl -n otp-relay exec deployment/otp-relay -- ls -l /app/data
 ```
 
-On the NFS server, verify ownership/permissions for the app UID/GID expected by the container.
+On the NFS server, verify ownership and permissions for the UID/GID expected by the container.
 
 ### Redis StatefulSet apply fails
 
@@ -604,7 +651,24 @@ sudo k3s kubectl -n otp-relay get statefulset otp-redis -o yaml
 sudo k3s kubectl -n otp-relay get pvc
 ```
 
-Then use the documented maintenance/reset path only if destructive Redis recreation is intentionally approved.
+Use the documented maintenance/reset path only if destructive Redis recreation is intentionally approved.
+
+### Grafana hostname does not open in browser
+
+First test from the control-plane host:
+
+```bash
+curl -I -H "Host: grafana-srvotptest26.init-db.lan" http://172.31.11.121/
+```
+
+Expected:
+
+```text
+HTTP/1.1 302 Found
+Location: /login
+```
+
+If this works, Kubernetes is routing correctly and the remaining issue is client DNS or network access.
 
 ---
 
@@ -613,10 +677,10 @@ Then use the documented maintenance/reset path only if destructive Redis recreat
 ```text
 .env
 secret.env
-Runtime tokens
+runtime tokens
 Telegram credentials
 SMS secret token
-users.xlsx production copy
+production users.xlsx
 admin_auth.json
 admin_config.json
 wizard_progress.json
@@ -629,25 +693,26 @@ audit.log
 
 ## Deployment sign-off checklist
 
-* [x] `.env` exists and contains the intended runtime values.
-* [x] Repository sync path is configured with `scripts/sync-repo.sh` or an approved manual sync process.
-* [x] Installer runs without replacing `.env` unexpectedly.
-* [x] Required generated assets are produced before image build/apply.
-* [x] App and monitor images build successfully.
-* [x] K3s imports the expected images.
-* [x] Kubernetes resources apply cleanly.
-* [x] Redis StatefulSet is not destructively recreated during a normal update.
-* [x] NFS PVC is Bound.
-* [x] App can write to `/app/data`.
-* [x] Monitor can read `/app/data/audit.log`.
-* [x] `/healthz` returns 200.
-* [x] `/readyz` returns 200 with Redis healthy.
-* [x] Monitor health script reports OK.
-* [x] Grafana loads at `https://grafana.init-db.lan` when observability is enabled.
-* [x] Telegram alerting configuration is present when alerts are expected.
-* [x] OTP business-flow validation passed on 2026-06-03.
-* [x] Two-replica and worker-drain validation passed on 2026-06-03.
-* [ ] IT certificate trust rollout is completed or explicitly tracked as pending.
-* [ ] Redis backup/restore procedure is documented.
-* [ ] SCH accepts Redis Sentinel/HAProxy or selects managed Redis.
-* [ ] Final production LB/VIP model is confirmed with SCH if required.
+Use this as a lightweight checklist. Detailed destructive validation belongs in the operations runbook.
+
+- [ ] `.env` exists and contains intended runtime values.
+- [ ] Repository sync is configured or the manual sync process is understood.
+- [ ] Installer runs without replacing `.env` unexpectedly.
+- [ ] Required generated assets are produced before image build/apply.
+- [ ] App and monitor images build successfully.
+- [ ] K3s imports the expected images.
+- [ ] Kubernetes resources apply cleanly.
+- [ ] Redis StatefulSet is not destructively recreated during normal update.
+- [ ] NFS PVC is Bound.
+- [ ] App can write to `/app/data`.
+- [ ] Monitor can read `/app/data/audit.log`.
+- [ ] `/healthz` returns 200.
+- [ ] `/readyz` returns 200 with Redis healthy.
+- [ ] Monitor health script reports OK.
+- [ ] Portal hostname resolves to the Traefik/MetalLB IP.
+- [ ] Grafana hostname resolves to the Traefik/MetalLB IP or an approved direct Grafana LoadBalancer IP.
+- [ ] Telegram alerting configuration is present when alerts are expected.
+- [ ] OTP business-flow validation is completed before production sign-off.
+- [ ] IT certificate/DNS work is completed or explicitly tracked as pending.
+- [ ] Redis backup/restore procedure is documented.
+- [ ] Final production LB/VIP model is confirmed if required.
