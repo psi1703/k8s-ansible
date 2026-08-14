@@ -1,33 +1,31 @@
-# Observability and Grafana Guide
+# Observability and Grafana
 
 ## Purpose
 
-This guide is the observability reference for OTP Relay Kubernetes.
+This document explains the observability layer for the OTP Relay Kubernetes environment.
 
-It owns:
+It covers:
 
-* Prometheus, Grafana, Loki, and Alloy guidance
-* ServiceMonitor validation
-* OTP Relay portal and monitor metrics
-* Grafana dashboard provisioning
-* dashboard source/generated workflow
-* replica-aware PromQL guidance
-* Grafana access through Traefik/IngressRoute
-* dashboard-specific troubleshooting
+- Prometheus, Grafana, Loki, and Alloy roles
+- OTP Relay portal and monitor metrics
+- ServiceMonitor validation
+- Grafana dashboard source and generated files
+- Grafana access through Traefik
+- Dashboard troubleshooting
 
-General operations and SCH validation belong in:
+General cluster operations belong in:
 
 ```text
 docs/operations/operations-and-validation-runbook.md
 ```
 
-Deployment and storage guidance belongs in:
+Deployment and storage details belong in:
 
 ```text
 docs/deployment/deployment-and-storage-guide.md
 ```
 
-Build/source-generated artifact guidance belongs in:
+Build and generated artifact rules belong in:
 
 ```text
 docs/development/build-and-development-guide.md
@@ -35,7 +33,23 @@ docs/development/build-and-development-guide.md
 
 ---
 
-## Observability namespace
+## Layer summary
+
+Observability is a separate operational layer above the OTP Relay application and Kubernetes runtime.
+
+```text
+OTP Relay app and monitor
+  -> expose /metrics
+  -> scraped by Prometheus through ServiceMonitors
+  -> displayed in Grafana dashboards
+  -> logs collected by Alloy and stored in Loki when enabled
+```
+
+The observability layer must not own the OTP Relay runtime state. It observes the system; it does not replace Redis, PVC storage, the monitor, or the portal readiness checks.
+
+---
+
+## Namespace
 
 Observability resources run in:
 
@@ -45,29 +59,99 @@ observability
 
 Core components:
 
-| Component                          | Purpose                                                   |
-| ---------------------------------- | --------------------------------------------------------- |
-| Prometheus / kube-prometheus-stack | Scrapes portal, monitor, Kubernetes, and platform metrics |
-| Grafana                            | Displays the OTP Relay live dashboard                     |
-| ServiceMonitor `otp-relay`         | Scrapes portal metrics                                    |
-| ServiceMonitor `otp-monitor`       | Scrapes monitor metrics                                   |
-| Loki                               | Stores logs when deployed                                 |
-| Alloy                              | Collects and forwards logs when deployed                  |
-| Grafana dashboard ConfigMap        | Provisions the OTP Relay live dashboard                   |
+| Component | Purpose |
+|---|---|
+| Prometheus / kube-prometheus-stack | Scrapes OTP Relay, monitor, Kubernetes, and platform metrics |
+| Grafana | Displays the OTP Relay live dashboard |
+| ServiceMonitor `otp-relay` | Scrapes portal metrics |
+| ServiceMonitor `otp-monitor` | Scrapes monitor metrics |
+| Loki | Stores logs when deployed |
+| Alloy | Collects and forwards logs when deployed |
+| Grafana dashboard ConfigMap | Provisions the OTP Relay live dashboard |
 
 ---
 
-## Normal Grafana access
+## Normal Grafana access model
 
-Grafana should be accessed through Traefik/IngressRoute.
+The preferred access model is Traefik Ingress with an internal DNS hostname.
 
-Current browser access path:
+Current test-cluster hostname:
 
 ```text
-https://grafana.init-db.lan
+grafana-srvotptest26.init-db.lan
 ```
 
-Port-forwarding is not the normal Grafana access model. Use port-forwarding only for temporary debugging or when checking Prometheus directly from the control-plane host.
+Current shared Traefik / MetalLB IP:
+
+```text
+172.31.11.121
+```
+
+Expected DNS record:
+
+```text
+grafana-srvotptest26.init-db.lan  A  172.31.11.121
+```
+
+Expected browser URL when DNS exists:
+
+```text
+http://grafana-srvotptest26.init-db.lan/
+```
+
+If TLS is enabled later, the URL may become:
+
+```text
+https://grafana-srvotptest26.init-db.lan/
+```
+
+Do not use `grafana-test.lan` as the active hostname. It is not the current environment hostname.
+
+Do not expect bare-IP access to route to Grafana when Grafana is exposed by host-based Ingress. Bare IP access has no Grafana Host header and may route to the default portal Ingress instead.
+
+Example:
+
+```text
+http://172.31.11.121/                    -> portal/default route
+http://grafana-srvotptest26.init-db.lan/ -> Grafana route
+```
+
+---
+
+## Optional direct-IP Grafana access
+
+If DNS is not available and Windows hosts-file changes are not acceptable, Grafana can be exposed through a separate MetalLB LoadBalancer IP.
+
+Example:
+
+```text
+Portal Traefik IP:       172.31.11.121
+Grafana direct IP:       172.31.11.122
+```
+
+This is a practical dev/test access mode, not the preferred SCH-style production model.
+
+Rules for this mode:
+
+- Use only a free IP from the configured MetalLB range.
+- Check ping and ARP/neighbor state before assigning the IP.
+- Do not replace the main Traefik portal IP.
+- Document the selected Grafana IP in `.env` and install summary output.
+- Keep DNS/Ingress as the preferred production path.
+
+Suggested environment keys if this is added repo-wide:
+
+```text
+GRAFANA_EXPOSURE_MODE=ingress
+GRAFANA_LOADBALANCER_IP=
+```
+
+Valid future values:
+
+```text
+ingress
+loadbalancer
+```
 
 ---
 
@@ -85,7 +169,7 @@ Important files:
 k8s/observability/prometheus-stack-values.yaml
 k8s/observability/loki-values.yaml
 k8s/observability/alloy-values.yaml
-k8s/observability/grafana-ingressroute.yaml
+k8s/observability/grafana-ingress.yaml
 k8s/observability/servicemonitor-otp-relay.yaml
 k8s/observability/servicemonitor-otp-monitor.yaml
 k8s/observability/dashboards/otp-relay-live.json
@@ -98,11 +182,7 @@ The dashboard generator is:
 scripts/build_grafana_dashboard_configmap.py
 ```
 
----
-
-## Dashboard source-generated model
-
-The Grafana dashboard follows a source-generated workflow.
+Source/generated rule:
 
 ```text
 Source:    k8s/observability/dashboards/otp-relay-live.json
@@ -114,18 +194,11 @@ Data key:  otp-relay-live.json
 UID:       otp-relay-live
 ```
 
-Rules:
-
-* Edit `k8s/observability/dashboards/otp-relay-live.json`.
-* Do not hand-edit `k8s/observability/grafana-dashboard-otp-relay-live.yaml` as the source.
-* Regenerate the ConfigMap after dashboard source changes.
-* Commit both the source JSON and generated YAML when dashboard changes are made.
-* The Grafana UI should not be used as the permanent source of truth.
-* Provisioned dashboards may not be saveable from the Grafana UI; this is expected.
+Edit the source JSON. Do not hand-edit the generated dashboard ConfigMap as the source of truth.
 
 ---
 
-## Generate the dashboard ConfigMap
+## Dashboard generation workflow
 
 From the repo root:
 
@@ -133,7 +206,14 @@ From the repo root:
 python3 scripts/build_grafana_dashboard_configmap.py
 ```
 
-The generator supports Grafana `dashboard.grafana.app/v2` exports and converts them to classic Grafana dashboard JSON for sidecar provisioning.
+Commit both files when the dashboard changes:
+
+```text
+k8s/observability/dashboards/otp-relay-live.json
+k8s/observability/grafana-dashboard-otp-relay-live.yaml
+```
+
+The Grafana UI should not be used as the permanent source of truth. Provisioned dashboards may not be saveable from the Grafana UI; that is expected.
 
 The generated dashboard JSON must preserve:
 
@@ -148,7 +228,7 @@ dashboard layout and panel sizing
 
 ---
 
-## Validate generated output
+## Validate generated dashboard output
 
 After running the generator:
 
@@ -160,9 +240,11 @@ grep -n '"refresh_intervals"' k8s/observability/grafana-dashboard-otp-relay-live
 
 Expected:
 
-* `"refresh": "15s"` exists.
-* `"timepicker"` exists.
-* `"refresh_intervals"` exists and includes `15s`.
+```text
+"refresh": "15s"
+"timepicker"
+"refresh_intervals" includes 15s
+```
 
 Confirm the generated ConfigMap embeds classic Grafana JSON, not the v2 wrapper:
 
@@ -176,7 +258,6 @@ cm = yaml.safe_load(Path("k8s/observability/grafana-dashboard-otp-relay-live.yam
 dash = json.loads(cm["data"]["otp-relay-live.json"])
 
 errors = []
-
 if dash.get("apiVersion"):
     errors.append("generated dashboard still has apiVersion")
 if dash.get("kind") == "Dashboard":
@@ -187,7 +268,6 @@ if dash.get("uid") != "otp-relay-live":
     errors.append(f"dashboard uid is wrong: {dash.get('uid')!r}")
 if dash.get("refresh") != "15s":
     errors.append(f"dashboard refresh is wrong: {dash.get('refresh')!r}")
-
 intervals = dash.get("timepicker", {}).get("refresh_intervals", [])
 if "15s" not in intervals:
     errors.append(f"15s missing from refresh intervals: {intervals}")
@@ -203,7 +283,6 @@ stat_titles = {
     "📊 Prometheus",
     "⏰ Last ARP",
 }
-
 by_title = {panel.get("title"): panel for panel in dash.get("panels", [])}
 for title in stat_titles:
     panel = by_title.get(title)
@@ -229,7 +308,9 @@ PY
 
 ## Apply dashboard changes manually
 
-Normally the installer applies manifests after the local checkout has been synchronized from GitHub. The repo-sync timer itself is sync-only and must not apply manifests.
+Normally the installer applies manifests after the local checkout is synchronized from GitHub.
+
+The repo-sync script itself is sync-only. It must not apply manifests, run Helm, restart deployments, or mutate the cluster.
 
 To apply only the dashboard ConfigMap manually:
 
@@ -248,53 +329,123 @@ sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability \
 
 ---
 
-## Live observability checks
+## Live health checks
+
+Check observability pods and services:
 
 ```bash
 sudo k3s kubectl get pods -n observability -o wide
 sudo k3s kubectl get svc -n observability
-sudo k3s kubectl get ingressroute -n observability
+sudo k3s kubectl get ingress -n observability -o wide
 sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability
 sudo k3s kubectl get servicemonitor -n observability
 ```
 
 Expected:
 
-* Grafana pod is Running/Ready.
-* Prometheus pod is Running/Ready.
-* Loki/Alloy components are Running/Ready when deployed.
-* Grafana IngressRoute exists when Grafana browser access is enabled.
-* `otp-relay-live-dashboard` exists.
-* ServiceMonitor resources exist for `otp-relay` and `otp-monitor`.
+- Grafana pod is Running/Ready.
+- Prometheus pod is Running/Ready.
+- Loki and Alloy components are Running/Ready when deployed.
+- Grafana Ingress exists when browser access is enabled.
+- `otp-relay-live-dashboard` exists.
+- ServiceMonitor resources exist for `otp-relay` and `otp-monitor`.
 
----
-
-## Grafana logs
+Check Grafana logs:
 
 ```bash
 sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana --tail=100
 sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana-sc-dashboard --tail=100
 ```
 
-Use these logs when a dashboard ConfigMap has been applied but the dashboard does not appear or update in Grafana.
+---
+
+## Grafana access checks
+
+Check the live Ingress:
+
+```bash
+sudo k3s kubectl -n observability get ingress -o wide
+```
+
+Expected example:
+
+```text
+NAME      CLASS     HOSTS                              ADDRESS         PORTS
+grafana   traefik   grafana-srvotptest26.init-db.lan   172.31.11.121   80
+```
+
+Check the Grafana service:
+
+```bash
+sudo k3s kubectl -n observability get svc kube-prometheus-stack-grafana -o wide
+```
+
+Check Grafana pod readiness:
+
+```bash
+sudo k3s kubectl -n observability get pods -l app.kubernetes.io/name=grafana -o wide
+```
+
+Check Traefik LoadBalancer:
+
+```bash
+sudo k3s kubectl -n kube-system get svc traefik -o wide
+```
+
+Test from the Debian control-plane host using the required Host header:
+
+```bash
+curl -I -H "Host: grafana-srvotptest26.init-db.lan" http://172.31.11.121/
+```
+
+Expected:
+
+```text
+HTTP/1.1 302 Found
+Location: /login
+```
+
+If that works, Kubernetes routing is healthy. Remaining browser access failures are DNS/client-side access problems, not Grafana pod problems.
+
+From Windows PowerShell:
+
+```powershell
+nslookup grafana-srvotptest26.init-db.lan
+Test-NetConnection 172.31.11.121 -Port 80
+curl.exe -v --noproxy "*" -H "Host: grafana-srvotptest26.init-db.lan" http://172.31.11.121/
+```
+
+Interpretation:
+
+```text
+nslookup fails:
+  DNS record is missing.
+
+Test-NetConnection fails:
+  Client cannot reach Traefik/MetalLB on the selected IP.
+
+curl with Host header works, browser hostname fails:
+  DNS or browser/client resolution is the issue.
+
+Debian Host-header curl fails:
+  Check Ingress, service, pod, or Traefik.
+```
 
 ---
 
-## Dashboard metrics
+## Metrics used by the dashboard
 
-The OTP Relay live dashboard depends on these metrics:
-
-| Metric                                           | Meaning                                                  |
-| ------------------------------------------------ | -------------------------------------------------------- |
-| `up{job="otp-relay"}`                            | Portal scrape status                                     |
-| `up{job="otp-monitor"}`                          | Monitor scrape status                                    |
-| `otp_iphone_present`                             | iPhone presence signal from monitor                      |
-| `otp_monitor_arp_last_success_timestamp_seconds` | Timestamp of the monitor pod's last successful ARP probe |
-| `otp_queue_depth`                                | Number of users waiting behind the active OTP user       |
-| `otp_active_user`                                | Whether a user currently holds the active OTP slot       |
-| `otp_delivered_total`                            | Delivered OTP counter                                    |
-| `otp_claims_total`                               | Claim counter                                            |
-| `otp_iphone_absence_events_total`                | iPhone absence event counter                             |
+| Metric | Meaning |
+|---|---|
+| `up{job="otp-relay"}` | Portal scrape status |
+| `up{job="otp-monitor"}` | Monitor scrape status |
+| `otp_iphone_present` | iPhone presence signal from monitor |
+| `otp_monitor_arp_last_success_timestamp_seconds` | Timestamp of monitor pod's last successful ARP probe |
+| `otp_queue_depth` | Number of users waiting behind the active OTP user |
+| `otp_active_user` | Whether a user currently holds the active OTP slot |
+| `otp_delivered_total` | Delivered OTP counter |
+| `otp_claims_total` | Claim counter |
+| `otp_iphone_absence_events_total` | iPhone absence event counter |
 
 ---
 
@@ -302,9 +453,7 @@ The OTP Relay live dashboard depends on these metrics:
 
 Dashboard queries must be safe when more than one portal or monitor pod exists.
 
-For counters, prefer aggregate increase expressions instead of reading a single series.
-
-Examples:
+For counters, use aggregate increase expressions:
 
 ```promql
 sum(increase(otp_delivered_total[$__range]))
@@ -314,9 +463,7 @@ sum(increase(otp_delivered_total[$__range]))
 sum(increase(otp_claims_total[$__range]))
 ```
 
-For status or current-state gauges, use an aggregate that matches the panel meaning.
-
-Examples:
+For current-state gauges, use an aggregate that matches the panel meaning:
 
 ```promql
 max(up{job="otp-relay"})
@@ -338,15 +485,13 @@ max(otp_active_user)
 max(otp_iphone_present)
 ```
 
-For node count, use a cluster-level expression rather than a pod-local metric.
-
-Example:
+For node count:
 
 ```promql
 count(kube_node_info)
 ```
 
-For Last ARP age, calculate the age from the latest valid timestamp:
+For Last ARP age:
 
 ```promql
 clamp_min(time() - max(otp_monitor_arp_last_success_timestamp_seconds > 0), 0)
@@ -373,34 +518,32 @@ curl -s 'http://127.0.0.1:9090/api/v1/query?query=max(otp_iphone_present)'
 curl -s 'http://127.0.0.1:9090/api/v1/query?query=clamp_min(time()%20-%20max(otp_monitor_arp_last_success_timestamp_seconds%20%3E%200),%200)'
 ```
 
-Expected behavior:
+Expected:
 
-* Portal and monitor `up` queries return `1`.
-* `otp_queue_depth` shows users waiting behind the active OTP user.
-* `otp_active_user` shows whether a user currently holds the OTP slot.
-* `otp_iphone_present` reflects monitor phone presence.
-* Last ARP is based on `otp_monitor_arp_last_success_timestamp_seconds`, not simply whether the fake iPhone VM process is running.
+- Portal and monitor `up` queries return `1`.
+- `otp_queue_depth` shows users waiting behind the active OTP user.
+- `otp_active_user` shows whether a user currently holds the OTP slot.
+- `otp_iphone_present` reflects monitor phone presence.
+- Last ARP reflects monitor-observed reachability, not fake VM process state.
 
 ---
 
 ## Dashboard behavior notes
 
-### Queue vs active user
+### Queue versus active user
 
-If only one user has claimed the OTP slot, the expected dashboard state can be:
+If only one user has claimed the OTP slot, this is normal:
 
 ```text
 Queue:       0
 Active user: IN USE
 ```
 
-The queue tile represents users waiting behind the currently active OTP user. It does not count the active user as waiting.
+The queue tile represents users waiting behind the active OTP user. It does not count the active user as waiting.
 
 ### Delivered today
 
-The delivered counter should be queried with a replica-aware counter expression.
-
-Recommended pattern:
+Use a replica-aware counter expression:
 
 ```promql
 sum(increase(otp_delivered_total[$__range]))
@@ -418,12 +561,12 @@ clamp_min(time() - max(otp_monitor_arp_last_success_timestamp_seconds > 0), 0)
 
 If a fake iPhone VM says `phone up` but Last ARP is stale, check:
 
-* monitor pod connectivity
-* `PHONE_IP`
-* `PHONE_INTERFACE`
-* host networking
-* exported ARP timestamp metric
-* monitor logs
+- monitor pod connectivity
+- `PHONE_IP`
+- `PHONE_INTERFACE`
+- host networking
+- exported ARP timestamp metric
+- monitor logs
 
 Do not fix Last ARP by making the dashboard depend on the fake VM process state. The dashboard should reflect the monitor pod's actual observed phone reachability.
 
@@ -455,31 +598,46 @@ If the dashboard does not update automatically, first verify the live ConfigMap 
 
 ### Grafana URL does not load
 
-Expected URL:
+First confirm the expected URL:
 
 ```text
-https://grafana.init-db.lan
+http://grafana-srvotptest26.init-db.lan/
 ```
 
-Check IngressRoute and service:
+Then check the cluster route:
 
 ```bash
-sudo k3s kubectl get ingressroute -n observability
-sudo k3s kubectl get svc -n observability | grep grafana
-sudo k3s kubectl get pods -n observability -o wide | grep grafana
+sudo k3s kubectl -n observability get ingress -o wide
+sudo k3s kubectl -n observability get svc kube-prometheus-stack-grafana -o wide
+sudo k3s kubectl -n observability get pods -l app.kubernetes.io/name=grafana -o wide
+sudo k3s kubectl -n kube-system get svc traefik -o wide
+curl -I -H "Host: grafana-srvotptest26.init-db.lan" http://172.31.11.121/
 ```
 
-Check DNS resolution from the client machine:
+If the Host-header curl returns `302 Found` and `Location: /login`, Grafana routing is healthy.
+
+Then check DNS from the client:
 
 ```bash
-nslookup grafana.init-db.lan
+nslookup grafana-srvotptest26.init-db.lan
 ```
 
-Check Grafana pod logs:
+If DNS is missing, request this internal record:
 
-```bash
-sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana --tail=100
+```text
+grafana-srvotptest26.init-db.lan  A  172.31.11.121
 ```
+
+### Bare IP opens the portal instead of Grafana
+
+This is expected with host-based Ingress.
+
+```text
+http://172.31.11.121/                    -> portal/default route
+http://grafana-srvotptest26.init-db.lan/ -> Grafana route
+```
+
+Use DNS or the optional dedicated Grafana LoadBalancer IP mode.
 
 ### Panels show as mini graphs instead of Stat tiles
 
@@ -494,7 +652,11 @@ sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n obs
 sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
 ```
 
-Then verify the generated dashboard panels use `"type": "stat"`.
+Then verify generated dashboard panels use:
+
+```text
+"type": "stat"
+```
 
 ### Auto-refresh is missing from the UI
 
@@ -514,31 +676,25 @@ sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n obse
 
 ### Tile text is cut off
 
-Cause: Stat panel grid size is too small or the value text size is too large.
+Edit the dashboard source:
 
-Fix:
+```text
+k8s/observability/dashboards/otp-relay-live.json
+```
 
-1. Edit:
+Adjust panel layout and Stat text options, then regenerate:
 
-   ```text
-   k8s/observability/dashboards/otp-relay-live.json
-   ```
+```bash
+python3 scripts/build_grafana_dashboard_configmap.py
+```
 
-2. Adjust the relevant dashboard layout and Stat text options.
+Apply and restart Grafana:
 
-3. Regenerate:
-
-   ```bash
-   python3 scripts/build_grafana_dashboard_configmap.py
-   ```
-
-4. Apply and restart Grafana:
-
-   ```bash
-   sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
-   sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
-   sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
-   ```
+```bash
+sudo k3s kubectl apply -f k8s/observability/grafana-dashboard-otp-relay-live.yaml
+sudo k3s kubectl rollout restart deployment/kube-prometheus-stack-grafana -n observability
+sudo k3s kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
+```
 
 ### Dashboard changes do not appear
 
@@ -601,53 +757,44 @@ Check whether `/metrics` is reachable from inside the cluster if needed.
 
 ### Intermittent Grafana "No data" on Stat panels
 
-If Prometheus instant queries return valid values but Grafana Stat panels intermittently show "No data", review the panel query mode.
+If Prometheus instant queries return valid values but Grafana Stat panels intermittently show `No data`, review the panel query mode.
 
-For current-state tiles, instant queries may be more appropriate than range queries. Confirm this against the dashboard source before changing the generated ConfigMap.
+For current-state Stat panels, instant query mode is usually more stable than range mode.
+
+Recommended current-state expressions:
+
+```promql
+max(otp_queue_depth)
+max(otp_active_user)
+max(otp_iphone_present)
+max(up{job="otp-relay"})
+max(up{job="otp-monitor"})
+```
+
+Counter panels should stay range-aware:
+
+```promql
+sum(increase(otp_delivered_total[$__range]))
+```
 
 ---
 
-## Commit checklist
+## Summary
 
-When changing the Grafana dashboard, commit:
+The observability layer is healthy when:
 
-```text
-k8s/observability/dashboards/otp-relay-live.json
-k8s/observability/grafana-dashboard-otp-relay-live.yaml
-```
+- Grafana pod is Ready.
+- Prometheus is scraping portal and monitor metrics.
+- ServiceMonitors exist for `otp-relay` and `otp-monitor`.
+- The dashboard ConfigMap is generated from source JSON.
+- Grafana access works through the configured Ingress hostname.
+- Dashboard queries are replica-aware.
+- Logs are available through Loki/Alloy when log collection is enabled.
 
-Also commit the generator only when the generator itself changed:
-
-```text
-scripts/build_grafana_dashboard_configmap.py
-```
-
-Do not commit the old generator name:
+For the current test environment, the expected Grafana hostname is:
 
 ```text
-scripts/generate_grafana_dashboard_configmap.py
+grafana-srvotptest26.init-db.lan
 ```
 
-unless that file is intentionally restored in the repo.
-
----
-
-## Quick validation checklist
-
-After observability changes are deployed:
-
-* [ ] `https://grafana.init-db.lan` loads.
-* [ ] Grafana pod is Running/Ready.
-* [ ] Prometheus pod is Running/Ready.
-* [ ] `otp-relay-live-dashboard` ConfigMap exists.
-* [ ] Dashboard appears in Grafana.
-* [ ] Dashboard refresh is set to 15 seconds.
-* [ ] Portal panel shows correct state.
-* [ ] Monitor panel shows correct state.
-* [ ] Prometheus panel shows correct state.
-* [ ] Queue panel returns current queue depth.
-* [ ] Active user panel returns current active state.
-* [ ] Delivered today uses a replica-aware counter query.
-* [ ] iPhone panel reflects monitor phone presence.
-* [ ] Last ARP shows a sensible recent value when the phone is reachable.
-* [ ] Dashboard survives Grafana pod restart.
+Do not use `grafana-test.lan` as the active runtime hostname.
