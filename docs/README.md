@@ -1,110 +1,92 @@
 # OTP Relay Kubernetes Documentation
 
-This directory is the documentation home for OTP Relay Kubernetes.
+This directory is the documentation home for the OTP Relay Kubernetes project.
 
-Kubernetes manifests, Dockerfiles, installer scripts, automation, and observability manifests stay in their functional repo locations such as `k8s/`, `scripts/`, `systemd/`, and `automation/`.
+The root `README.md` gives the short project overview. This file is the documentation index for maintainers, operators, and reviewers who need to understand the implementation in detail.
 
-Explanations, architecture notes, deployment guides, runbooks, validation notes, and portal help source stay under `docs/`.
-
----
-
-## Current documentation status
-
-Phase 3 resilience validation completed on **2026-06-03** with no detected blockers.
-
-Validated:
-
-* two app replicas
-* real SMS/OTP portal confirmation
-* Redis/Sentinel/HAProxy health and Redis master pod deletion recovery
-* app, monitor, HAProxy, Sentinel, and Grafana pod restart recovery
-* worker drain and uncordon recovery for `otp-worker1` and `otp-worker2`
-* NFS/RWX app storage proof across app pods
-* Prometheus/Grafana/Loki/Alloy observability recovery
-
-Remaining production-alignment items are tracked in the architecture and operations docs.
+The documentation is organized in layers so the project can be reviewed the same way it is deployed: application first, then Kubernetes runtime, then resilience, observability, automation, and operations.
 
 ---
 
-## Active documents
+## Documentation layers
 
-| Area          | Document                                                                                               | Purpose                                                                                                                                       |
-| ------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Architecture  | [Current Architecture and SCH Gap Analysis](architecture/current-architecture-and-sch-gap-analysis.md) | Current topology, SCH target architecture, production gaps, and safe design rules.                                                            |
-| Deployment    | [Deployment and Storage Guide](deployment/deployment-and-storage-guide.md)                             | Repository sync path, installer behavior, `.env` model, NFS/RWX storage, Redis deployment safety, and post-deployment verification. |
-| Operations    | [Operations and Validation Runbook](operations/operations-and-validation-runbook.md)                   | Daily health checks, Redis/NFS/TLS/monitor validation, OTP checks, worker-drain validation, and SCH sign-off gates.                           |
-| Observability | [Observability and Grafana Guide](operations/observability-and-grafana.md)                             | Prometheus, Grafana, Loki/Alloy, ServiceMonitor resources, dashboard source/generated workflow, PromQL guidance, and Grafana troubleshooting. |
-| Development   | [Build and Development Guide](development/build-and-development-guide.md)                              | App/monitor image build model, package layout, dependency-change behavior, frontend/help/Grafana generation, and generated artifact rules.    |
-| User help     | [Help Documentation Source](help/)                                                                     | Markdown and screenshots used by `scripts/build_help_docs.py` to generate portal help pages and wizard guide content.                         |
+| Layer | Purpose | Primary document |
+| --- | --- | --- |
+| 1. Application model | Explains what OTP Relay does, how the browser, iPhone Shortcut, portal app, monitor, and Redis state interact. | [`architecture/current-architecture-and-sch-gap-analysis.md`](architecture/current-architecture-and-sch-gap-analysis.md) |
+| 2. Kubernetes runtime | Explains namespaces, workloads, services, ingress, persistent storage, and node placement. | [`deployment/deployment-and-storage-guide.md`](deployment/deployment-and-storage-guide.md) |
+| 3. Resilience extensions | Explains the production-resilience additions beyond the simple SCH baseline: Redis HA, Sentinel, HAProxy, NFS RWX, pod spreading, worker placement, and validation expectations. | [`architecture/current-architecture-and-sch-gap-analysis.md`](architecture/current-architecture-and-sch-gap-analysis.md) |
+| 4. Observability | Explains Prometheus, Grafana, Loki, Alloy, ServiceMonitor resources, dashboards, and access/troubleshooting. | [`operations/observability-and-grafana.md`](operations/observability-and-grafana.md) |
+| 5. Operations | Explains day-to-day health checks, validation, troubleshooting, OTP confirmation, and safe recovery commands. | [`operations/operations-and-validation-runbook.md`](operations/operations-and-validation-runbook.md) |
+| 6. Build and generated files | Explains frontend build, help-doc generation, dashboard ConfigMap generation, Docker image build behavior, and generated artifact rules. | [`development/build-and-development-guide.md`](development/build-and-development-guide.md) |
+| 7. Portal user help | Source Markdown and screenshots used to generate the portal help pages. | [`help/`](help/) |
 
 ---
 
 ## Recommended reading order
 
-For SCH review or a new maintainer, read in this order:
+For SCH review, new maintainers, or IT handover, read in this order:
 
-1. [Current Architecture and SCH Gap Analysis](architecture/current-architecture-and-sch-gap-analysis.md)
-2. [Deployment and Storage Guide](deployment/deployment-and-storage-guide.md)
-3. [Operations and Validation Runbook](operations/operations-and-validation-runbook.md)
-4. [Observability and Grafana Guide](operations/observability-and-grafana.md)
-5. [Build and Development Guide](development/build-and-development-guide.md)
+1. [`../README.md`](../README.md) — short project overview and access model.
+2. [`architecture/current-architecture-and-sch-gap-analysis.md`](architecture/current-architecture-and-sch-gap-analysis.md) — architecture, SCH alignment, intentional improvements, and known divergences.
+3. [`deployment/deployment-and-storage-guide.md`](deployment/deployment-and-storage-guide.md) — installation, `.env`, Kubernetes storage, NFS, Redis, and deployment behavior.
+4. [`operations/operations-and-validation-runbook.md`](operations/operations-and-validation-runbook.md) — daily checks, post-install validation, OTP testing, and recovery procedures.
+5. [`operations/observability-and-grafana.md`](operations/observability-and-grafana.md) — Grafana, Prometheus, Loki, Alloy, dashboards, metrics, and access troubleshooting.
+6. [`development/build-and-development-guide.md`](development/build-and-development-guide.md) — source/generated file rules and development workflow.
 
-Portal user-facing help source is maintained separately under:
+Portal end-user help source is separate and lives under:
 
-```text id="l9xfgh"
-docs/help/
+```text
+/docs/help/
 ```
+
+Generated portal help output lives under:
+
+```text
+/frontend/help/
+```
+
+Do not edit generated help output as source.
 
 ---
 
 ## Source-of-truth map
 
-| Area                  | Source                                             | Generated output                                               | Build/generation command                               |
-| --------------------- | -------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------ |
-| Runtime configuration | `.env`                                             | rendered manifests, runtime configuration, and Ansible handoff | installer                                              |
-| Portal frontend       | `frontend/app.jsx`                                 | `frontend/app.js`                                              | installer / frontend build                             |
-| Help docs             | `docs/help/*.md`, `docs/help/assets/*`             | `frontend/help/*`                                              | `python3 scripts/build_help_docs.py`                   |
-| Grafana dashboard     | `k8s/observability/dashboards/otp-relay-live.json` | `k8s/observability/grafana-dashboard-otp-relay-live.yaml`      | `python3 scripts/build_grafana_dashboard_configmap.py` |
+| Area | Source of truth | Generated or rendered output | Generation path |
+| --- | --- | --- | --- |
+| Operator configuration | `.env` | rendered manifests, Ansible handoff, install report, runtime configuration | `setup.sh` / installer libraries |
+| Portal frontend | `frontend/app.jsx` | `frontend/app.js` | frontend build step |
+| Portal help | `docs/help/*.md`, `docs/help/assets/*` | `frontend/help/*` | `python3 scripts/build_help_docs.py` |
+| Grafana dashboard | `k8s/observability/dashboards/otp-relay-live.json` | `k8s/observability/grafana-dashboard-otp-relay-live.yaml` | `python3 scripts/build_grafana_dashboard_configmap.py` |
+| Kubernetes manifests | `k8s/`, `scripts/lib/*.sh`, `.env` | rendered/applied cluster resources | `setup.sh` / installer libraries |
+| Repo sync service | `scripts/sync-repo.sh`, `scripts/install-repo-sync-timer.sh`, `systemd/` | optional local systemd timer and sync state | operator action |
 
-Do not edit generated files as source. Update the source file, run the matching build or generation command, then commit both source and generated output when required by the repository model.
-
----
-
-## Documentation ownership rules
-
-| Topic                                                                                | Owner document                                                   |
-| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| Architecture and SCH gaps                                                            | `docs/architecture/current-architecture-and-sch-gap-analysis.md` |
-| Fresh install, update behavior, `.env`, NFS, Redis deployment safety                 | `docs/deployment/deployment-and-storage-guide.md`                |
-| Daily checks, validation commands, OTP testing, worker drain, troubleshooting triage | `docs/operations/operations-and-validation-runbook.md`           |
-| Grafana, Prometheus, Loki, Alloy, ServiceMonitor, dashboard generation, PromQL       | `docs/operations/observability-and-grafana.md`                   |
-| Python package layout, Docker images, frontend/help/Grafana build model              | `docs/development/build-and-development-guide.md`                |
-| Portal user-facing guide content                                                     | `docs/help/`                                                     |
-
-Avoid duplicating detailed procedures across documents. Cross-link to the owner document instead.
+Rule: update the source file first, then regenerate the expected output through the documented command or installer path. Do not hand-edit generated files as the long-term fix.
 
 ---
 
-## Documentation rules
+## Documentation ownership
 
-* Keep active docs compact and current.
-* Avoid duplicate Phase 1/2/3 explanations across multiple files.
-* Do not restore `docs/k8s-plan.md`, `docs/dev/`, `docs/diagrams/`, or `k8s/docs/`.
-* Keep architecture diagrams under `docs/architecture/diagrams/`.
-* Keep portal user-help source under `docs/help/`.
-* Keep observability explanations under `docs/operations/`.
-* Do not use archived or old planning notes as deployment source of truth.
-* Do not document WhatsApp as the active alerting path unless the feature is intentionally restored.
-* Treat the 2026-06-03 multi-replica OTP and worker-drain validation as complete for the current code/configuration baseline.
-* Re-run validation after future changes to OTP flow, Redis state handling, frontend polling, Kubernetes placement, or deployment workflow behavior.
+Avoid duplicating long procedures across files. Put each topic in its owner document and cross-link from other documents.
+
+| Topic | Owner document |
+| --- | --- |
+| Overall project concept and layered architecture | `README.md` and `docs/README.md` |
+| SCH comparison, architecture, and production gaps | `docs/architecture/current-architecture-and-sch-gap-analysis.md` |
+| Install/update behavior, `.env`, K3s, NFS, Redis storage, services, ingress | `docs/deployment/deployment-and-storage-guide.md` |
+| Daily checks, troubleshooting, validation, OTP testing, worker drains, safe recovery | `docs/operations/operations-and-validation-runbook.md` |
+| Prometheus, Grafana, Loki, Alloy, dashboard generation, metrics, Grafana access | `docs/operations/observability-and-grafana.md` |
+| Python package layout, Dockerfiles, frontend build, help generation, generated artifacts | `docs/development/build-and-development-guide.md` |
+| Portal user-facing help content | `docs/help/` |
 
 ---
 
-## Files not to commit
+## Runtime files that must not be committed
 
-Do not commit runtime or secret-bearing files:
+Do not commit runtime state, secrets, local inventory, generated reports, or local build artifacts unless a document explicitly says the artifact is versioned.
 
-```text id="e2bkgb"
+Do not commit:
+
+```text
 .env
 secret.env
 users.xlsx
@@ -112,18 +94,70 @@ admin_auth.json
 admin_config.json
 wizard_progress.json
 audit.log
+install-report.txt
 *.tar
 *.log
 runtime tokens
 Telegram credentials
 SMS secrets
 local kubeconfig files
+local SSH keys
+node_modules/
+.venv/
+venv/
+dist/
+release/
+automation/libvirt/build/
+automation/ansible/inventory.generated.ini
 ```
 
-Generated files may be committed only when the repository expects generated artifacts to be versioned, and only after regenerating them from source:
+Generated files may be committed only when the repository model expects them to be versioned and they were regenerated from source:
 
-```text id="pe9lpy"
+```text
 frontend/app.js
 frontend/help/
 k8s/observability/grafana-dashboard-otp-relay-live.yaml
 ```
+
+---
+
+## Current access naming
+
+The expected current development/test hostnames are:
+
+```text
+Portal:  srvotptest26.init-db.lan
+Grafana: grafana-srvotptest26.init-db.lan
+```
+
+Both normally route through Traefik and MetalLB. The preferred model is internal DNS pointing those names to the Traefik LoadBalancer IP.
+
+Do not document `grafana-test.lan` as the active Grafana host. It is a placeholder/test value only and must not be treated as the current environment source of truth.
+
+---
+
+## Documentation maintenance rules
+
+* Keep `README.md` short and conceptual.
+* Keep this file as the documentation index.
+* Move detailed procedures to the relevant owner document.
+* Do not duplicate large command blocks across multiple documents.
+* Keep active hostnames and access examples consistent with `.env.example`, installer summaries, and generated reports.
+* Keep SCH alignment notes in architecture docs, not scattered through all files.
+* Do not restore old planning directories as active documentation unless they are intentionally refreshed.
+* Do not document WhatsApp as the active alerting path unless the feature is intentionally restored.
+* Re-run validation after changes to OTP flow, Redis state handling, Kubernetes placement, generated manifests, repo-sync behavior, or observability exposure.
+
+---
+
+## Next cleanup targets
+
+After this index is updated, the next documentation cleanup should proceed in this order:
+
+1. `docs/architecture/current-architecture-and-sch-gap-analysis.md`
+2. `docs/deployment/deployment-and-storage-guide.md`
+3. `docs/operations/observability-and-grafana.md`
+4. `docs/operations/operations-and-validation-runbook.md`
+5. `docs/development/build-and-development-guide.md`
+
+This order keeps the project concept clear before changing detailed procedures.
