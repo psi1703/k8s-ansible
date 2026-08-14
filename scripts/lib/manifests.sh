@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Layer: Kubernetes manifest rendering and apply helpers.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Render staged Kubernetes manifests from repository templates and .env values.
+# - Keep namespace, images, service type, ingress, TLS, PVC, NFS, Redis, and node-selector values consistent.
+# - Validate rendered manifests before apply so unresolved placeholders do not reach the cluster.
+# - Apply individual manifests with useful diagnostics when kubectl rejects a file.
+#
+# Non-responsibilities:
+# - It does not create or repair .env.
+# - It does not install K3s.
+# - It does not install Helm charts or observability components.
+# - It does not sync the repository.
+# - It does not build container images.
 
 apply_runtime_configmap() {
   if [ -n "${MANIFEST_DIR:-}" ] && [ -f "$MANIFEST_DIR/configmap.yaml" ]; then
