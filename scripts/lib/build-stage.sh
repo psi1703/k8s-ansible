@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
-# App/frontend build, generated staging directory, and dry-run validation.
+# Layer: build staging, generated assets, and pre-apply validation.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Build generated application assets when the selected deployment mode requires them.
+# - Create the installer Python virtual environment used for help-doc and validation tooling.
+# - Generate frontend/app.js from frontend/app.jsx through the committed npm build path.
+# - Generate frontend/help from docs/help through scripts/build_help_docs.py.
+# - Generate the Grafana dashboard ConfigMap from the dashboard JSON source.
+# - Validate Dockerfile packaging assumptions before image build/import.
+# - Stage Kubernetes manifests into a temporary generated directory.
+# - Run client-side Kubernetes dry-run validation before apply.
+#
+# Non-responsibilities:
+# - It does not apply the final workload manifests.
+# - It does not create or repair .env.
+# - It does not install K3s, Docker, Helm, or host packages.
+# - It does not sync the repository.
+# - It does not install GitHub runners.
 
 _run_checked() {
   local description="$1"
