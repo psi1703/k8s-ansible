@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# Shared TLS helpers for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Layer: TLS certificate and Kubernetes TLS secret helpers.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Generate or reuse local TLS certificate material when TLS is enabled.
+# - Create or update Kubernetes TLS secrets used by Traefik Ingress resources.
+# - Keep portal and optional Grafana TLS behavior tied to .env values.
+# - Avoid replacing existing certificate material unless the install flow explicitly requires it.
+#
+# Non-responsibilities:
+# - It does not create DNS records.
+# - It does not configure MetalLB or Traefik LoadBalancer IPs.
+# - It does not install cert-manager or public ACME/Let's Encrypt automation.
+# - It does not expose Grafana directly by LoadBalancer IP.
+# - It does not sync the repository.
 
 ensure_tls_secret_available_if_required() {
   [ "${TLS_ENABLED:-0}" = "1" ] || return 0
