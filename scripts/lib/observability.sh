@@ -36,7 +36,7 @@ OBSERVABILITY_ALLOY_CHART_VERSION="${OBSERVABILITY_ALLOY_CHART_VERSION:-1.8.1}"
 
 OBSERVABILITY_HELM_TIMEOUT="${OBSERVABILITY_HELM_TIMEOUT:-15m}"
 HELM_KUBECONFIG="${HELM_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-GRAFANA_HOST="${GRAFANA_HOST:-grafana-test.lan}"
+GRAFANA_HOST="${GRAFANA_HOST:-grafana-srvotptest26.init-db.lan}"
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
 GRAFANA_ADMIN_SECRET_NAME="${GRAFANA_ADMIN_SECRET_NAME:-${OBSERVABILITY_STACK_RELEASE}-grafana}"
@@ -419,12 +419,12 @@ _render_observability_manifest() {
   # Render runtime namespace/host here so .env remains the operator source of truth.
   sed -i \
     -e "s/namespace: observability/namespace: ${OBSERVABILITY_NAMESPACE}/g" \
-    -e "s/grafana\.init-db\.lan/${GRAFANA_HOST}/g" \
+    -e "s/__GRAFANA_HOST__/${GRAFANA_HOST}/g" \
     "$rendered_file"
 
-  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan' "$rendered_file" >/dev/null 2>&1; then
+  if grep -nE 'CHANGE_ME_|__[^[:space:]]+__' "$rendered_file" >/dev/null 2>&1; then
     warn "unresolved placeholder detected in rendered observability manifest from $(basename "$source_file")"
-    grep -nE 'CHANGE_ME_|__[^[:space:]]+__|grafana\.init-db\.lan' "$rendered_file" >&2 || true
+    grep -nE 'CHANGE_ME_|__[^[:space:]]+__' "$rendered_file" >&2 || true
     return 1
   fi
 }
@@ -475,7 +475,7 @@ _apply_single_observability_manifest() {
 
     grafana-ingress.yaml|grafana-ingressroute.yaml)
       if _grafana_service_available; then
-        log "applying Grafana IngressRoute manifest $base for host $GRAFANA_HOST"
+        log "applying Grafana ingress manifest $base for host $GRAFANA_HOST"
         _apply_rendered_manifest "$file"
       elif [ "$OBSERVABILITY_INSTALL_STACK" = "1" ]; then
         fatal_observability "Grafana service $OBSERVABILITY_NAMESPACE/${OBSERVABILITY_STACK_RELEASE}-grafana is missing; cannot apply $base"
