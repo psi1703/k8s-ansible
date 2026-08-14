@@ -1,208 +1,87 @@
-# Current Architecture and SCH Gap Analysis
+# Current Architecture and SCH Alignment
 
 ## Purpose
 
-This document is the architecture reference for the OTP Relay Kubernetes deployment.
+This document explains the current `k8s-ansible` architecture in the same layered style as the SCH Kubernetes branch.
 
-It owns:
+It is not a deployment runbook. It is the architecture reference for understanding what the project does, why each layer exists, and where this repo intentionally extends the SCH baseline.
 
-* current architecture baseline
-* node and infrastructure model
-* runtime configuration model
-* app, monitor, Redis, NFS, and observability architecture
-* SCH target architecture
-* current production-alignment gaps
-* architectural sign-off gates
-
-Detailed deployment and storage procedures belong in:
+Detailed procedures belong in:
 
 ```text
 docs/deployment/deployment-and-storage-guide.md
-```
-
-Detailed operations and validation commands belong in:
-
-```text
 docs/operations/operations-and-validation-runbook.md
-```
-
-Detailed Grafana, Prometheus, Loki, Alloy, dashboard generation, and PromQL guidance belongs in:
-
-```text
 docs/operations/observability-and-grafana.md
-```
-
-Detailed build, module layout, and source/generated artifact guidance belongs in:
-
-```text
 docs/development/build-and-development-guide.md
 ```
 
 ---
 
-## Current architecture baseline
+## Architecture position
 
-The current implementation is a Phase 3 SCH-alignment validation baseline.
-
-```text
-Clients / browsers / iPhone Shortcut
-  -> DNS: srvotptest26.init-db.lan
-  -> Traefik Ingress with HTTPS
-  -> Kubernetes Service otp-relay
-  -> FastAPI app pods
-  -> Redis HAProxy service
-  -> Redis Sentinel-managed Redis master/replicas
-  -> NFS-backed /app/data storage
-  -> Portal UI displays OTP
-
-iPhone / fake-iPhone test source
-  -> receives or simulates OTP/SMS path
-  -> iOS Shortcut or test signal posts to the portal
-  -> portal stores OTP state in Redis with TTL
-  -> browser polling displays OTP to the active user
-
-Monitor pod
-  -> hostNetwork + NET_RAW
-  -> phone presence checks
-  -> exports Prometheus metrics
-  -> reads shared audit log
-  -> sends Telegram alerts
-  -> no Service / no Ingress
-
-Observability
-  -> ServiceMonitor resources scrape portal and monitor
-  -> Prometheus stores metrics
-  -> Grafana dashboard is provisioned from ConfigMap
-  -> Grafana is accessed through Traefik/IngressRoute
-  -> Loki/Alloy handle log collection where deployed
-```
-
-Current validation posture:
+SCH's Kubernetes branch starts with a controlled migration of the existing OTP Relay portal:
 
 ```text
-SERVICE_TYPE=ClusterIP
-INGRESS_ENABLED=1
-TLS_ENABLED=1
-TLS_SELF_SIGNED=1
-REDIS_ENABLED=1
-REDIS_REQUIRED=1
-REDIS_URL=redis://otp-redis-haproxy:6379/0
-NFS_ENABLED=1
-PVC_STORAGE_CLASS=otp-relay-nfs
-strategy: RollingUpdate
+working portal
+  -> containerized app
+  -> K3s deployment
+  -> one app replica first
+  -> PVC-backed runtime files
+  -> Redis added only after the in-memory scaling problem is proven
+  -> observability and resilience added in later controlled phases
 ```
 
-`REPLICA_COUNT` is controlled by `.env`.
+This repo keeps that same application model, but it already includes the production-resilience extensions that SCH treats as later-phase work:
 
-As of **2026-06-03**, Phase 3 resilience validation has completed with no detected blockers in the automated validation run.
+```text
+SCH baseline
+  + Redis-backed shared OTP/admin state
+  + multiple app replicas
+  + Redis Sentinel and HAProxy
+  + NFS/RWX app data storage
+  + MetalLB and Traefik ingress
+  + Prometheus, Grafana, Loki, and Alloy observability
+  + Ansible-based cluster/bootstrap automation
+  + explicit repo-sync separated from deployment
+```
 
-Validated on 2026-06-03:
+The correct way to describe this repo is:
 
-* two app replicas
-* real SMS/OTP portal confirmation
-* Redis/Sentinel/HAProxy health
-* Redis master pod deletion recovery
-* app pod restart recovery
-* monitor pod restart recovery
-* Redis HAProxy pod restart recovery
-* Redis Sentinel pod restart recovery
-* Grafana pod restart and dashboard persistence
-* worker drain and uncordon recovery for `otp-worker1`
-* worker drain and uncordon recovery for `otp-worker2`
-* NFS/RWX app storage proof across app pods
-* Prometheus/Grafana/Loki/Alloy observability recovery
-* PDB presence
-* CPU/memory requests and limits
-* Kubernetes YAML and Helm template validation
+```text
+SCH Kubernetes baseline plus production-resilience automation.
+```
 
 ---
 
-## Node and infrastructure model
+## Layer 1: Application model
 
-The current `k8s-ansible` deployment model uses:
-
-| Role          | Description                                                  |
-| ------------- | ------------------------------------------------------------ |
-| Control-plane | Real server / localhost K3s control-plane and Ansible control host |
-| Worker 1      | VM worker node                                               |
-| Worker 2      | VM worker node                                               |
-| NFS server    | External storage server, not joined to Kubernetes            |
-
-Important placement rules:
-
-* VM provisioning creates worker VMs only.
-* The real server is the K3s control-plane and Ansible control host.
-* The NFS server remains external storage and should not be joined to Kubernetes.
-* The monitor must run on a node with phone-network visibility.
-* Redis-capable nodes are labelled for storage placement.
-
-Known labels:
+The OTP Relay application layer contains the user-facing portal and the OTP business flow.
 
 ```text
-otp-relay/storage-node=true
-otp-relay/monitor-node=true
+Browser user
+  -> opens portal
+  -> claims active OTP session
+  -> polls portal for OTP display
+
+iPhone / iOS Shortcut
+  -> receives SMS OTP
+  -> posts OTP payload to portal endpoint
+  -> portal matches OTP to active user/session
+  -> browser displays OTP
 ```
 
-During worker-drain maintenance, one Redis pod may temporarily remain `Pending` because of one-per-node Redis placement. This is acceptable only during the maintenance window when `/readyz`, Redis/Sentinel/HAProxy checks, and post-uncordon strict health checks pass.
+Application components:
 
----
+| Component | Role |
+|---|---|
+| FastAPI backend | Serves portal API, static frontend, health endpoints, metrics, OTP flow |
+| React frontend source | `frontend/app.jsx` |
+| Generated frontend bundle | `frontend/app.js` |
+| Portal help source | `docs/help/` |
+| Generated portal help | `frontend/help/` |
+| Runtime data mount | `/app/data` |
 
-## Runtime configuration model
-
-The repository root `.env` file is the single source of operator-provided deployment values.
-
-Site-specific values should not be hardcoded in Python, shell scripts, Kubernetes YAML, Ansible tasks, or documentation examples.
-
-Examples of `.env`-owned values:
-
-```text
-TLS_HOST
-PORTAL_URL
-SERVICE_TYPE
-INGRESS_ENABLED
-TLS_ENABLED
-TLS_SECRET_NAME
-TLS_SELF_SIGNED
-PHONE_IP
-PHONE_INTERFACE
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-SMS_SECRET_TOKEN
-REDIS_ENABLED
-REDIS_REQUIRED
-REDIS_URL
-NFS_ENABLED
-NFS_SERVER
-NFS_PATH
-NFS_STORAGE_CLASS
-PVC_STORAGE_CLASS
-REPLICA_COUNT
-```
-
-Fresh installs should create `.env` interactively unless non-interactive mode is explicitly selected.
-
-Updates should load the existing `.env` and must not overwrite it silently.
-
----
-
-## Application model
-
-The portal consists of:
-
-* FastAPI backend served from app pods
-* modular Python package under `otp_relay/`
-* React frontend source/static assets served by the app
-* generated production frontend bundle: `frontend/app.js`
-* frontend source of truth: `frontend/app.jsx`
-* on-screen OTP delivery through browser polling
-* iPhone Shortcut posting received SMS content to `/sms-received`
-* Redis-backed OTP queue and pending OTP state
-* Redis-backed admin sessions and admin login-attempt tracking
-* PVC-backed runtime files under `/app/data`
-* generated RTA wizard/help content under `frontend/help/`
-* required monitor pod for phone presence, audit-log, Prometheus metrics, and alert checks
-
-Runtime app files under `/app/data`:
+Runtime files under `/app/data`:
 
 ```text
 users.xlsx
@@ -212,118 +91,157 @@ wizard_progress.json
 audit.log
 ```
 
-OTP values must not be written to disk, audit logs, app logs, monitor logs, committed files, or documentation examples.
+OTP values must not be written to disk, committed files, documentation examples, or long-lived logs.
 
 ---
 
-## Monitor model
+## Layer 2: Kubernetes runtime
 
-The monitor is required and remains internal only.
+The Kubernetes runtime layer runs the portal, monitor, Redis, storage mounts, services, and ingress.
 
-Required Kubernetes posture:
+Current runtime shape:
+
+```text
+Clients / browser / iPhone Shortcut
+  -> internal DNS or load-balancer IP
+  -> MetalLB-assigned Traefik LoadBalancer IP
+  -> Traefik Ingress
+  -> otp-relay Kubernetes Service
+  -> FastAPI app pods
+  -> Redis HAProxy
+  -> Redis Sentinel-managed Redis master/replicas
+  -> NFS-backed /app/data
+```
+
+Current expected access model:
+
+```text
+Portal host:   srvotptest26.init-db.lan
+Grafana host:  grafana-srvotptest26.init-db.lan
+Traefik IP:    selected free MetalLB IP, currently 172.31.11.121 in the test cluster
+```
+
+Bare-IP access to the Traefik IP may route to the default portal ingress. Grafana normally requires either its hostname or an intentionally configured separate access mode.
+
+---
+
+## Layer 3: Monitor model
+
+The monitor is required. It is not optional helper code.
+
+The monitor remains internal only:
 
 ```text
 hostNetwork: true
 dnsPolicy: ClusterFirstWithHostNet
-NET_RAW capability
-no Service
-no Ingress
+capabilities: NET_RAW
+Service: none
+Ingress: none
 ```
 
-The monitor provides:
+The monitor is responsible for:
 
-* phone presence checks
-* audit-log checks
-* Prometheus metrics
-* Telegram alerts
+| Responsibility | Description |
+|---|---|
+| Phone presence | Checks phone/network presence using ARP-capable networking |
+| Audit-log checks | Reads shared audit log for operational state |
+| Metrics | Exports monitor metrics for Prometheus |
+| Alerts | Sends Telegram operational alerts |
 
-Telegram is the supported alerting path.
+The monitor should run only on a node that has visibility to the phone network.
 
 ---
 
-## Redis shared-state model
+## Layer 4: Shared state and resilience
 
-Redis is required in the validated Phase 3 posture.
+SCH's initial branch deliberately avoids Redis until the one-replica/in-memory limitation is proven.
 
-The app uses:
+This repo has already crossed that boundary. Redis is not optional in the validated multi-replica design.
+
+Redis-backed state includes:
 
 ```text
-REDIS_URL=redis://otp-redis-haproxy:6379/0
-REDIS_REQUIRED=1
+OTP claim queue
+pending OTP display state
+OTP TTL behavior
+admin sessions
+admin login-attempt / lockout state
 ```
 
-The app connects to `otp-redis-haproxy`.
-
-HAProxy routes Redis traffic to the current Redis master based on Sentinel state. Sentinel monitors Redis pods and performs master promotion when needed.
-
-Redis currently supports:
-
-* OTP claim queue
-* pending OTP display state
-* OTP TTL behavior
-* admin sessions
-* admin login-attempt and lockout state
-
-This Redis foundation is why multiple app replicas can operate without the old in-memory split-brain OTP problem.
-
-Redis HA/Sentinel/HAProxy behavior was validated on **2026-06-03**, including Redis master pod deletion recovery and post-recovery strict health validation.
-
----
-
-## Redis StatefulSet update safety
-
-Redis is deployed as a StatefulSet, and Kubernetes makes some StatefulSet fields immutable after creation.
-
-If a normal update attempts to change an immutable Redis StatefulSet field, Kubernetes may return:
+Current Redis path:
 
 ```text
-The StatefulSet "otp-redis" is invalid: spec: Forbidden: updates to statefulset spec for fields other than ...
+app pods
+  -> otp-redis-haproxy:6379
+  -> Redis HAProxy
+  -> Sentinel-selected Redis master
+  -> Redis replicas
 ```
 
-This must be handled safely.
-
-Normal application, documentation, workflow, frontend, or observability updates must not:
-
-* silently delete the Redis StatefulSet
-* delete Redis PVCs
-* recreate Redis as a side effect
-* treat Redis data loss as acceptable
-
-Safe architectural options are:
-
-1. preserve the existing StatefulSet and continue with a clear warning,
-2. fail clearly and require an explicit maintenance action, or
-3. run a documented destructive Redis reset path only when intentionally requested.
-
-Redis topology changes require controlled maintenance handling.
-
----
-
-## Storage model
-
-Application data uses NFS/RWX shared storage.
-
-Validated storage path:
+Why this matters:
 
 ```text
-PVC:           otp-relay-data
-PV:            otp-relay-data-nfs-pv
-Access mode:   ReadWriteMany
-StorageClass:  otp-relay-nfs
-NFS server:    172.31.11.108
-NFS path:      /export/otp-relay-data
-Mount path:    /app/data
+Without Redis:
+  app pod 1 can own the browser session
+  app pod 2 can receive the OTP post
+  OTP state can split across pods
+  multi-replica app is unsafe
+
+With Redis:
+  all app pods share OTP/session state
+  multiple app replicas can serve the same business flow
 ```
 
-Redis PVCs are separate from the app NFS storage. That is acceptable for validation, but Redis backup/restore expectations still need SCH production sign-off.
-
-NFS stores non-OTP runtime files only.
-
-NFS/RWX app storage was validated on **2026-06-03** by writing a proof file from one app pod and reading it from another app pod.
+Redis StatefulSet and PVC resources must not be silently deleted or recreated during normal updates. Any Redis topology change is a maintenance operation.
 
 ---
 
-## Observability model
+## Layer 5: Storage model
+
+Application runtime files use NFS/RWX storage.
+
+```text
+/app/data
+  -> Kubernetes PVC
+  -> NFS-backed PV
+  -> external NFS server
+```
+
+This improves on the simple local-path `ReadWriteOnce` model because the app and monitor do not need to be pinned to one same worker node just to share files.
+
+Redis storage is separate from app runtime storage. Redis backup/restore expectations still require explicit production sign-off.
+
+---
+
+## Layer 6: Network and access model
+
+The intended access model is Kubernetes-native:
+
+```text
+LAN client
+  -> internal DNS
+  -> MetalLB IP
+  -> Traefik
+  -> Kubernetes Ingress
+  -> Service
+  -> Pod
+```
+
+Preferred production-style model:
+
+| Function | Recommended access |
+|---|---|
+| Portal | `srvotptest26.init-db.lan` via Traefik |
+| Grafana | `grafana-srvotptest26.init-db.lan` via Traefik |
+| Monitor | No external access |
+| Redis | Internal cluster access only |
+| Prometheus/Loki | Internal or controlled admin access only |
+
+A separate Grafana LoadBalancer IP can be used as a practical dev/test workaround when DNS is not ready, but that should be documented as an optional access mode, not the main production design.
+
+---
+
+## Layer 7: Observability model
 
 Observability assets live under:
 
@@ -331,208 +249,161 @@ Observability assets live under:
 k8s/observability/
 ```
 
-Normal Grafana browser access:
-
-```text
-https://grafana.init-db.lan
-```
-
-Observability architecture:
+Observability flow:
 
 ```text
 Portal /metrics
 Monitor /metrics
   -> ServiceMonitor resources
   -> Prometheus
-  -> Grafana dashboard provisioned from ConfigMap
+  -> Grafana dashboard
 
-Pod/application logs
+Pod and application logs
   -> Alloy
   -> Loki
-  -> Grafana log views where configured
+  -> Grafana log views
 ```
 
-The Grafana dashboard follows a source-generated model:
+Grafana dashboard source model:
 
 ```text
-Source:    k8s/observability/dashboards/otp-relay-live.json
-Generated: k8s/observability/grafana-dashboard-otp-relay-live.yaml
-Generator: scripts/build_grafana_dashboard_configmap.py
-ConfigMap: otp-relay-live-dashboard
-UID:       otp-relay-live
+Source JSON:  k8s/observability/dashboards/otp-relay-live.json
+Generator:    scripts/build_grafana_dashboard_configmap.py
+Generated:    k8s/observability/grafana-dashboard-otp-relay-live.yaml
+Dashboard UID: otp-relay-live
 ```
 
-Observability was validated on **2026-06-03**, including Prometheus API values, Grafana pod restart recovery, dashboard ConfigMap persistence, Loki recovery, Alloy presence, and final observability namespace readiness.
-
-Dashboard implementation details and PromQL guidance belong in:
-
-```text
-docs/operations/observability-and-grafana.md
-```
+Generated dashboard ConfigMaps should not become the human source of truth. Edit the JSON source and regenerate.
 
 ---
 
-## Repository sync and deployment workflow model
+## Layer 8: Automation and repo-sync model
 
-The active repository-update model is local polling from the build/control host. GitHub is the source of truth, but the previous external CI listener model is no longer part of the deployment path.
+SCH's branch uses GitHub Actions as the deployment entry point.
+
+This repo intentionally separates repository synchronization from deployment:
 
 ```text
 GitHub main
-  -> scripts/sync-repo.sh on the control host
+  -> scripts/sync-repo.sh
   -> hard reset local checkout to origin/main
-  -> preserve local runtime state such as .env and generated inventory
-  -> operator runs setup.sh / installer when deployment is intended
-  -> .env load/validation
-  -> generated assets
-  -> image build/import
-  -> manifest render/apply
-  -> rollout validation
+  -> preserve local runtime/generated artifacts
+  -> no deployment side effects
+  -> operator explicitly runs setup/deploy path when intended
 ```
 
-Deployment logic should remain in:
+The repo-sync script must remain sync-only. It must not:
 
 ```text
-install-otp-relay-k8s.sh
-scripts/lib/
-k8s/manifests/
-k8s/observability/
-automation/ansible/
+install K3s
+run Helm
+run kubectl apply
+import images
+restart workloads
+run Ansible mutation tasks
+perform validation that changes the live cluster
 ```
 
-The repo-sync script must stay sync-only. It must not install K3s, run Helm, run `kubectl apply`, import images, restart workloads, or run Ansible mutation tasks. Deployment remains an explicit operator action.
+This is a deliberate safety difference from a push-to-deploy workflow.
 
-Dependency rule:
+---
+
+## Current live-cluster reference
+
+The latest validated fresh install reported this shape:
 
 ```text
-requirements.txt affects both app and monitor images.
+Control plane: debian       172.31.11.111
+Worker 1:      otp-worker1  172.31.11.154
+Worker 2:      otp-worker2  172.31.11.155
+Traefik IP:    172.31.11.121
+Portal host:   srvotptest26.init-db.lan
+Grafana host:  grafana-srvotptest26.init-db.lan
 ```
 
-A `requirements.txt` change should trigger app and monitor rebuilds when the installer/deployment path is run.
-
----
-
-## SCH target architecture
-
-SCH's production direction is:
+Workload position:
 
 ```text
-Clients
-  -> internal DNS
-  -> approved LB/VIP layer
-  -> HTTPS ingress/controller
-  -> Kubernetes service
-  -> multiple app pods across worker/control-plane eligible nodes according to placement rules
-  -> shared Redis/Sentinel/HAProxy or approved managed Redis
-  -> shared RWX/network persistent app storage
-  -> observability for health, metrics, logs, and dashboard visibility
-
-Monitor pod remains internal and unexposed.
+otp-relay app:         2 replicas on workers
+otp-monitor:           running on control-plane/server node
+Redis:                 3 pods across nodes
+Redis Sentinel:        3 pods across nodes
+Redis HAProxy:         2 replicas
+Grafana:               running in observability namespace
+Traefik:               LoadBalancer through MetalLB
 ```
 
----
-
-## Current vs target gap table
-
-| Area            | SCH target                                                       | Current repo status / remaining work                                                                                                                        |
-| --------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| External access | DNS plus approved ingress/LB/VIP path                            | Traefik HTTPS ingress active through internal DNS; final production VIP/LB model still needs SCH confirmation                                               |
-| TLS             | HTTPS trusted on user machines                                   | Self-signed TLS enabled; IT Group Policy trust rollout or approved certificate installation pending                                                         |
-| App replicas    | Multiple FastAPI app pods                                        | Two app replicas validated with real SMS/OTP portal confirmation on 2026-06-03                                                                              |
-| App storage     | Shared RWX/network persistent storage                            | Implemented and validated as static NFS PV/PVC for `/app/data`                                                                                              |
-| Redis           | HA Redis/Sentinel/Cluster or approved managed Redis              | Redis Sentinel/HAProxy topology implemented; failover and Redis master pod deletion recovery validated on 2026-06-03; production acceptance/backups pending |
-| Redis updates   | Safe update behavior for StatefulSet/PVC resources               | Must preserve existing StatefulSet/PVC during normal updates; immutable-field changes require explicit maintenance handling                                 |
-| Failover        | Pod kill, node drain, and app movement tests with state survival | App/monitor/HAProxy/Sentinel/Grafana pod restarts, Redis master deletion, and worker drain/uncordon recovery validated on 2026-06-03                        |
-| Monitor         | Isolated monitor workload on phone-network-capable node          | Current no-Service/no-Ingress model is aligned                                                                                                              |
-| Alerting        | Operational notifications                                        | Telegram alerting is the active documented path                                                                                                             |
-| Observability   | Dashboard, metrics, and logs for production visibility           | Prometheus/Grafana/Loki/Alloy assets deployed and recovered after restart/drain validation                                                                  |
-| Grafana access  | Stable internal access path                                      | `https://grafana.init-db.lan` through Traefik/IngressRoute                                                                                                  |
-| Documentation   | Clear active docs with no conflicting legacy guidance            | README and docs describe source/generated workflows for frontend, help docs, and Grafana                                                                    |
-| Workflow        | Repeatable source-to-deploy path                                  | Local repo-sync timer keeps the checkout aligned to GitHub; installer remains deployment source of truth and deployment is explicit                         |
+This section is a reference snapshot, not a hardcoded requirement. Runtime truth should always be verified with `kubectl` and `.env`.
 
 ---
 
-## Validation position after 2026-06-03
+## SCH alignment table
 
-The previous major uncertainty was whether the Redis/NFS/observability design could support real OTP flow, app replica recovery, Redis recovery, and worker drain recovery.
-
-That uncertainty is now reduced by the **2026-06-03 automated validation run**.
-
-Validated:
-
-* real SMS/OTP evidence in audit log
-* human confirmation that OTP was visible in the portal
-* two app replicas
-* Redis required and healthy
-* Redis Sentinel and HAProxy functional checks
-* Redis master pod deletion recovery
-* app pod restart recovery
-* monitor pod restart recovery
-* Redis HAProxy pod restart recovery
-* Redis Sentinel pod restart recovery
-* Grafana pod restart recovery
-* dashboard ConfigMap persistence
-* worker drain and uncordon recovery for both workers
-* final strict health pass
-* final portal `/readyz` success
-* final observability recovery
-* final NFS/PVC proof across app pods
-
-During active worker drains, temporary `Pending` pods were observed and accepted only inside the maintenance window. The post-uncordon strict health checks returned the cluster to full readiness.
+| Area | SCH baseline | Current repo position | Alignment |
+|---|---|---|---|
+| Application behavior | Preserve working OTP portal behavior | Preserved | Aligned |
+| iPhone OTP post | iPhone Shortcut posts received OTP to portal | Preserved | Aligned |
+| App replica count | Start with one replica until shared state exists | Multi-replica with Redis shared state | Intentional extension |
+| Runtime files | PVC-backed app data | NFS/RWX PVC-backed app data | Improved extension |
+| Monitor | Internal host-network monitor | Internal host-network monitor | Aligned |
+| Monitor exposure | No Service / no Ingress | No Service / no Ingress | Aligned |
+| Redis | Later phase after proving in-memory limitation | Required for validated multi-replica design | Intentional extension |
+| Redis HA | Future/production design item | Sentinel + HAProxy implemented | Intentional extension |
+| Observability | Prometheus/Grafana/Loki/Alloy direction | Integrated observability automation | Extended |
+| Ingress | Kubernetes ingress through internal access path | Traefik + MetalLB ingress | Aligned with extension |
+| Workflow | GitHub Actions deploy model | Repo-sync first, explicit deploy second | Intentional divergence |
+| Documentation | Phased and simple | Being reorganized into layered docs | Needs cleanup |
 
 ---
 
-## Remaining production-alignment gaps
+## Known gaps and cleanup items
 
-1. Confirm final production LB/VIP model with SCH.
-2. Complete TLS trust rollout through IT Group Policy or approved certificate trust process.
-3. Document Redis backup/restore expectations.
-4. Decide whether Redis Sentinel/HAProxy is accepted for production or replaced by an approved managed Redis service.
-5. Confirm observability retention and access expectations for Grafana, Prometheus, Loki, and Alloy.
-6. Confirm Telegram alerting path is fully aligned across monitor, installer, workflow, and docs.
-7. Remove or intentionally archive any remaining WhatsApp-era alert references.
-8. Optionally repeat the 2026-06-03 validation in a formal SCH-witnessed maintenance window.
+These are the current architecture/documentation gaps to track:
+
+1. Remove stale `grafana-test.lan` references from active docs and examples.
+2. Keep `grafana-srvotptest26.init-db.lan` as the current test-cluster Grafana host unless `.env` says otherwise.
+3. Clearly document whether Grafana uses shared Traefik hostname access or optional dedicated LoadBalancer IP access.
+4. Move destructive resilience-validation detail out of the root README and into operations docs.
+5. Keep Redis backup/restore expectations explicit and pending until production sign-off.
+6. Keep TLS trust status explicit: self-signed/internal trust/approved certificate.
+7. Avoid describing repo-sync as deployment; repo-sync only updates the local checkout.
+8. Keep generated files documented as generated, not hand-edited source files.
 
 ---
 
-## Implementation rule
+## Sign-off checklist
 
-Do not loosen safeguards just to make the architecture look complete.
+| Item | Status |
+|---|---|
+| `.env` is the operator-owned runtime source of truth | Implemented |
+| Portal uses Kubernetes Service and Traefik Ingress | Implemented |
+| Portal hostname is documented | Implemented |
+| Grafana hostname is documented consistently | Needs cleanup across docs/examples |
+| App supports multiple replicas through Redis shared state | Implemented |
+| Redis Sentinel/HAProxy topology exists | Implemented |
+| Redis destructive changes are blocked from normal updates | Required rule |
+| App data uses shared RWX/NFS storage | Implemented |
+| Monitor remains internal only | Implemented |
+| Observability stack is source-driven | Implemented |
+| Repo-sync is separated from deployment | Implemented |
+| Redis backup/restore is documented | Pending |
+| Production TLS trust is finalized | Pending |
+| Final production LB/VIP/DNS model is approved | Pending |
 
-The correct current position is:
+---
+
+## Architecture rule
+
+Do not remove useful resilience work just to look closer to the SCH starting branch.
+
+Do not add more access modes, automation paths, or validation flows without documenting which layer they belong to.
+
+The project should remain understandable as:
 
 ```text
-Phase 3 resilience validation completed on 2026-06-03 with no detected blockers.
-Redis and NFS foundations are validated.
-Redis HA/Sentinel/HAProxy failover is validated.
-Normal Redis updates must not be destructive.
-Two app replicas are validated with real SMS/OTP portal confirmation.
-Worker drain and uncordon recovery are validated for otp-worker1 and otp-worker2.
-Observability is source-driven: dashboard source JSON -> generated ConfigMap -> Grafana sidecar.
-Frontend is source-driven: app.jsx -> generated app.js -> portal.
-Runtime configuration is source-driven: .env -> rendered manifests/runtime configuration.
-Monitor remains internal only: no Service, no Ingress.
-Telegram is the supported monitor alerting path.
+SCH baseline application model
+  + clear Kubernetes runtime
+  + explicit resilience layer
+  + explicit observability layer
+  + explicit operator automation layer
 ```
-
----
-
-## Architecture sign-off checklist
-
-* [x] `.env` is the only source of site/operator values.
-* [x] Portal access works through `https://srvotptest26.init-db.lan`.
-* [x] Grafana access works through `https://grafana.init-db.lan`.
-* [x] Redis is required and healthy.
-* [x] Redis HAProxy routes to the Sentinel-selected master.
-* [x] Redis StatefulSet/PVC resources are not destructively recreated during normal updates.
-* [x] App data is on NFS/RWX storage.
-* [x] Monitor is internal only with no Service/Ingress.
-* [x] Telegram alerting is the supported path.
-* [x] Prometheus scrapes portal and monitor.
-* [x] Grafana dashboard is provisioned from generated ConfigMap.
-* [x] OTP business-flow validation passed on 2026-06-03.
-* [x] Two-replica OTP validation passed on 2026-06-03.
-* [x] Controlled worker-drain validation passed for both workers on 2026-06-03.
-* [ ] TLS client trust is completed or explicitly tracked as pending.
-* [ ] Redis backup/restore procedure is documented.
-* [ ] SCH accepts Redis Sentinel/HAProxy or selects managed Redis.
-* [ ] Final production LB/VIP model is confirmed with SCH if required.
