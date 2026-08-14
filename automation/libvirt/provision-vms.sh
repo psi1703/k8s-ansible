@@ -1,31 +1,24 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-
-# OTP Relay worker VM provisioner
+# Layer: local libvirt worker-VM provisioning.
 #
-# New target design:
-#   - The physical/server host is the K3s control-plane and Ansible runner.
-#   - This provisioner creates only two Debian cloud-image worker VMs:
-#       otp-worker1
-#       otp-worker2
-#   - NFS is external and is not provisioned here.
+# This script prepares the two Kubernetes worker VMs used by the OTP Relay
+# multi-node cluster profile.
 #
-# Default behavior:
-#   - Must be run as a normal user, not with sudo bash.
-#   - Uses sudo internally only where required.
-#   - Creates/uses SSH key: ~/.ssh/otp-relay-cluster
-#   - Repairs SSH key ownership/permissions if earlier sudo/root runs broke them.
-#   - Creates VM login user: otp-relay
-#   - Auto-assigns free LAN IPs by scanning IP_SCAN_PREFIX/IP_SCAN_START/IP_SCAN_END
-#   - Writes Ansible inventory: automation/ansible/inventory.generated.ini
+# Responsibilities:
+# - Create, repair, or recreate worker1 and worker2 libvirt VMs.
+# - Generate cloud-init seed media and SSH identity material for Ansible.
+# - Generate automation/ansible/inventory.generated.ini.
+# - Validate VM network reachability before Ansible runs.
+# - Detect gateway, DNS, bridge, and host forwarding problems with clear diagnostics.
+# - Repair libvirt bridge netfilter settings when they would block VM traffic.
 #
-# Generated inventory shape:
-#   [control_plane]
-#   localhost ansible_connection=local
-#
-#   [workers]
-#   worker1 ansible_host=<worker1-ip>
-#   worker2 ansible_host=<worker2-ip>
+# Non-responsibilities:
+# - It does not provision the control-plane node; the real server is the control plane.
+# - It does not join workers to K3s directly.
+# - It does not deploy OTP Relay workloads.
+# - It does not install observability Helm charts.
+# - It does not sync the repository.
+# - It does not install GitHub runners.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROVISIONER_PATH="${REPO_ROOT}/automation/libvirt/$(basename "${BASH_SOURCE[0]}")"
