@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Shared deployment-mode helpers for install-otp-relay-k8s.sh.
-# Source this file; do not execute it directly.
-
-# Supported DEPLOY_MODE values:
-#   full          - build/import app and monitor images, apply all manifests
-#   app           - build/import app image, apply app-related manifests
-#   monitor       - build/import monitor image, apply monitor-related manifests
-#   manifests     - apply rendered Kubernetes manifests only; do not build images
-#   observability - apply observability Helm stacks/manifests only
-#   none          - load/validate environment and exit before deployment work
+# Layer: deployment mode detection and change classification.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Classify repository changes into safe deployment/update categories.
+# - Help the installer decide whether app rebuild, monitor rebuild, help-doc rebuild, manifest apply, or observability apply is needed.
+# - Keep deployment decisions explicit instead of hiding them inside GitHub Actions or repo-sync.
+# - Support operator-controlled updates after the repository has already been synced.
+#
+# Non-responsibilities:
+# - It does not sync the repository.
+# - It does not build images.
+# - It does not apply Kubernetes manifests.
+# - It does not install K3s, Helm, MetalLB, or observability charts.
+# - It does not install GitHub runners.
 
 current_deploy_mode() {
   local mode="${DEPLOY_MODE:-full}"
