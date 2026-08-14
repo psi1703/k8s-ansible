@@ -358,7 +358,7 @@ WORKER2_NAME=$(_env_quote "${WORKER2_NAME:-otp-worker2}")
 OBSERVABILITY_NAMESPACE=$(_env_quote "${OBSERVABILITY_NAMESPACE:-observability}")
 OBSERVABILITY_INSTALL_STACK=$(_env_quote "${OBSERVABILITY_INSTALL_STACK:-1}")
 OBSERVABILITY_STACK_CHART_VERSION=$(_env_quote "${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}")
-GRAFANA_HOST=$(_env_quote "${GRAFANA_HOST:-grafana-test.lan}")
+GRAFANA_HOST=$(_env_quote "${GRAFANA_HOST:-grafana-srvotptest26.init-db.lan}")
 GRAFANA_ADMIN_USER=$(_env_quote "${GRAFANA_ADMIN_USER:-admin}")
 GRAFANA_ADMIN_PASSWORD=$(_env_quote "${GRAFANA_ADMIN_PASSWORD:-}")
 GRAFANA_ADMIN_SECRET_NAME=$(_env_quote "${GRAFANA_ADMIN_SECRET_NAME:-kube-prometheus-stack-grafana}")
@@ -431,7 +431,7 @@ _env_set_default PHONE_OFFLINE_THRESHOLD "30"
 _env_set_default OBSERVABILITY_NAMESPACE "observability"
 _env_set_default OBSERVABILITY_INSTALL_STACK "1"
 _env_set_default OBSERVABILITY_STACK_CHART_VERSION "85.0.1"
-_env_set_default GRAFANA_HOST "grafana-test.lan"
+_env_set_default GRAFANA_HOST "grafana-srvotptest26.init-db.lan"
 _env_set_default GRAFANA_ADMIN_USER "admin"
 _env_set_default GRAFANA_ADMIN_PASSWORD ""
 _env_set_default GRAFANA_ADMIN_SECRET_NAME "kube-prometheus-stack-grafana"
@@ -952,7 +952,7 @@ WORKER2_NAME="${WORKER2_NAME:-otp-worker2}"
 OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
 OBSERVABILITY_INSTALL_STACK="${OBSERVABILITY_INSTALL_STACK:-1}"
 OBSERVABILITY_STACK_CHART_VERSION="${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}"
-GRAFANA_HOST="${GRAFANA_HOST:-grafana-test.lan}"
+GRAFANA_HOST="${GRAFANA_HOST:-grafana-srvotptest26.init-db.lan}"
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
 GRAFANA_ADMIN_SECRET_NAME="${GRAFANA_ADMIN_SECRET_NAME:-kube-prometheus-stack-grafana}"
