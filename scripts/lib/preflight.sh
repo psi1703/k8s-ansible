@@ -1,5 +1,25 @@
 #!/usr/bin/env bash
-# Host detection, preflight, package install, and K3s readiness.
+# Layer: host preflight and Kubernetes bootstrap.
+#
+# Purpose:
+#   Prepare the server/control-plane host for the OTP Relay Kubernetes runtime.
+#   This file is sourced by install-otp-relay-k8s.sh.
+#
+# Scope:
+#   - Detect host OS, architecture, and Raspberry Pi hardware.
+#   - Perform non-invasive safety checks before installation.
+#   - Install base host packages with apt-get.
+#   - Install K3s server only when it is missing.
+#   - Wait for Kubernetes readiness.
+#   - Validate selected nodes and LoadBalancer prerequisites.
+#
+# Out of scope:
+#   - GitHub runner installation.
+#   - Repository synchronization.
+#   - Application image build logic.
+#   - Kubernetes manifest rendering/apply logic.
+#   - Observability Helm installation.
+#
 # Source this file from install-otp-relay-k8s.sh; do not execute it directly.
 
 OS_ID="${OS_ID:-unknown}"
@@ -44,9 +64,10 @@ _wait_for_apt_locks() {
   local waited=0
   local lock
   local locks="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock"
+  local busy
 
   while true; do
-    local busy=0
+    busy=0
 
     if _preflight_cmd_exists fuser; then
       for lock in $locks; do
@@ -108,12 +129,9 @@ detect_host_environment() {
   export OS_ID OS_NAME OS_VERSION_ID OS_LIKE ARCH_RAW IS_RPI
 
   log "detected OS/arch: $OS_NAME / $ARCH_RAW"
-
   if [ "$IS_RPI" = "1" ]; then
     log "detected Raspberry Pi hardware"
   fi
-
-  return 0
 }
 
 is_debian_family() {
@@ -127,7 +145,6 @@ is_debian_family() {
 
   return 1
 }
-
 
 save_network_firewall_snapshots() {
   _preflight_require_root
@@ -173,7 +190,7 @@ check_basic_network_for_install() {
   fi
 
   if _preflight_cmd_exists curl; then
-    if ! curl -fsSL --connect-timeout 10 --max-time 20 https://get.k3s.io >/dev/null 2>&1; then
+    if ! curl -4 --http1.1 -fsSL --connect-timeout 10 --max-time 20 https://get.k3s.io >/dev/null 2>&1; then
       warn "https://get.k3s.io is not reachable right now. K3s installation may fail if this host cannot access the internet."
     fi
   fi
@@ -219,7 +236,16 @@ install_base_os_packages() {
   run_apt_get update
 
   log "installing base OS packages required for repository sync and deployment with apt-get"
-  run_apt_get install -y --no-install-recommends ca-certificates curl git tar gzip sudo python3 openssl
+  run_apt_get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    gzip \
+    openssl \
+    python3 \
+    sudo \
+    tar
+
   log "base OS package installation completed"
 }
 
@@ -228,12 +254,6 @@ run_preflight_and_prepare_cluster() {
 
   detect_host_environment
   validate_k8s_topology_settings
-
-  log "detected OS/arch: $OS_NAME / $ARCH_RAW"
-
-  if [ "$IS_RPI" = "1" ]; then
-    log "detected Raspberry Pi hardware"
-  fi
 
   is_debian_family || fatal "this installer currently supports Debian-family systems only. Detected: ${OS_NAME:-unknown}"
 
@@ -244,10 +264,13 @@ run_preflight_and_prepare_cluster() {
 }
 
 install_k3s_server_if_missing() {
+  local k3s_exec_args
+  local installer_tmp
+
   if ! cmd_exists k3s; then
     log "installing K3s server on this server/control-plane; this may take a few minutes"
 
-    local k3s_exec_args="server --write-kubeconfig-mode 644"
+    k3s_exec_args="server --write-kubeconfig-mode 644"
 
     # SCH-aligned default: do not use K3s Klipper/serviceLB. Keep Traefik unless explicitly disabled elsewhere.
     if [ "${K3S_DISABLE_SERVICELB:-1}" = "1" ]; then
@@ -258,8 +281,21 @@ install_k3s_server_if_missing() {
       k3s_exec_args="$k3s_exec_args --disable traefik"
     fi
 
+    installer_tmp="$(mktemp)"
+    log "downloading K3s installer with retry-safe curl options"
+    _preflight_retry 5 5 curl -4 --http1.1 \
+      --connect-timeout 15 \
+      --max-time 300 \
+      -fsSL \
+      https://get.k3s.io \
+      -o "$installer_tmp"
+
+    chmod 755 "$installer_tmp"
+
     log "K3s install args: $k3s_exec_args"
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$k3s_exec_args" sh -
+    INSTALL_K3S_EXEC="$k3s_exec_args" sh "$installer_tmp"
+    rm -f "$installer_tmp"
+
     log "K3s server installation completed"
   else
     log "K3s already installed; no reinstall performed"
@@ -277,9 +313,10 @@ print_k3s_diagnostics() {
 }
 
 wait_for_kubernetes_ready() {
+  local i
+
   log "waiting for Kubernetes node readiness; timeout approximately 120s"
 
-  local i
   for i in $(seq 1 60); do
     if k3s kubectl get nodes >/dev/null 2>&1 && k3s kubectl wait --for=condition=Ready node --all --timeout=10s >/dev/null 2>&1; then
       log "Kubernetes nodes are Ready"
@@ -302,7 +339,15 @@ install_kubernetes_tooling_and_k3s() {
   _preflight_require_root
 
   log "installing Kubernetes/deployment OS packages with apt-get"
-  run_apt_get install -y --no-install-recommends iproute2 iptables nftables python3-venv jq nodejs npm
+  run_apt_get install -y --no-install-recommends \
+    iproute2 \
+    iptables \
+    jq \
+    nftables \
+    nodejs \
+    npm \
+    python3-venv
+
   log "Kubernetes/deployment OS package installation completed"
 
   if requires_docker; then
