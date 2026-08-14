@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
-# Kubernetes secret creation, image build/import, manifest apply, and rollout restarts.
+# Layer: Kubernetes apply, image import, rollout, and diagnostics.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Create or update Kubernetes runtime secrets.
+# - Build, validate, save, import, and distribute OTP Relay app and monitor images.
+# - Apply app, monitor, Redis, Sentinel, HAProxy, PDB, PVC, Service, and Ingress resources.
+# - Preserve existing PV/PVC bindings when immutable storage fields differ from .env.
+# - Wait for PVC binding and workload rollouts.
+# - Print useful Kubernetes diagnostics when apply or rollout fails.
+#
+# Non-responsibilities:
+# - It does not render manifests from templates.
+# - It does not create or validate .env.
+# - It does not install K3s, Docker, Helm, or host packages.
+# - It does not sync the repository.
+# - It does not install GitHub runners.
 
 kubectl_resource_exists() {
   local kind="$1"
