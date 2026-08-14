@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Smart single operator entrypoint for OTP Relay Kubernetes / Ansible setup.
-# Normal use: bash setup.sh
+# Layer: single operator entrypoint.
 #
-# If started with sudo, this script repairs repo ownership and re-runs itself
-# as the original sudo user. The repo working tree must be owned by the
-# normal operator user, while privileged operations are performed via sudo.
+# Normal use:
+#   ./setup.sh
 #
-# Current design:
-#   - This server is the K3s control-plane and Ansible runner.
-#   - The libvirt provisioner creates only worker1 and worker2 VMs.
-#   - External NFS is managed separately and is not joined to Kubernetes.
+# Responsibilities:
+# - Create or reuse .env through the shared environment library.
+# - Detect whether the host should use the local installer path or the VM/Ansible cluster path.
+# - Verify generated Ansible inventory hosts are actually SSH reachable before using them.
+# - Repair or recreate worker VMs when stale inventory, broken VM identity, missing seed ISO, or shut-off domains would block setup.
+# - Delegate local Kubernetes deployment to install-otp-relay-k8s.sh.
+# - Delegate multi-node cluster setup to the Ansible runner.
 #
-# This script:
-#   - creates/reuses .env
-#   - prompts for VM/network values when needed
-#   - provisions/repairs worker VMs when needed
-#   - repairs repo/.ssh/key ownership problems caused by accidental sudo runs
-#   - runs Ansible cluster setup using localhost as control-plane
-#   - can still run local-only installer path with --local for development
+# Non-responsibilities:
+# - It does not sync the repository.
+# - It does not install GitHub runners.
+# - It does not directly render Kubernetes manifests.
+# - It does not directly apply Kubernetes workloads.
+# - It does not directly install observability Helm charts.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
