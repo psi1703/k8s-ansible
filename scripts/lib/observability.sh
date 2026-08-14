@@ -2,17 +2,17 @@
 # Observability installation and manifest apply support for install-otp-relay-k8s.sh.
 # Source this file; do not execute it directly.
 #
-# Contract:
+# Layered contract:
 #   - Owns kube-prometheus-stack installation when OBSERVABILITY_INSTALL_STACK=1.
 #   - Owns Loki installation from k8s/observability/loki-values.yaml when present.
 #   - Owns Alloy installation from k8s/observability/alloy-values.yaml when present.
-#   - Owns applying OTP Relay dashboard, ServiceMonitor, and Grafana IngressRoute manifests.
+#   - Owns applying OTP Relay ServiceMonitor, dashboard ConfigMap, and Grafana Ingress manifests.
 #   - Treats k8s/observability/*values.yaml as Helm values, not raw Kubernetes manifests.
+#   - Keeps Grafana access host-based through standard Kubernetes Ingress.
 #   - Fails fast when observability is enabled but the requested stack cannot be made usable.
 
 OBSERVABILITY_NAMESPACE="${OBSERVABILITY_NAMESPACE:-observability}"
 OBSERVABILITY_INSTALL_STACK="${OBSERVABILITY_INSTALL_STACK:-1}"
-
 OBSERVABILITY_STACK_RELEASE="${OBSERVABILITY_STACK_RELEASE:-kube-prometheus-stack}"
 OBSERVABILITY_STACK_REPO_NAME="${OBSERVABILITY_STACK_REPO_NAME:-prometheus-community}"
 OBSERVABILITY_STACK_REPO_URL="${OBSERVABILITY_STACK_REPO_URL:-https://prometheus-community.github.io/helm-charts}"
@@ -20,22 +20,25 @@ OBSERVABILITY_STACK_CHART="${OBSERVABILITY_STACK_CHART:-kube-prometheus-stack}"
 OBSERVABILITY_STACK_CHART_VERSION="${OBSERVABILITY_STACK_CHART_VERSION:-85.0.1}"
 
 # SCH-aligned log stack:
-# - Loki chart moved from grafana/loki to grafana-community/loki.
-# - Alloy remains in the grafana chart repo.
+# - Loki uses the grafana-community repository entry for the Loki chart.
+# - Alloy remains in the grafana chart repository.
 OBSERVABILITY_LOKI_RELEASE="${OBSERVABILITY_LOKI_RELEASE:-loki}"
 OBSERVABILITY_LOKI_REPO_NAME="${OBSERVABILITY_LOKI_REPO_NAME:-grafana-community}"
 OBSERVABILITY_LOKI_REPO_URL="${OBSERVABILITY_LOKI_REPO_URL:-https://grafana.github.io/helm-charts}"
 OBSERVABILITY_LOKI_CHART="${OBSERVABILITY_LOKI_CHART:-loki}"
 OBSERVABILITY_LOKI_CHART_VERSION="${OBSERVABILITY_LOKI_CHART_VERSION:-}"
-
 OBSERVABILITY_ALLOY_RELEASE="${OBSERVABILITY_ALLOY_RELEASE:-alloy}"
 OBSERVABILITY_ALLOY_REPO_NAME="${OBSERVABILITY_ALLOY_REPO_NAME:-grafana}"
 OBSERVABILITY_ALLOY_REPO_URL="${OBSERVABILITY_ALLOY_REPO_URL:-https://grafana.github.io/helm-charts}"
 OBSERVABILITY_ALLOY_CHART="${OBSERVABILITY_ALLOY_CHART:-alloy}"
 OBSERVABILITY_ALLOY_CHART_VERSION="${OBSERVABILITY_ALLOY_CHART_VERSION:-1.8.1}"
-
 OBSERVABILITY_HELM_TIMEOUT="${OBSERVABILITY_HELM_TIMEOUT:-15m}"
 HELM_KUBECONFIG="${HELM_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
+# Runtime access model:
+#   Portal and Grafana should normally share the Traefik/MetalLB IP and use different DNS hostnames.
+#   The active test-cluster Grafana host is grafana-srvotptest26.init-db.lan.
+#   grafana-test.lan is a stale placeholder and must not be used as the default.
 GRAFANA_HOST="${GRAFANA_HOST:-grafana-srvotptest26.init-db.lan}"
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
@@ -147,7 +150,6 @@ print_observability_diagnostics() {
   k3s kubectl get svc -n "$OBSERVABILITY_NAMESPACE" || true
   k3s kubectl get daemonset -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
   k3s kubectl get ingress -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
-  k3s kubectl get ingressroute -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
   k3s kubectl get servicemonitor -n "$OBSERVABILITY_NAMESPACE" 2>/dev/null || true
   k3s kubectl get configmap -n "$OBSERVABILITY_NAMESPACE" | grep -E 'grafana|dashboard|otp|loki|alloy' || true
   k3s kubectl get events -n "$OBSERVABILITY_NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 100 || true
@@ -166,6 +168,7 @@ print_observability_diagnostics() {
 
 fatal_observability() {
   local message="$1"
+
   warn "$message"
   print_observability_diagnostics
   fatal "$message"
@@ -184,7 +187,6 @@ ensure_helm_available() {
   run_apt_get_observability install -y --no-install-recommends curl ca-certificates openssl tar gzip
 
   tmp_helm_install="$(mktemp)"
-
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o "$tmp_helm_install" || {
     rm -f "$tmp_helm_install"
     fatal "failed to download Helm installer from GitHub"
@@ -200,6 +202,7 @@ ensure_helm_available() {
 
 ensure_observability_namespace() {
   local source_dir
+
   source_dir="$(_observability_source_dir)"
 
   [ -n "$source_dir" ] || return 0
@@ -233,7 +236,6 @@ ensure_grafana_admin_secret_if_configured() {
   [ -n "${GRAFANA_ADMIN_SECRET_NAME:-}" ] || fatal "GRAFANA_ADMIN_SECRET_NAME is required when GRAFANA_ADMIN_PASSWORD is set"
 
   ensure_observability_namespace
-
   log "ensuring Grafana admin credential secret exists: ${OBSERVABILITY_NAMESPACE}/${GRAFANA_ADMIN_SECRET_NAME}"
   k3s kubectl create secret generic "$GRAFANA_ADMIN_SECRET_NAME" \
     -n "$OBSERVABILITY_NAMESPACE" \
@@ -298,7 +300,6 @@ install_kube_prometheus_stack() {
   fi
 
   log "kube-prometheus-stack Helm install/upgrade completed"
-
   wait_with_progress "waiting for ServiceMonitor CRD from kube-prometheus-stack" 180 5 _service_monitor_crd_available || \
     fatal_observability "ServiceMonitor CRD did not become available after kube-prometheus-stack install"
   wait_with_progress "waiting for Grafana service from kube-prometheus-stack" 180 5 _grafana_service_available || \
@@ -332,7 +333,6 @@ install_loki_stack_if_available() {
   _update_helm_repos
 
   log "installing/upgrading Loki release $OBSERVABILITY_LOKI_RELEASE in namespace $OBSERVABILITY_NAMESPACE"
-
   if [ -n "$OBSERVABILITY_LOKI_CHART_VERSION" ]; then
     log "Helm chart: $OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART version $OBSERVABILITY_LOKI_CHART_VERSION"
     loki_version_args=(--version "$OBSERVABILITY_LOKI_CHART_VERSION")
@@ -341,7 +341,6 @@ install_loki_stack_if_available() {
   fi
 
   log "Values file: $values_file"
-
   if ! helm_k3s upgrade --install "$OBSERVABILITY_LOKI_RELEASE" \
     "$OBSERVABILITY_LOKI_REPO_NAME/$OBSERVABILITY_LOKI_CHART" \
     --namespace "$OBSERVABILITY_NAMESPACE" \
@@ -415,8 +414,7 @@ _render_observability_manifest() {
 
   cp "$source_file" "$rendered_file"
 
-  # The source files are kept readable in git with observability/grafana defaults.
-  # Render runtime namespace/host here so .env remains the operator source of truth.
+  # Source files stay readable in git. Runtime namespace and host come from .env.
   sed -i \
     -e "s/namespace: observability/namespace: ${OBSERVABILITY_NAMESPACE}/g" \
     -e "s/__GRAFANA_HOST__/${GRAFANA_HOST}/g" \
@@ -472,10 +470,9 @@ _apply_single_observability_manifest() {
         warn "skipping $base because ServiceMonitor CRD is not installed"
       fi
       ;;
-
-    grafana-ingress.yaml|grafana-ingressroute.yaml)
+    grafana-ingress.yaml)
       if _grafana_service_available; then
-        log "applying Grafana ingress manifest $base for host $GRAFANA_HOST"
+        log "applying Grafana standard Ingress manifest $base for host $GRAFANA_HOST"
         _apply_rendered_manifest "$file"
       elif [ "$OBSERVABILITY_INSTALL_STACK" = "1" ]; then
         fatal_observability "Grafana service $OBSERVABILITY_NAMESPACE/${OBSERVABILITY_STACK_RELEASE}-grafana is missing; cannot apply $base"
@@ -483,7 +480,9 @@ _apply_single_observability_manifest() {
         warn "skipping $base because service $OBSERVABILITY_NAMESPACE/${OBSERVABILITY_STACK_RELEASE}-grafana does not exist"
       fi
       ;;
-
+    grafana-ingressroute.yaml)
+      warn "skipping deprecated Grafana IngressRoute manifest $base; use grafana-ingress.yaml"
+      ;;
     grafana-dashboard-*.yaml)
       if _grafana_service_available; then
         log "applying Grafana dashboard ConfigMap $base"
@@ -494,7 +493,6 @@ _apply_single_observability_manifest() {
         warn "skipping $base because Grafana is not installed in namespace $OBSERVABILITY_NAMESPACE"
       fi
       ;;
-
     *)
       log "applying observability manifest $base"
       _apply_rendered_manifest "$file"
@@ -578,8 +576,7 @@ _dry_run_single_observability_manifest() {
         warn "skipping dry-run for $base because ServiceMonitor CRD is not installed yet"
       fi
       ;;
-
-    grafana-ingress.yaml|grafana-ingressroute.yaml)
+    grafana-ingress.yaml)
       if _grafana_service_available; then
         if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
           rm -f "$tmp"
@@ -589,7 +586,9 @@ _dry_run_single_observability_manifest() {
         warn "skipping dry-run for $base because Grafana service is not installed yet"
       fi
       ;;
-
+    grafana-ingressroute.yaml)
+      warn "skipping dry-run for deprecated Grafana IngressRoute manifest $base; use grafana-ingress.yaml"
+      ;;
     grafana-dashboard-*.yaml)
       if _grafana_service_available; then
         if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
@@ -600,7 +599,6 @@ _dry_run_single_observability_manifest() {
         warn "skipping dry-run for $base because Grafana is not installed yet"
       fi
       ;;
-
     *)
       if ! k3s kubectl apply --dry-run=client -f "$tmp" >/dev/null; then
         rm -f "$tmp"
