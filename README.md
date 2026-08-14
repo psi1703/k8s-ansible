@@ -45,16 +45,16 @@ https://srvotptest26.init-db.lan
 Grafana is also controlled by `.env`:
 
 ```bash
-GRAFANA_HOST="grafana-srvotptest.init-db.lan"
+GRAFANA_HOST="grafana-srvotptest26.init-db.lan"
 ```
 
 Expected Grafana URL:
 
 ```text
-https://grafana-srvotptest.init-db.lan
+http://grafana-srvotptest26.init-db.lan
 ```
 
-Grafana should normally be accessed through Traefik/IngressRoute. Port-forwarding is only for temporary debugging.
+Grafana should normally be accessed through Traefik/Ingress. Port-forwarding is only for temporary debugging.
 
 ---
 
@@ -267,7 +267,7 @@ REDIS_SPREAD_RECREATE_PVCS="auto"
 OBSERVABILITY_NAMESPACE="observability"
 OBSERVABILITY_INSTALL_STACK="1"
 OBSERVABILITY_STACK_CHART_VERSION="85.0.1"
-GRAFANA_HOST="grafana-test.lan"
+GRAFANA_HOST="grafana-srvotptest26.init-db.lan"
 GRAFANA_ADMIN_USER="admin"
 GRAFANA_ADMIN_PASSWORD=""
 GRAFANA_ADMIN_SECRET_NAME="kube-prometheus-stack-grafana"
@@ -543,45 +543,6 @@ docs/operations/operations-and-validation-runbook.md
 
 ---
 
-## Resilience validation
-
-The repository includes a standalone resilience validation script:
-
-```text
-automation/validation/resilience-validation.sh
-```
-
-This script is separate from repository sync and installation. It is intended for controlled operations validation after the cluster is installed.
-
-Default non-destructive validation:
-
-```bash
-cd /opt/k8s-ansible
-bash automation/validation/resilience-validation.sh
-```
-
-The default mode checks cluster health, OTP Relay pods/services/ingress, the portal readiness endpoint, Redis/Sentinel/HAProxy health, PDBs, PVCs, resources, observability, and repository syntax. It does not intentionally restart workloads, delete pods, or drain nodes.
-
-Full resilience validation is explicitly enabled:
-
-```bash
-cd /opt/k8s-ansible
-RUN_DESTRUCTIVE_TESTS=1 ASSUME_YES=1 bash automation/validation/resilience-validation.sh
-```
-
-Full mode intentionally performs controlled disruption tests, including app/monitor/Sentinel/HAProxy restarts, one Redis pod deletion/recovery test, worker node drain/uncordon tests, portal availability checks during maintenance, and a final strict recovery check.
-
-Optional real OTP confirmation gate:
-
-```bash
-cd /opt/k8s-ansible
-RUN_DESTRUCTIVE_TESTS=1 ASSUME_YES=1 REQUIRE_REAL_OTP_CONFIRMATION=1 bash automation/validation/resilience-validation.sh
-```
-
-Run full resilience validation only during an approved maintenance or validation window. The script proves availability behavior under controlled node and pod disruption; it is not part of normal install, repo sync, or routine update flow.
-
----
-
 ## Expected successful workload layout
 
 A healthy current install should show:
@@ -633,8 +594,6 @@ The monitor pod should run on the control-plane.
 * Grafana admin credentials should be managed through `.env` and the Kubernetes Secret, not committed files.
 * Self-signed TLS secrets are not rotated on normal installer reruns.
 * Set `TLS_ROTATE_SELF_SIGNED=1` only when certificate replacement is intentional.
-* Use `automation/validation/resilience-validation.sh` for controlled post-install resilience validation.
-* Run full resilience validation only when disruptive pod restart/delete and node drain tests are approved.
 * Re-run validation after future changes to OTP flow, Redis state handling, frontend polling, Kubernetes placement, observability, or deployment workflow behavior.
 
 ---
