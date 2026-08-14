@@ -786,7 +786,7 @@ iPhone receives SMS
 
 ### `grafana-ingress.yaml`
 
-**What it does:** Traefik IngressRoute/ingress configuration for Grafana.
+**What it does:** standard Kubernetes Ingress configuration for Grafana.
 
 **Why it is important:** Provides browser access to Grafana without port-forwarding.
 
