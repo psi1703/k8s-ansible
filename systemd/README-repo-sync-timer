@@ -1,25 +1,259 @@
-Install the repo sync timer after the updated files are in /opt/k8s-ansible:
+# Repo-sync systemd timer
 
+This document explains the optional systemd timer used to keep the local checkout of the OTP Relay Kubernetes repository synchronized with GitHub.
+
+The repo-sync timer belongs to the operator automation layer. It is intentionally limited to repository synchronization only.
+
+---
+
+## Layer purpose
+
+The repo-sync timer periodically runs:
+
+```text
+scripts/sync-repo.sh
+```
+
+That script updates the local checkout from `origin/main` and preserves runtime/generated artifacts.
+
+The timer is useful when the server should automatically receive repository file updates without giving GitHub Actions direct deployment control.
+
+---
+
+## Safety boundary
+
+The repo-sync timer does not deploy the application.
+
+It must not run:
+
+```text
+setup.sh
+install-otp-relay-k8s.sh
+ansible-playbook
+helm install
+helm upgrade
+kubectl apply
+kubectl rollout restart
+k3s installer
+Docker image build/import
+GitHub runner installation
+```
+
+This boundary is intentional.
+
+Repository synchronization and cluster deployment are separate operator actions.
+
+---
+
+## Why this exists
+
+This repository previously used a GitHub Actions runner based workflow. The current model is safer for this environment:
+
+```text
+GitHub web edit
+  -> repo-sync timer updates local checkout
+  -> operator reviews or intentionally runs setup/install
+  -> cluster changes happen only during explicit operator-controlled setup
+```
+
+This prevents a GitHub push from automatically mutating the live cluster.
+
+---
+
+## Files involved
+
+```text
+scripts/sync-repo.sh
+  Performs the actual Git fetch/reset/clean operation.
+
+scripts/install-repo-sync-timer.sh
+  Installs or updates the systemd service and timer units.
+
+systemd/README-repo-sync-timer
+  This documentation file.
+```
+
+The generated systemd unit files are written under:
+
+```text
+/etc/systemd/system/
+```
+
+The exact unit names are created by `scripts/install-repo-sync-timer.sh`.
+
+---
+
+## Preserved paths
+
+The sync script must preserve local runtime/generated artifacts such as:
+
+```text
+.env
+automation/ansible/inventory.generated.ini
+automation/libvirt/build/
+dist/
+release/
+.sync-state/
+.venv/
+venv/
+node_modules/
+frontend/help/
+frontend/app.js
+install-report.txt
+```
+
+These paths are not treated as source files managed by Git sync.
+
+Important examples:
+
+```text
+frontend/app.jsx is source.
+frontend/app.js is generated.
+
+docs/help/ is source.
+frontend/help/ is generated.
+
+node_modules/ is generated dependency output.
+```
+
+The sync script should not chmod or clean inside generated dependency/output directories.
+
+---
+
+## Installing the timer
+
+From the repository root:
+
+```bash
+sudo bash scripts/install-repo-sync-timer.sh
+```
+
+The installer should:
+
+```text
+validate the repository path
+write the systemd service unit
+write the systemd timer unit
+reload systemd
+optionally enable/start the timer
+print status and next-run guidance
+```
+
+---
+
+## Checking timer status
+
+Use:
+
+```bash
+systemctl list-timers | grep -i repo || true
+systemctl status otp-relay-repo-sync.timer --no-pager || true
+systemctl status otp-relay-repo-sync.service --no-pager || true
+```
+
+If the exact unit name changes, check the output printed by `scripts/install-repo-sync-timer.sh`.
+
+---
+
+## Running repo sync manually
+
+Manual sync remains the primary debugging path:
+
+```bash
 cd /opt/k8s-ansible
-bash scripts/install-repo-sync-timer.sh
+bash scripts/sync-repo.sh
+```
 
-Defaults:
-- REPO_DIR=/opt/k8s-ansible
-- REPO_URL=https://github.com/psi1703/k8s-ansible.git
-- BRANCH=main
-- SYNC_INTERVAL=1min
-- RUN_AFTER_SYNC=0
+Expected safe behavior:
 
-The timer only syncs the repo. It does not run setup.sh or deploy.
+```text
+fetch origin/main
+compare local HEAD with remote HEAD
+reset local checkout only when GitHub changed
+clean untracked files while preserving runtime/generated paths
+restore executable bits only for repository shell scripts
+write sync state
+exit without deployment side effects
+```
 
-Manual sync:
+---
 
-sudo systemctl start k8s-ansible-repo-sync.service
+## Confirming no deployment happened
 
-Watch logs:
+After a sync-only run, the cluster should not have changed unless an operator ran setup/install separately.
 
-sudo tail -f /var/log/k8s-ansible/repo-sync.log
+Useful checks:
 
-Change polling interval example:
+```bash
+sudo k3s kubectl get pods -n otp-relay -o wide
+sudo k3s kubectl get pods -n observability -o wide
+sudo k3s kubectl get svc -A | grep -E 'traefik|otp-relay|grafana' || true
+```
 
-SYNC_INTERVAL=5min bash scripts/install-repo-sync-timer.sh
+Repo sync should not restart pods or apply manifests.
+
+---
+
+## Troubleshooting
+
+### Timer ran but files did not update
+
+Check:
+
+```bash
+cd /opt/k8s-ansible
+git remote -v
+git branch --show-current
+git rev-parse HEAD
+git rev-parse origin/main
+bash scripts/sync-repo.sh
+```
+
+### Generated files were removed
+
+Check that `scripts/sync-repo.sh` preserves generated/runtime paths and that the running script is the corrected version:
+
+```bash
+grep -n 'PRESERVE_PATHS' -A20 scripts/sync-repo.sh
+grep -n 'node_modules\|frontend/help\|frontend/app.js' scripts/sync-repo.sh
+grep -n 'restore_executable_bits' -A25 scripts/sync-repo.sh
+```
+
+### node_modules chmod warnings appear
+
+The sync script is entering generated dependency output and must be fixed.
+
+The corrected behavior is to prune `node_modules` before chmod traversal.
+
+Expected command structure inside `restore_executable_bits()`:
+
+```text
+-path "./node_modules" ... -prune
+```
+
+### Timer accidentally deploys workloads
+
+Disable it immediately:
+
+```bash
+sudo systemctl disable --now otp-relay-repo-sync.timer || true
+sudo systemctl disable --now otp-relay-repo-sync.service || true
+```
+
+Then inspect the generated service unit. It should call only:
+
+```text
+scripts/sync-repo.sh
+```
+
+It should not call setup, installer, Ansible, Helm, kubectl apply, Docker build, or K3s installation commands.
+
+---
+
+## Design note
+
+This timer is intentionally different from a GitHub Actions deployment runner.
+
+The timer keeps local files current. It does not decide when production should change.
+
+The operator remains responsible for explicitly running setup or install when a synchronized repository change should be applied to the cluster.
