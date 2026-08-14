@@ -2,177 +2,158 @@
 
 ## Purpose
 
-This runbook is the operations and validation reference for OTP Relay Kubernetes.
+This runbook is the day-2 operations reference for the OTP Relay Kubernetes environment.
 
-It owns:
+It is intentionally focused on runtime checks, validation, recovery, and troubleshooting. Deployment design belongs in `docs/deployment/deployment-and-storage-guide.md`. Observability details belong in `docs/operations/observability-and-grafana.md`. Build and generated artifact rules belong in `docs/development/build-and-development-guide.md`.
 
-* daily health checks
-* runtime validation commands
-* Redis/Sentinel/HAProxy checks
-* NFS shared-storage checks
-* monitor validation
-* Telegram alert validation
-* OTP business-flow validation
-* DNS/TLS client validation
-* worker-drain validation
-* SCH production-readiness gates
-* quick troubleshooting triage
-
-Detailed deployment and storage design belongs in:
+The project should be understood in layers:
 
 ```text
-docs/deployment/deployment-and-storage-guide.md
-```
-
-Detailed Grafana, Prometheus, Loki, Alloy, dashboard generation, and PromQL guidance belongs in:
-
-```text
-docs/operations/observability-and-grafana.md
-```
-
-Detailed build/source-generated artifact guidance belongs in:
-
-```text
-docs/development/build-and-development-guide.md
+Application layer        FastAPI portal, frontend, monitor, iPhone Shortcut OTP flow
+Kubernetes layer         K3s, Deployments, Services, Ingress, Secrets, ConfigMaps
+Resilience layer         Redis, Sentinel, HAProxy, NFS/RWX storage, pod spreading
+Network access layer     Traefik, MetalLB, internal DNS, optional TLS
+Observability layer      Prometheus, Grafana, Loki, Alloy, dashboard provisioning
+Automation layer         setup.sh, install-otp-relay-k8s.sh, repo sync, validation scripts
+Operations layer         health checks, recovery, controlled destructive tests
 ```
 
 ---
 
-## Current validation state
+## Current operating baseline
 
-Current validated cluster baseline:
-
-```text
-3-node K3s cluster
-NFS/RWX app storage for /app/data
-Redis Sentinel/HAProxy topology
-Redis failover validated
-Traefik HTTPS ingress enabled
-Monitor pod isolated from Service/Ingress
-Observability namespace with Prometheus/Grafana/Loki/Alloy
-OTP Relay live Grafana dashboard provisioned from ConfigMap
-```
-
-Known node labels used for OTP Relay placement:
+The current target operating model is:
 
 ```text
-otp-relay/storage-node=true
-otp-relay/monitor-node=true
+Cluster:            3-node K3s cluster
+Control plane:      debian
+Workers:            otp-worker1, otp-worker2
+Portal namespace:   otp-relay
+Observability ns:   observability
+Portal ingress:     srvotptest26.init-db.lan
+Grafana ingress:    grafana-srvotptest26.init-db.lan
+Traefik LB IP:      172.31.11.121
+Storage:            NFS-backed RWX /app/data
+Redis:              Redis StatefulSet with Sentinel and HAProxy
+App replicas:       multiple app replicas when Redis is required
+Monitor:            isolated pod, no Service, no Ingress
 ```
 
-Last successful automated validation:
-
-```text
-Date:   2026-06-03
-Result: Passed with no detected blockers
-Scope:  Phase 3 resilience, observability, worker-drain, and OTP validation
-```
-
-Validated on 2026-06-03:
-
-* K3s 3-node baseline
-* NFS/RWX app storage
-* Redis HA/Sentinel/HAProxy topology
-* Redis failover and Redis master pod deletion recovery
-* `/readyz` with Redis required
-* TLS/Ingress path
-* monitor isolation
-* observability namespace recovery
-* Grafana dashboard ConfigMap persistence
-* app pod restart recovery
-* monitor pod restart recovery
-* Redis HAProxy pod restart recovery
-* Redis Sentinel pod restart recovery
-* Grafana pod restart recovery
-* two app replicas
-* real SMS/OTP portal confirmation
-* worker drain and uncordon recovery for `otp-worker1`
-* worker drain and uncordon recovery for `otp-worker2`
-* PDB presence
-* CPU/memory requests and limits
-* Kubernetes YAML and Helm template validation
-
-Current validation posture:
-
-| Area                               | Status                                                        |
-| ---------------------------------- | ------------------------------------------------------------- |
-| K3s 3-node baseline                | Validated                                                     |
-| NFS/RWX app storage                | Validated                                                     |
-| Redis HA/Sentinel/HAProxy topology | Validated                                                     |
-| Redis failover                     | Validated                                                     |
-| `/readyz` with Redis required      | Validated                                                     |
-| TLS/Ingress                        | Enabled; client trust rollout may still be pending            |
-| Monitor isolation                  | Aligned                                                       |
-| Observability namespace            | Enabled and validated                                         |
-| Grafana live dashboard             | Provisioned from ConfigMap and restart-persistent             |
-| App multi-replica default          | Validated with real SMS/OTP portal confirmation on 2026-06-03 |
-| Worker-drain validation            | Validated for `otp-worker1` and `otp-worker2` on 2026-06-03   |
-
----
-
-## Daily health checks
+The exact runtime state should always be verified from the cluster rather than assumed:
 
 ```bash
 sudo k3s kubectl get nodes -o wide
 sudo k3s kubectl get pods -n otp-relay -o wide
-sudo k3s kubectl get svc -n otp-relay
-sudo k3s kubectl get ingress -n otp-relay
+sudo k3s kubectl get ingress -A -o wide
+sudo k3s kubectl get svc -A -o wide
+```
+
+---
+
+## Daily health check
+
+Run this first for routine validation:
+
+```bash
+sudo k3s kubectl get nodes -o wide
+sudo k3s kubectl get pods -n otp-relay -o wide
+sudo k3s kubectl get svc -n otp-relay -o wide
+sudo k3s kubectl get ingress -n otp-relay -o wide
 sudo k3s kubectl get pvc -n otp-relay
-sudo k3s kubectl get pods -n observability -o wide
-sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability
-sudo k3s kubectl get servicemonitor -n observability
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
 ```
 
-Application endpoints:
+Expected result:
+
+```text
+All nodes Ready
+App pods Running/Ready
+Monitor pod Running/Ready
+Redis, Sentinel, and HAProxy pods Running/Ready
+PVC Bound
+Ingress host present
+Monitor health script reports OK
+```
+
+Application endpoint checks:
 
 ```bash
 curl -k https://srvotptest26.init-db.lan/healthz
 curl -k https://srvotptest26.init-db.lan/readyz
 ```
 
+If TLS is not active or the browser is being tested through HTTP during setup, use the active scheme from the rendered Ingress and installer report.
+
+---
+
+## Network and access checks
+
+Check Traefik and MetalLB address assignment:
+
+```bash
+sudo k3s kubectl -n kube-system get svc traefik -o wide
+sudo k3s kubectl get ingress -A -o wide
+```
+
+Expected active access model:
+
+```text
+Portal:   srvotptest26.init-db.lan          -> 172.31.11.121
+Grafana:  grafana-srvotptest26.init-db.lan  -> 172.31.11.121
+```
+
+Host-header validation from the server:
+
+```bash
+curl -I -H "Host: srvotptest26.init-db.lan" http://172.31.11.121/
+curl -I -H "Host: grafana-srvotptest26.init-db.lan" http://172.31.11.121/
+```
+
 Expected:
 
-* `/healthz` returns OK.
-* `/readyz` returns Redis OK when Redis is required.
-* App pods are Running/Ready.
-* Monitor pod is Running/Ready.
-* Redis, Sentinel, and HAProxy pods are Running/Ready.
-* PVC is Bound.
-* Observability pods are Running/Ready when observability is enabled.
-* `otp-relay-live-dashboard` ConfigMap exists when Grafana is enabled.
-* ServiceMonitor resources exist for the portal and monitor.
-* Monitor health script reports OK.
+```text
+Portal host returns the portal
+Grafana host returns 302 Found with Location: /login
+```
+
+Bare IP behavior is different from hostname behavior. If `http://172.31.11.121/` opens the portal, that does not prove Grafana is broken. Grafana is host-based unless a dedicated Grafana LoadBalancer IP or subpath mode is intentionally configured.
+
+Client-side DNS checks:
+
+```bash
+nslookup srvotptest26.init-db.lan
+nslookup grafana-srvotptest26.init-db.lan
+```
+
+Both names should resolve to the Traefik LoadBalancer IP unless a different exposure mode is intentionally selected.
 
 ---
 
 ## Application storage checks
 
-Confirm app PVC:
+Check PV and PVC state:
 
 ```bash
 sudo k3s kubectl get pv,pvc -n otp-relay
 sudo k3s kubectl describe pvc otp-relay-data -n otp-relay
 ```
 
-Expected app storage:
+Expected storage model:
 
 ```text
-PVC:           otp-relay-data
-PV:            otp-relay-data-nfs-pv
-Access mode:   RWX
-StorageClass:  otp-relay-nfs
-NFS path:      /export/otp-relay-data
-Mount path:    /app/data
+PVC:          otp-relay-data
+Access mode:  RWX
+Mount path:   /app/data
+Back end:     NFS-backed shared storage
 ```
 
-Confirm runtime files from the app pod:
+Check runtime files from an app pod:
 
 ```bash
 sudo k3s kubectl exec -n otp-relay deployment/otp-relay -- ls -l /app/data
 ```
 
-Expected files:
+Expected runtime files may include:
 
 ```text
 users.xlsx
@@ -182,19 +163,12 @@ wizard_progress.json
 audit.log
 ```
 
-Confirm monitor can see the shared audit log:
+Check app write access:
 
 ```bash
-sudo k3s kubectl exec -n otp-relay deployment/otp-monitor -- ls -l /app/data/audit.log
-```
-
-Validate app write access:
-
-```bash
-sudo k3s kubectl -n otp-relay get pods -l app=otp-relay -o name | while read p; do
-  echo "=== $p ==="
-  sudo k3s kubectl -n otp-relay exec "${p#pod/}" -- sh -c '
-    id
+sudo k3s kubectl -n otp-relay get pods -l app=otp-relay -o name | while read -r pod; do
+  echo "=== $pod ==="
+  sudo k3s kubectl -n otp-relay exec "${pod#pod/}" -- sh -c '
     touch /app/data/write-test &&
     rm -f /app/data/write-test &&
     echo WRITE_OK || echo WRITE_FAILED
@@ -208,7 +182,7 @@ Expected:
 WRITE_OK
 ```
 
-from each app pod.
+Do not delete the PVC or NFS data during normal updates.
 
 ---
 
@@ -226,32 +200,14 @@ Check Redis services:
 sudo k3s kubectl get svc -n otp-relay | grep redis
 ```
 
-Check StatefulSet:
+Check Redis StatefulSet:
 
 ```bash
 sudo k3s kubectl get statefulset otp-redis -n otp-relay
 sudo k3s kubectl get pods -n otp-relay -l app=otp-redis -o wide
 ```
 
-Check Sentinel logs:
-
-```bash
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=100
-```
-
-Check HAProxy logs:
-
-```bash
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
-```
-
-The app should continue using:
-
-```text
-redis://otp-redis-haproxy:6379/0
-```
-
-Check Sentinel-reported Redis master:
+Check Sentinel-reported master:
 
 ```bash
 SENTINEL_POD=$(sudo k3s kubectl -n otp-relay get pod \
@@ -262,13 +218,27 @@ sudo k3s kubectl -n otp-relay exec "$SENTINEL_POD" -- \
   redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
 ```
 
+Check logs when Redis readiness or OTP state looks unhealthy:
+
+```bash
+sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=100
+sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
+sudo k3s kubectl logs -n otp-relay deployment/otp-relay --tail=100
+```
+
+The app should use the Redis HAProxy service, not individual Redis pod IPs:
+
+```text
+redis://otp-redis-haproxy:6379/0
+```
+
 ---
 
 ## Redis StatefulSet update safety
 
 Kubernetes does not allow normal patch/apply updates to some StatefulSet fields after creation.
 
-If the installer or workflow fails with an error like this:
+If an update fails with an error like this:
 
 ```text
 The StatefulSet "otp-redis" is invalid: spec: Forbidden: updates to statefulset spec for fields other than ...
@@ -276,14 +246,15 @@ The StatefulSet "otp-redis" is invalid: spec: Forbidden: updates to statefulset 
 
 then the update attempted to change an immutable Redis StatefulSet field.
 
-Correct operational handling:
+Operational rules:
 
-* Do not delete Redis PVCs during a normal update.
-* Do not silently recreate Redis during a normal update.
-* Do not treat this as a normal rollout restart issue.
-* Preserve the existing Redis StatefulSet when possible.
-* If a Redis topology change is required, use an explicit destructive reset or maintenance procedure.
-* Any destructive Redis reset must be reviewed before execution.
+```text
+Do not delete Redis PVCs during a normal update.
+Do not silently recreate Redis during a normal update.
+Do not treat this as a normal rollout restart issue.
+Preserve the existing Redis StatefulSet when possible.
+Use an explicit maintenance procedure for destructive Redis topology changes.
+```
 
 Inspection commands:
 
@@ -293,66 +264,13 @@ sudo k3s kubectl -n otp-relay describe statefulset otp-redis
 sudo k3s kubectl -n otp-relay get pvc
 ```
 
-A normal application, documentation, workflow, frontend, or observability update should not remove Redis data.
-
----
-
-## Redis failover validation
-
-Redis HA/Sentinel/HAProxy failover has been validated as a Phase 3 foundation.
-
-The 2026-06-03 automated validation also included Redis master pod deletion recovery and post-recovery strict health validation.
-
-Repeat failover testing only during a controlled maintenance/test window.
-
-Before testing:
-
-```bash
-sudo k3s kubectl get pods -n otp-relay -o wide | grep redis
-curl -k https://srvotptest26.init-db.lan/readyz
-```
-
-During failover, delete or stop the current Redis master pod according to the planned test method, then watch:
-
-```bash
-sudo k3s kubectl get pods -n otp-relay -w
-sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=200
-curl -k https://srvotptest26.init-db.lan/readyz
-```
-
-Pass criteria:
-
-* Sentinel promotes or confirms a valid master.
-* HAProxy routes to the current master.
-* `/readyz` returns Redis OK after recovery.
-* The app does not need a Redis URL change.
-* No Redis PVC is deleted.
-* In-flight OTP behavior matches the expected Redis failover limitation.
-
----
-
-## TLS and ingress checks
-
-```bash
-sudo k3s kubectl get ingress -n otp-relay
-sudo k3s kubectl describe ingress -n otp-relay
-sudo k3s kubectl get secret otp-relay-tls -n otp-relay
-curl -k https://srvotptest26.init-db.lan/healthz
-curl -k https://srvotptest26.init-db.lan/readyz
-```
-
-Expected:
-
-* Ingress host is `srvotptest26.init-db.lan`.
-* TLS secret exists.
-* HTTPS endpoint works.
-* Browser warning may remain until IT distributes/trusts the certificate by Group Policy or another approved endpoint trust method.
+Normal documentation, frontend, app-image, workflow, or observability updates should not remove Redis data.
 
 ---
 
 ## Monitor checks
 
-The monitor is required and must not be exposed publicly.
+The monitor is required and must not be exposed by Service or Ingress.
 
 Check pod and logs:
 
@@ -363,17 +281,19 @@ sudo k3s kubectl logs -n otp-relay deployment/otp-monitor --tail=100
 
 Expected monitor properties:
 
-* `hostNetwork: true`
-* `dnsPolicy: ClusterFirstWithHostNet`
-* `NET_RAW` capability
-* no Service
-* no Ingress
-* can check phone presence on the configured phone network
-* can read `/app/data/audit.log`
-* can expose Prometheus metrics
-* can send Telegram alerts when configured
+```text
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+NET_RAW capability
+no Service
+no Ingress
+can check phone presence on the configured phone network
+can read /app/data/audit.log
+can expose Prometheus metrics
+can send Telegram alerts when configured
+```
 
-Confirm no monitor Service/Ingress exists:
+Confirm monitor is not exposed:
 
 ```bash
 sudo k3s kubectl get svc -n otp-relay | grep monitor || true
@@ -394,17 +314,17 @@ OK: OTP Relay K3s deployment is healthy.
 
 ---
 
-## Telegram alert validation
+## Telegram alert checks
 
 Telegram is the supported monitor alerting path.
 
-Check relevant environment/configuration through the rendered deployment or runtime environment:
+Check rendered monitor configuration without printing secret values into shared tickets:
 
 ```bash
 sudo k3s kubectl -n otp-relay describe deployment otp-monitor | grep -Ei 'TELEGRAM|PHONE'
 ```
 
-Check monitor logs for alert activity:
+Check recent monitor logs:
 
 ```bash
 sudo k3s kubectl logs -n otp-relay deployment/otp-monitor --tail=200 | grep -Ei 'telegram|phone|alert' || true
@@ -412,47 +332,58 @@ sudo k3s kubectl logs -n otp-relay deployment/otp-monitor --tail=200 | grep -Ei 
 
 Expected:
 
-* Telegram credentials are not committed to Git.
-* Telegram values come from `.env` or generated Kubernetes Secret/ConfigMap behavior.
-* Phone online/offline events can trigger Telegram alerts when configured.
-* Old WhatsApp alert references should not appear in active monitor documentation or workflow paths unless intentionally retained as historical notes.
+```text
+Telegram credentials are not committed to Git.
+Telegram values come from .env or generated Kubernetes Secret behavior.
+Phone online/offline events can trigger Telegram alerts when configured.
+Old WhatsApp alert references should not appear in active paths unless explicitly retained as history.
+```
 
 ---
 
 ## Observability smoke checks
 
-Detailed Grafana and Prometheus validation belongs in:
+Detailed Grafana, Prometheus, Loki, Alloy, dashboard, and PromQL guidance belongs in:
 
 ```text
 docs/operations/observability-and-grafana.md
 ```
 
-Use this section only for quick operational smoke checks.
-
-Normal Grafana browser access:
-
-```text
-https://grafana.init-db.lan
-```
+Use this section only for quick operational checks.
 
 Check core resources:
 
 ```bash
 sudo k3s kubectl get pods -n observability -o wide
-sudo k3s kubectl get svc -n observability
-sudo k3s kubectl get ingressroute -n observability
+sudo k3s kubectl get svc -n observability -o wide
+sudo k3s kubectl get ingress -n observability -o wide
 sudo k3s kubectl get configmap otp-relay-live-dashboard -n observability
 sudo k3s kubectl get servicemonitor -n observability
 ```
 
 Expected:
 
-* Grafana pod is Running/Ready.
-* Prometheus pod is Running/Ready.
-* Loki/Alloy components are Running/Ready when deployed.
-* Grafana IngressRoute exists when enabled.
-* `otp-relay-live-dashboard` exists.
-* ServiceMonitor resources exist for `otp-relay` and `otp-monitor`.
+```text
+Grafana pod Running/Ready
+Prometheus pod Running/Ready
+Loki/Alloy components Running/Ready when enabled
+Grafana Ingress exists when enabled
+otp-relay-live-dashboard ConfigMap exists
+ServiceMonitor resources exist for portal and monitor
+```
+
+Grafana host-header test:
+
+```bash
+curl -I -H "Host: grafana-srvotptest26.init-db.lan" http://172.31.11.121/
+```
+
+Expected:
+
+```text
+HTTP/1.1 302 Found
+Location: /login
+```
 
 Check Grafana logs only when dashboard provisioning appears broken:
 
@@ -465,78 +396,45 @@ sudo k3s kubectl logs -n observability deployment/kube-prometheus-stack-grafana 
 
 ## OTP validation checklist
 
-Real SMS/OTP validation passed on **2026-06-03** with audit evidence and human confirmation that the OTP was visible in the portal.
+Real OTP validation requires the company iPhone and the iOS Shortcut flow. This cannot be fully proven by Kubernetes health checks alone.
 
-Use this checklist for future re-validation or SCH-witnessed retesting:
+Checklist:
 
-* [ ] Login page loads through HTTPS.
-* [ ] User token login works.
-* [ ] OTP claim flow works.
-* [ ] iPhone receives OTP SMS.
-* [ ] iPhone Shortcut posts SMS to `/sms-received`.
-* [ ] OTP appears on screen for the waiting user.
-* [ ] OTP expires after TTL.
-* [ ] OTP value is not written to logs or disk.
-* [ ] Audit log records the non-sensitive flow.
-* [ ] Manager live OTP trigger test passes.
-* [ ] Pending OTP survives app restart when Redis is healthy.
-* [ ] Two-replica OTP flow works in a controlled test.
+```text
+[ ] Portal loads through the intended hostname.
+[ ] User token login works.
+[ ] OTP claim flow works.
+[ ] iPhone receives OTP SMS.
+[ ] iPhone Shortcut posts SMS to /sms-received.
+[ ] OTP appears on screen for the waiting user.
+[ ] OTP expires after TTL.
+[ ] OTP value is not written to logs or disk.
+[ ] Audit log records only non-sensitive flow events.
+[ ] Pending OTP survives app restart when Redis is healthy.
+[ ] Two-replica OTP flow works in a controlled test.
+```
 
-Do not treat future code changes to the OTP flow, Redis state handling, frontend polling, or workflow deployment behavior as automatically validated. Re-run this checklist after those changes.
+Human-assisted validation flow:
 
----
-
-## Human-assisted OTP validation flow
-
-Some OTP validation steps require a real SMS and human confirmation.
-
-Recommended operator flow:
-
-1. Open the portal through HTTPS.
+```text
+1. Open the portal.
 2. Log in as a test user.
 3. Claim the OTP slot.
 4. Trigger the external system to send an SMS to the company iPhone.
 5. Confirm the iPhone received the SMS.
-6. Confirm the iOS Shortcut posted to `/sms-received`.
+6. Confirm the iOS Shortcut posted to /sms-received.
 7. Confirm the OTP appears in the browser.
-8. Confirm the audit log contains the expected non-sensitive events.
-9. Confirm the OTP value is not present in application logs or audit logs.
-
-Acceptable human checkpoint wording in validation scripts:
-
-```text
-Do you see the SMS on the iPhone and did the OTP appear in the portal?
-1) Yes, continue
-2) No, fail this validation step
+8. Confirm the audit log contains expected non-sensitive events.
+9. Confirm the OTP value is not present in app logs or audit logs.
 ```
 
----
-
-## DNS/TLS client validation checklist
-
-* [ ] `srvotptest26.init-db.lan` resolves from user machines.
-* [ ] HTTPS loads from user machines.
-* [ ] Certificate trust warning is gone after Group Policy trust rollout or approved certificate installation.
-* [ ] Portal works from the intended client network.
-* [ ] iPhone Shortcut target URL is correct after DNS/TLS finalization.
-
-Useful commands:
-
-```bash
-nslookup srvotptest26.init-db.lan
-curl -k https://srvotptest26.init-db.lan/healthz
-curl -k https://srvotptest26.init-db.lan/readyz
-```
+Do not treat future changes to OTP parsing, Redis state handling, frontend polling, or deployment behavior as automatically validated. Re-run this checklist after those changes.
 
 ---
 
 ## Worker-drain validation checklist
 
-Worker drain and uncordon recovery passed for both `otp-worker1` and `otp-worker2` on **2026-06-03**.
-
-Use this checklist for future re-validation or SCH-witnessed retesting.
-
-Run only in a controlled maintenance window.
+Run only during a controlled maintenance/test window.
 
 Before drain:
 
@@ -547,15 +445,17 @@ curl -k https://srvotptest26.init-db.lan/readyz
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
 ```
 
-Drain one worker according to SCH-approved procedure, then verify:
+Drain one worker at a time according to the approved procedure, then verify:
 
-* [ ] App pod reschedules or remains healthy according to placement rules.
-* [ ] Redis Sentinel remains healthy.
-* [ ] Redis HAProxy remains healthy.
-* [ ] Redis master remains available or fails over correctly.
-* [ ] NFS app storage remains mounted.
-* [ ] `/readyz` returns healthy after the cluster settles.
-* [ ] OTP flow still works after recovery.
+```text
+[ ] App pod reschedules or remains healthy according to placement rules.
+[ ] Redis Sentinel remains healthy.
+[ ] Redis HAProxy remains healthy.
+[ ] Redis master remains available or fails over correctly.
+[ ] NFS app storage remains mounted.
+[ ] /readyz returns healthy after the cluster settles.
+[ ] OTP flow still works after recovery.
+```
 
 After validation:
 
@@ -567,12 +467,59 @@ sudo k3s kubectl get pods -n otp-relay -o wide
 
 Do not drain multiple Redis/Sentinel-critical nodes at the same time.
 
-During active worker-drain maintenance, one Redis pod may temporarily remain `Pending` because of one-per-node Redis placement. This is acceptable only during the maintenance window if:
+During active worker-drain maintenance, one Redis pod may temporarily remain `Pending` because of one-per-node Redis placement. That is acceptable only during the maintenance window if:
 
-* `/readyz` remains healthy,
-* Redis/Sentinel/HAProxy functional checks pass,
-* app replicas remain available,
-* and post-uncordon strict health returns to full readiness.
+```text
+/readyz remains healthy
+Redis/Sentinel/HAProxy checks pass
+app replicas remain available
+post-uncordon strict health returns to full readiness
+```
+
+---
+
+## Destructive validation rules
+
+Destructive validation includes actions such as:
+
+```text
+deleting Redis pods
+draining worker nodes
+restarting critical deployments
+forcing failover
+restarting observability components
+```
+
+Rules:
+
+```text
+Run destructive tests only in a maintenance/test window.
+Do not run destructive tests while SCH or users are actively validating OTP flow.
+Do not delete Redis PVCs unless the procedure explicitly requires a destructive reset.
+Do not drain more than one worker at a time.
+Record before/after pod placement and endpoint health.
+Confirm /readyz after every disruptive step.
+```
+
+If the repo contains an automated resilience validation script, start with its safe/default mode first. Use destructive flags only after confirming the maintenance window and expected blast radius.
+
+---
+
+## Troubleshooting quick reference
+
+| Symptom | First checks |
+|---|---|
+| Portal not loading | Traefik service, portal Ingress, app service, app pods, `/healthz`, `/readyz` |
+| Grafana not loading | Observability Ingress, Host header, DNS, Grafana pod, Grafana service |
+| Bare IP opens portal instead of Grafana | Expected when Grafana uses host-based Ingress |
+| `/readyz` fails | Redis, HAProxy, Sentinel, app logs |
+| OTP not appearing | Claim state, iPhone SMS, Shortcut URL/token, Redis, app logs |
+| User login fails | `users.xlsx`, token format, app logs, audit log |
+| Monitor missing alerts | monitor pod, phone IP/interface, Telegram config, monitor logs |
+| Redis pod Pending | node placement, anti-affinity, worker drain, PVC state |
+| Grafana dashboard missing | dashboard ConfigMap, sidecar logs, Grafana logs |
+| Loki missing workloads | Loki values and deployment mode |
+| DNS works on server but not Windows | IT DNS, client DNS cache, client network, firewall/proxy |
 
 ---
 
@@ -587,47 +534,23 @@ sudo k3s kubectl logs -n otp-relay deployment/otp-monitor --tail=200
 sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=200
 sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=200
 sudo k3s kubectl get pods -n observability -o wide
-sudo k3s kubectl rollout status deployment/otp-relay -n otp-relay
-sudo k3s kubectl rollout restart deployment/otp-relay -n otp-relay
+sudo k3s kubectl get ingress -A -o wide
+sudo k3s kubectl get svc -A -o wide
 sudo k3s kubectl get events -n otp-relay --sort-by=.lastTimestamp
 ```
 
 ---
 
-## Troubleshooting quick reference
+## Recovery discipline
 
-| Symptom                       | First checks                                                 |
-| ----------------------------- | ------------------------------------------------------------ |
-| Portal not loading            | ingress, service, app pod, `/healthz`, `/readyz`             |
-| `/readyz` fails               | Redis, HAProxy, Sentinel, app logs                           |
-| OTP not appearing             | claim state, iPhone SMS, Shortcut URL/token, app logs, Redis |
-| Monitor unhealthy             | phone IP/interface, hostNetwork, NET_RAW, audit log mount    |
-| Telegram alert not sent       | `.env`, Secret/ConfigMap rendering, monitor logs             |
-| Grafana URL not loading       | IngressRoute, DNS, Grafana service, Grafana pod              |
-| Dashboard missing             | ConfigMap, sidecar logs, Grafana restart                     |
-| Dashboard stale/no data       | ServiceMonitor, Prometheus query, panel query mode           |
-| Last ARP stale                | monitor ARP metric, phone IP/interface, monitor logs         |
-| Redis StatefulSet apply fails | immutable field change; avoid destructive normal update      |
-| NFS write fails               | NFS ownership/permissions, PVC mount, app UID/GID            |
+Before changing runtime resources, capture evidence:
 
----
+```bash
+sudo k3s kubectl get nodes -o wide
+sudo k3s kubectl get pods -A -o wide
+sudo k3s kubectl get ingress -A -o wide
+sudo k3s kubectl get svc -A -o wide
+sudo k3s kubectl get events -A --sort-by=.lastTimestamp | tail -80
+```
 
-## Final sign-off gates
-
-Before declaring the deployment production-aligned for SCH:
-
-* [x] Root README and docs are current.
-* [x] `.env` is the single operator input source.
-* [x] Repository sync uses `scripts/sync-repo.sh` / the systemd timer, and deployment remains an explicit installer/Ansible action.
-* [x] Observability applies cleanly from source/generated files.
-* [x] Grafana is reachable through `https://grafana.init-db.lan`.
-* [x] Portal is reachable through the intended TLS host.
-* [x] Redis update behavior is safe for existing StatefulSet/PVC resources.
-* [x] Telegram is the documented alerting path.
-* [x] OTP business-flow validation passed on 2026-06-03.
-* [x] Two-replica OTP flow validation passed on 2026-06-03.
-* [x] Worker-drain validation passed for `otp-worker1` and `otp-worker2` on 2026-06-03.
-* [ ] IT certificate trust rollout is completed or explicitly tracked as pending.
-* [ ] Redis backup/restore procedure is documented.
-* [ ] SCH accepts Redis Sentinel/HAProxy or selects managed Redis.
-* [ ] Final production LB/VIP model is confirmed with SCH if required.
+Prefer source-of-truth repo fixes over live-only patches. Live patches are acceptable for emergency recovery, but the repo must be updated afterward if the change should survive reinstall or redeploy.
