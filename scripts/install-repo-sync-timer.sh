@@ -1,61 +1,159 @@
 #!/usr/bin/env bash
+# Layer: repo-sync systemd timer installation.
+#
+# This script installs or updates a local systemd service and timer that run
+# scripts/sync-repo.sh on a schedule.
+#
+# Responsibilities:
+# - Install a systemd oneshot service for repository sync.
+# - Install a systemd timer for scheduled repository sync.
+# - Keep repo sync separate from deployment and runtime mutation.
+# - Preserve the current checkout path as the service working directory.
+#
+# Non-responsibilities:
+# - It does not deploy OTP Relay.
+# - It does not run setup.sh.
+# - It does not run install-otp-relay-k8s.sh.
+# - It does not run Ansible, Helm, kubectl apply, or K3s installation.
+# - It does not install GitHub runners.
+
 set -Eeuo pipefail
 
-# Install a systemd timer that runs scripts/sync-repo.sh periodically.
-# This replaces the GitHub Actions self-hosted runner sync model.
-# It only syncs the local repository by default; it does not deploy.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SYNC_SCRIPT="${REPO_DIR}/scripts/sync-repo.sh"
 
-REPO_DIR="${REPO_DIR:-/opt/k8s-ansible}"
-BRANCH="${BRANCH:-main}"
-REPO_URL="${REPO_URL:-https://github.com/psi1703/k8s-ansible.git}"
-SYNC_INTERVAL="${SYNC_INTERVAL:-1min}"
-SERVICE_NAME="${SERVICE_NAME:-k8s-ansible-repo-sync}"
-RUN_AFTER_SYNC="${RUN_AFTER_SYNC:-0}"
-AFTER_SYNC_CMD="${AFTER_SYNC_CMD:-}"
+SERVICE_NAME="otp-relay-repo-sync.service"
+TIMER_NAME="otp-relay-repo-sync.timer"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
+TIMER_PATH="/etc/systemd/system/${TIMER_NAME}"
 
-log() { printf '[repo-sync-timer] %s\n' "$*"; }
-fatal() { printf '[repo-sync-timer] ERROR: %s\n' "$*" >&2; exit 1; }
+SYNC_USER="${SYNC_USER:-$(id -un)}"
+SYNC_GROUP="${SYNC_GROUP:-$(id -gn)}"
+ON_BOOT_SEC="${ON_BOOT_SEC:-5min}"
+ON_UNIT_ACTIVE_SEC="${ON_UNIT_ACTIVE_SEC:-15min}"
+RANDOMIZED_DELAY_SEC="${RANDOMIZED_DELAY_SEC:-30s}"
 
-[[ -f "$REPO_DIR/scripts/sync-repo.sh" ]] || fatal "Missing $REPO_DIR/scripts/sync-repo.sh"
+log() {
+  printf '[repo-sync-timer] %s %s\n' "$(date -Is)" "$*"
+}
 
-sudo install -m 0755 "$REPO_DIR/scripts/sync-repo.sh" /usr/local/sbin/k8s-ansible-repo-sync
+fail() {
+  printf '[repo-sync-timer] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
-sudo tee "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null <<SERVICEEOF
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+require_root_or_sudo() {
+  if [ "$(id -u)" -eq 0 ]; then
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1 || fail "sudo is required when not running as root"
+}
+
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+validate_inputs() {
+  [ -d "$REPO_DIR/.git" ] || fail "repository root not found at $REPO_DIR"
+  [ -f "$SYNC_SCRIPT" ] || fail "sync script not found: $SYNC_SCRIPT"
+  [ -x "$SYNC_SCRIPT" ] || chmod 755 "$SYNC_SCRIPT"
+  id "$SYNC_USER" >/dev/null 2>&1 || fail "sync user does not exist: $SYNC_USER"
+  getent group "$SYNC_GROUP" >/dev/null 2>&1 || fail "sync group does not exist: $SYNC_GROUP"
+}
+
+write_service() {
+  local tmp
+  tmp="$(mktemp)"
+
+  cat >"$tmp" <<EOF_SERVICE
 [Unit]
-Description=Sync k8s-ansible local checkout from GitHub
+Description=OTP Relay repository sync
+Documentation=file://${REPO_DIR}/systemd/README-repo-sync-timer
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
+User=${SYNC_USER}
+Group=${SYNC_GROUP}
 WorkingDirectory=${REPO_DIR}
-Environment=REPO_URL=${REPO_URL}
-Environment=REPO_DIR=${REPO_DIR}
-Environment=BRANCH=${BRANCH}
-Environment=RUN_AFTER_SYNC=${RUN_AFTER_SYNC}
-Environment=AFTER_SYNC_CMD=${AFTER_SYNC_CMD}
-ExecStart=/usr/local/sbin/k8s-ansible-repo-sync
-SERVICEEOF
+ExecStart=${SYNC_SCRIPT}
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 
-sudo tee "/etc/systemd/system/${SERVICE_NAME}.timer" >/dev/null <<TIMEREOF
+# Safety boundary: repository sync only. The sync script must not deploy,
+# restart workloads, install K3s, run Helm, run Ansible, or apply manifests.
+NoNewPrivileges=true
+EOF_SERVICE
+
+  as_root install -m 0644 "$tmp" "$SERVICE_PATH"
+  rm -f "$tmp"
+}
+
+write_timer() {
+  local tmp
+  tmp="$(mktemp)"
+
+  cat >"$tmp" <<EOF_TIMER
 [Unit]
-Description=Run k8s-ansible repo sync periodically
+Description=Run OTP Relay repository sync periodically
+Documentation=file://${REPO_DIR}/systemd/README-repo-sync-timer
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=${SYNC_INTERVAL}
-AccuracySec=10s
+OnBootSec=${ON_BOOT_SEC}
+OnUnitActiveSec=${ON_UNIT_ACTIVE_SEC}
+RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}
 Persistent=true
-Unit=${SERVICE_NAME}.service
+Unit=${SERVICE_NAME}
 
 [Install]
 WantedBy=timers.target
-TIMEREOF
+EOF_TIMER
 
-sudo systemctl daemon-reload
-sudo systemctl enable --now "${SERVICE_NAME}.timer"
+  as_root install -m 0644 "$tmp" "$TIMER_PATH"
+  rm -f "$tmp"
+}
 
-log "Installed and started ${SERVICE_NAME}.timer"
-log "Timer status: systemctl status ${SERVICE_NAME}.timer --no-pager"
-log "Manual sync:   sudo systemctl start ${SERVICE_NAME}.service"
-log "Sync logs:     sudo tail -f /var/log/k8s-ansible/repo-sync.log"
+install_timer() {
+  log "Installing systemd service: $SERVICE_PATH"
+  write_service
+
+  log "Installing systemd timer: $TIMER_PATH"
+  write_timer
+
+  log "Reloading systemd"
+  as_root systemctl daemon-reload
+
+  log "Enabling and starting timer: $TIMER_NAME"
+  as_root systemctl enable --now "$TIMER_NAME"
+
+  log "Timer status"
+  as_root systemctl --no-pager --full status "$TIMER_NAME" || true
+
+  log "Installed repo-sync timer for $REPO_DIR"
+  log "Schedule: OnBootSec=${ON_BOOT_SEC}, OnUnitActiveSec=${ON_UNIT_ACTIVE_SEC}, RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}"
+}
+
+main() {
+  need_cmd date
+  need_cmd getent
+  need_cmd id
+  need_cmd install
+  need_cmd mktemp
+  need_cmd systemctl
+  require_root_or_sudo
+  validate_inputs
+  install_timer
+}
+
+main "$@"
