@@ -45,13 +45,13 @@ https://srvotptest26.init-db.lan
 Grafana is also controlled by `.env`:
 
 ```bash
-GRAFANA_HOST="grafana-test.lan"
+GRAFANA_HOST="grafana-srvotptest.init-db.lan"
 ```
 
 Expected Grafana URL:
 
 ```text
-https://grafana-test.lan
+https://grafana-srvotptest.init-db.lan
 ```
 
 Grafana should normally be accessed through Traefik/IngressRoute. Port-forwarding is only for temporary debugging.
