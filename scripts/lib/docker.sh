@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Layer: Docker CLI and daemon readiness for local image builds.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Locate a usable Docker CLI.
+# - Install docker.io with apt-get when Docker is missing.
+# - Enable and start the Docker service when local image builds require it.
+# - Validate Docker daemon connectivity before image build/import begins.
+#
+# Non-responsibilities:
+# - It does not build OTP Relay images.
+# - It does not import images into K3s.
+# - It does not distribute images to worker nodes.
+# - It does not install K3s, Helm, MetalLB, or observability components.
+# - It does not sync the repository.
+# - It does not install GitHub runners.
 
 resolve_docker_bin() {
   if [ -n "${DOCKER_BIN:-}" ] && [ -x "$DOCKER_BIN" ]; then
