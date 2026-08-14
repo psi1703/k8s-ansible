@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Thin launcher for the modular OTP Relay Kubernetes installer.
-# All site-specific input is loaded from .env through scripts/lib/env.sh.
+# OTP Relay Kubernetes installer launcher.
+#
+# Layer: operator-controlled deployment entrypoint
+# Purpose: load the modular installer libraries and run the deployment phases
+#          explicitly on the server/control-plane host.
 #
 # Current architecture:
 #   - This script runs on the server/control-plane.
-#   - Worker VMs are joined separately by Ansible.
+#   - Worker VMs are provisioned and joined separately by Ansible.
 #   - NFS is external and is consumed through Kubernetes PV/PVC.
+#   - Redis provides shared OTP/admin state for multi-replica app operation.
+#   - Traefik and MetalLB provide the portal/Grafana entrypoint.
 #   - frontend/app.jsx is source.
 #   - frontend/app.js is generated during deployment and must exist before image build.
+#
+# Strict behavior notes:
+#   - GitHub Actions runner setup is not part of this installer.
+#   - Repository sync is handled separately by scripts/sync-repo.sh.
+#   - This launcher should stay thin; implementation belongs in scripts/lib/*.sh.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER_CURRENT_PHASE="startup"
@@ -38,11 +48,12 @@ _bootstrap_warn() { printf '[otp-relay-k8s] WARNING: %s\n' "$*" >&2; }
 _bootstrap_fatal() { printf '[otp-relay-k8s] ERROR: %s\n' "$*" >&2; exit 1; }
 
 validate_launcher_layout() {
+  local installer_lib installer_lib_path
+
   [ -d "$SCRIPT_DIR/scripts/lib" ] || _bootstrap_fatal "missing installer library directory: $SCRIPT_DIR/scripts/lib"
 
   for installer_lib in "${INSTALLER_LIBS[@]}"; do
     installer_lib_path="$SCRIPT_DIR/scripts/lib/$installer_lib"
-
     [ -f "$installer_lib_path" ] || _bootstrap_fatal "missing installer library: $installer_lib_path"
     bash -n "$installer_lib_path" >/dev/null 2>&1 || _bootstrap_fatal "installer library has shell syntax errors: $installer_lib_path"
   done
@@ -67,6 +78,8 @@ require_installer_functions() {
     fatal
     load_or_create_env
     normalize_loaded_env
+    validate_deploy_mode
+    explain_deploy_mode
     detect_host_environment
     run_preflight_and_prepare_cluster
     install_kubernetes_tooling_and_k3s
@@ -155,10 +168,8 @@ main() {
   run_phase "load or create installer environment" load_or_create_env
   run_phase "validate deployment mode" validate_deploy_mode
   explain_deploy_mode
-
   run_phase "detect host environment" detect_host_environment
   run_phase "run preflight checks and prepare cluster host" run_preflight_and_prepare_cluster
-
 
   if [ "$DEPLOY_MODE" = "none" ]; then
     log "DEPLOY_MODE=none; no deployment changes required. Exiting before Docker/K3s work."
