@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Layer: MetalLB and Traefik LoadBalancer address management.
+#
+# This file is sourced by install-otp-relay-k8s.sh. Do not execute it directly.
+#
+# Responsibilities:
+# - Install and configure MetalLB when INSTALL_METALLB=1.
+# - Validate a requested LOADBALANCER_IP before assigning it.
+# - Auto-select a free LAN IP from METALLB_IP_RANGE when LOADBALANCER_IP is empty.
+# - Reject IPs that are reserved, already assigned locally, already referenced by Kubernetes, or visible through ARP/neighbor checks.
+# - Configure the MetalLB IPAddressPool and L2Advertisement.
+# - Patch the Traefik LoadBalancer service to the selected IP.
+#
+# Non-responsibilities:
+# - It does not create DNS records.
+# - It does not expose Grafana directly unless another script creates a Grafana LoadBalancer service.
+# - It does not render application manifests.
+# - It does not install K3s or Helm.
+# - It does not sync the repository.
 
 _ipv4_to_int() {
   local ip="$1"
