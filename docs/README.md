@@ -150,14 +150,3 @@ Do not document `grafana-test.lan` as the active Grafana host. It is a placehold
 
 ---
 
-## Next cleanup targets
-
-After this index is updated, the next documentation cleanup should proceed in this order:
-
-1. `docs/architecture/current-architecture-and-sch-gap-analysis.md`
-2. `docs/deployment/deployment-and-storage-guide.md`
-3. `docs/operations/observability-and-grafana.md`
-4. `docs/operations/operations-and-validation-runbook.md`
-5. `docs/development/build-and-development-guide.md`
-
-This order keeps the project concept clear before changing detailed procedures.
