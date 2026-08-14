@@ -27,8 +27,8 @@ working portal
   -> K3s deployment
   -> one app replica first
   -> PVC-backed runtime files
-  -> Redis added only after the in-memory scaling problem is proven
-  -> observability and resilience added in later controlled phases
+  -> Redis added after the in-memory scaling limitation is proven
+  -> observability and resilience added in controlled phases
 ```
 
 This repo keeps that same application model, but it already includes the production-resilience extensions that SCH treats as later-phase work:
@@ -55,7 +55,7 @@ SCH Kubernetes baseline plus production-resilience automation.
 
 ## Layer 1: Application model
 
-The OTP Relay application layer contains the user-facing portal and the OTP business flow.
+The OTP Relay application layer contains the user-facing portal, the OTP business flow, and the internal phone monitor.
 
 ```text
 Browser user
@@ -74,7 +74,7 @@ Application components:
 
 | Component | Role |
 |---|---|
-| FastAPI backend | Serves portal API, static frontend, health endpoints, metrics, OTP flow |
+| FastAPI backend | Serves portal API, static frontend, health endpoints, metrics, and OTP flow |
 | React frontend source | `frontend/app.jsx` |
 | Generated frontend bundle | `frontend/app.js` |
 | Portal help source | `docs/help/` |
@@ -91,7 +91,7 @@ wizard_progress.json
 audit.log
 ```
 
-OTP values must not be written to disk, committed files, documentation examples, or long-lived logs.
+OTP values must not be written to disk, committed files, documentation examples, generated manifests, or long-lived logs.
 
 ---
 
@@ -103,7 +103,7 @@ Current runtime shape:
 
 ```text
 Clients / browser / iPhone Shortcut
-  -> internal DNS or load-balancer IP
+  -> internal DNS
   -> MetalLB-assigned Traefik LoadBalancer IP
   -> Traefik Ingress
   -> otp-relay Kubernetes Service
@@ -113,15 +113,17 @@ Clients / browser / iPhone Shortcut
   -> NFS-backed /app/data
 ```
 
-Current expected access model:
+Current expected test-cluster access model:
 
 ```text
 Portal host:   srvotptest26.init-db.lan
 Grafana host:  grafana-srvotptest26.init-db.lan
-Traefik IP:    selected free MetalLB IP, currently 172.31.11.121 in the test cluster
+Traefik IP:    172.31.11.121
 ```
 
-Bare-IP access to the Traefik IP may route to the default portal ingress. Grafana normally requires either its hostname or an intentionally configured separate access mode.
+Both portal and Grafana should use internal DNS records that point to the same Traefik/MetalLB IP. Traefik routes each request by hostname.
+
+Bare-IP access to the Traefik IP may route to the default portal ingress. That is expected and should not be used to validate Grafana access.
 
 ---
 
@@ -154,9 +156,9 @@ The monitor should run only on a node that has visibility to the phone network.
 
 ## Layer 4: Shared state and resilience
 
-SCH's initial branch deliberately avoids Redis until the one-replica/in-memory limitation is proven.
+SCH's initial Kubernetes baseline deliberately starts with one app replica until shared state is introduced.
 
-This repo has already crossed that boundary. Redis is not optional in the validated multi-replica design.
+This repo has already crossed that boundary. Redis is required for the current multi-replica design.
 
 Redis-backed state includes:
 
@@ -192,7 +194,7 @@ With Redis:
   multiple app replicas can serve the same business flow
 ```
 
-Redis StatefulSet and PVC resources must not be silently deleted or recreated during normal updates. Any Redis topology change is a maintenance operation.
+Redis StatefulSet and PVC resources must not be silently deleted or recreated during normal updates. Any Redis topology or storage change is a maintenance operation.
 
 ---
 
@@ -207,9 +209,11 @@ Application runtime files use NFS/RWX storage.
   -> external NFS server
 ```
 
-This improves on the simple local-path `ReadWriteOnce` model because the app and monitor do not need to be pinned to one same worker node just to share files.
+This improves on a simple local-path `ReadWriteOnce` model because the app and monitor do not need to be pinned to the same node just to share files.
 
-Redis storage is separate from app runtime storage. Redis backup/restore expectations still require explicit production sign-off.
+Redis storage is separate from app runtime storage. Redis backup and restore expectations require explicit production sign-off before being treated as final.
+
+The architecture document should not hardcode a specific NFS server IP. Runtime truth comes from `.env`, rendered manifests, and the live Kubernetes PV/PVC objects.
 
 ---
 
@@ -227,7 +231,7 @@ LAN client
   -> Pod
 ```
 
-Preferred production-style model:
+Preferred test/prod-style model:
 
 | Function | Recommended access |
 |---|---|
@@ -237,7 +241,14 @@ Preferred production-style model:
 | Redis | Internal cluster access only |
 | Prometheus/Loki | Internal or controlled admin access only |
 
-A separate Grafana LoadBalancer IP can be used as a practical dev/test workaround when DNS is not ready, but that should be documented as an optional access mode, not the main production design.
+Required DNS records for the current test cluster:
+
+```text
+srvotptest26.init-db.lan           A   172.31.11.121
+grafana-srvotptest26.init-db.lan   A   172.31.11.121
+```
+
+Grafana direct-IP access is not the primary design. The clean model is internal DNS plus Traefik hostname routing.
 
 ---
 
@@ -262,6 +273,17 @@ Pod and application logs
   -> Alloy
   -> Loki
   -> Grafana log views
+```
+
+Grafana access path:
+
+```text
+Browser
+  -> http://grafana-srvotptest26.init-db.lan
+  -> DNS resolves to 172.31.11.121
+  -> Traefik standard Kubernetes Ingress
+  -> kube-prometheus-stack-grafana service
+  -> Grafana pod
 ```
 
 Grafana dashboard source model:
@@ -310,7 +332,7 @@ This is a deliberate safety difference from a push-to-deploy workflow.
 
 ## Current live-cluster reference
 
-The latest validated fresh install reported this shape:
+The latest validated fresh-install reference shape is:
 
 ```text
 Control plane: debian       172.31.11.111
@@ -333,7 +355,7 @@ Grafana:               running in observability namespace
 Traefik:               LoadBalancer through MetalLB
 ```
 
-This section is a reference snapshot, not a hardcoded requirement. Runtime truth should always be verified with `kubectl` and `.env`.
+This section is a reference snapshot, not a hardcoded requirement. Runtime truth should always be verified with `kubectl`, `.env`, and rendered manifests.
 
 ---
 
@@ -352,7 +374,7 @@ This section is a reference snapshot, not a hardcoded requirement. Runtime truth
 | Observability | Prometheus/Grafana/Loki/Alloy direction | Integrated observability automation | Extended |
 | Ingress | Kubernetes ingress through internal access path | Traefik + MetalLB ingress | Aligned with extension |
 | Workflow | GitHub Actions deploy model | Repo-sync first, explicit deploy second | Intentional divergence |
-| Documentation | Phased and simple | Being reorganized into layered docs | Needs cleanup |
+| Documentation | Phased and simple | Reorganized into layered docs | Aligned in style |
 
 ---
 
@@ -360,12 +382,12 @@ This section is a reference snapshot, not a hardcoded requirement. Runtime truth
 
 These are the current architecture/documentation gaps to track:
 
-1. Remove stale `grafana-test.lan` references from active docs and examples.
-2. Keep `grafana-srvotptest26.init-db.lan` as the current test-cluster Grafana host unless `.env` says otherwise.
-3. Clearly document whether Grafana uses shared Traefik hostname access or optional dedicated LoadBalancer IP access.
-4. Move destructive resilience-validation detail out of the root README and into operations docs.
+1. Keep `grafana-srvotptest26.init-db.lan` as the current test-cluster Grafana host unless `.env` says otherwise.
+2. Get internal DNS records created for both portal and Grafana test hostnames.
+3. Keep Grafana documented as standard Kubernetes Ingress through Traefik.
+4. Keep destructive resilience-validation detail in operations docs, not the root README.
 5. Keep Redis backup/restore expectations explicit and pending until production sign-off.
-6. Keep TLS trust status explicit: self-signed/internal trust/approved certificate.
+6. Keep TLS trust status explicit: self-signed, internal trust, or approved certificate.
 7. Avoid describing repo-sync as deployment; repo-sync only updates the local checkout.
 8. Keep generated files documented as generated, not hand-edited source files.
 
@@ -378,7 +400,7 @@ These are the current architecture/documentation gaps to track:
 | `.env` is the operator-owned runtime source of truth | Implemented |
 | Portal uses Kubernetes Service and Traefik Ingress | Implemented |
 | Portal hostname is documented | Implemented |
-| Grafana hostname is documented consistently | Needs cleanup across docs/examples |
+| Grafana hostname is documented consistently | Implemented |
 | App supports multiple replicas through Redis shared state | Implemented |
 | Redis Sentinel/HAProxy topology exists | Implemented |
 | Redis destructive changes are blocked from normal updates | Required rule |
@@ -386,7 +408,8 @@ These are the current architecture/documentation gaps to track:
 | Monitor remains internal only | Implemented |
 | Observability stack is source-driven | Implemented |
 | Repo-sync is separated from deployment | Implemented |
-| Redis backup/restore is documented | Pending |
+| Internal DNS for Grafana test hostname | Pending IT DNS |
+| Redis backup/restore is documented | Pending production sign-off |
 | Production TLS trust is finalized | Pending |
 | Final production LB/VIP/DNS model is approved | Pending |
 
