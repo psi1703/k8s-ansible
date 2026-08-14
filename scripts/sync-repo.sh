@@ -44,6 +44,7 @@ PRESERVE_PATHS=(
   ".sync-state"
   ".venv"
   "venv"
+  "node_modules"
   "frontend/help"
   "frontend/app.js"
   "install-report.txt"
@@ -105,13 +106,18 @@ ensure_repo() {
 }
 
 restore_executable_bits() {
-  log "Restoring executable bits for shell scripts"
+  log "Restoring executable bits for repository shell scripts"
 
-  find . -type f -name "*.sh" \
-    -not -path "./.git/*" \
-    -not -path "./.venv/*" \
-    -not -path "./venv/*" \
-    -exec chmod 755 {} \;
+  find . \
+    \( \
+      -path "./.git" -o \
+      -path "./.sync-state" -o \
+      -path "./.venv" -o \
+      -path "./venv" -o \
+      -path "./node_modules" -o \
+      -path "./frontend/help" \
+    \) -prune -o \
+    -type f -name "*.sh" -exec chmod 755 {} \;
 
   [ -f install-otp-relay-k8s.sh ] && chmod 755 install-otp-relay-k8s.sh
   [ -f setup.sh ] && chmod 755 setup.sh
