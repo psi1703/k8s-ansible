@@ -1,30 +1,39 @@
-# Helm values for Loki
+# Helm values for Grafana Loki
 #
-# Chart version policy:
-# - The current validated chart is grafana-community/loki chart 7.3.0.
-# - Chart 7.3.0 does not create workloads when this file uses
-#   deploymentMode: Monolithic. Use deploymentMode: SingleBinary for this
-#   small K3s cluster.
+# Layer: observability log storage
 #
 # Purpose:
-# - Store logs shipped by Grafana Alloy.
-# - Run in single-binary mode for this small K3s cluster.
+# - Receive logs from Grafana Alloy.
+# - Store Kubernetes, OTP Relay app, and OTP monitor logs.
+# - Keep a small, local-retention log store for operational troubleshooting.
+#
+# Validated chart policy:
+# - Current validated chart: grafana-community/loki chart 7.3.0.
+# - Do not use deploymentMode: Monolithic with this chart in this repo.
+#   In the fresh-install test, Monolithic rendered no Loki workload objects.
+# - Use deploymentMode: SingleBinary for this small K3s cluster.
+#
+# Placement policy:
+# - Loki is intentionally single-replica.
+# - It is pinned to the observability data worker through:
+#     observability/role: data
+# - The PVC uses local-path and ReadWriteOnce because Loki is not part of the
+#   OTP delivery critical path.
+#
+# Retention policy:
 # - Keep logs for 7 days.
-# - Use local-path PVC on the observability data worker.
+# - This is enough for recent troubleshooting without overloading a small cluster.
 #
-# Target cluster:
-# - observability/role=data should be assigned to the observability data worker.
-#
-# Design reference:
-# - SCH k8s observability design
-# - SCH current k8s/observability/loki-values.yaml
+# SCH alignment:
+# - Matches the SCH observability direction: Prometheus + Grafana + Loki + Alloy.
+# - Keeps Loki simple and local for this cluster size.
+# - Does not expose Loki directly outside the cluster.
 
 deploymentMode: SingleBinary
 
 singleBinary:
   replicas: 1
 
-  # Pin to data worker, alongside Prometheus.
   nodeSelector:
     observability/role: data
 
@@ -36,7 +45,6 @@ singleBinary:
       memory: 512Mi
       cpu: 300m
 
-  # Persistence for chunks and index.
   persistence:
     enabled: true
     storageClass: local-path
@@ -44,7 +52,8 @@ singleBinary:
       - ReadWriteOnce
     size: 5Gi
 
-# Disable microservices-mode components.
+# Disable distributed/microservices-mode components. This repo runs Loki as a
+# small-cluster single-binary deployment.
 backend:
   replicas: 0
 
@@ -81,7 +90,7 @@ bloomCompactor:
 bloomGateway:
   replicas: 0
 
-# Disable cache subcharts for this small cluster.
+# Cache subcharts are unnecessary for this small cluster.
 chunksCache:
   enabled: false
 
@@ -92,11 +101,12 @@ resultsCache:
 test:
   enabled: false
 
-# SCH model: disable the nginx gateway. Grafana talks to Loki directly.
+# Grafana talks to Loki directly through the Loki service. Traefik does not
+# expose Loki externally.
 gateway:
   enabled: false
 
-# Disable synthetic Loki traffic generator.
+# Disable synthetic Loki traffic generation.
 lokiCanary:
   enabled: false
 
@@ -133,7 +143,7 @@ loki:
     delete_request_store: filesystem
     working_directory: /var/loki/compactor
 
-  # We use Prometheus for alerts, not Loki ruler.
+  # Prometheus owns alerting. Loki ruler API is not required for this repo.
   rulerConfig:
     enable_api: false
 
