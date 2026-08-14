@@ -108,24 +108,34 @@ ensure_repo() {
 
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fatal "Not inside a git work tree: $REPO_DIR"
   git remote get-url "$REMOTE_NAME" >/dev/null 2>&1 || fatal "Missing git remote: $REMOTE_NAME"
+
+  # The repository is edited mainly through the GitHub web UI, which does not
+  # preserve executable-bit intent reliably. Keep local chmod repair from
+  # polluting git status with mode-only changes. Content changes still show.
+  git config core.fileMode false
 }
 
 restore_executable_bits() {
-  log "Restoring executable bits for repository shell scripts"
+  local path
 
-  find . \
-    \( \
-      -path "./.git" -o \
-      -path "./.sync-state" -o \
-      -path "./.venv" -o \
-      -path "./venv" -o \
-      -path "./node_modules" -o \
-      -path "./frontend/help" \
-    \) -prune -o \
-    -type f -name "*.sh" -exec chmod 755 {} \;
+  log "Restoring executable bits for operator entrypoint scripts only"
 
-  [ -f install-otp-relay-k8s.sh ] && chmod 755 install-otp-relay-k8s.sh
-  [ -f setup.sh ] && chmod 755 setup.sh
+  # Only direct entrypoints are made executable. Sourced library files under
+  # scripts/lib/ are intentionally not chmodded; they are loaded with source.
+  for path in \
+    "setup.sh" \
+    "install-otp-relay-k8s.sh" \
+    "scripts/sync-repo.sh" \
+    "scripts/install-repo-sync-timer.sh" \
+    "scripts/cluster-health-check.sh" \
+    "automation/libvirt/provision-vms.sh" \
+    "automation/validation/resilience-validation.sh" \
+    "automation/ansible/run-cluster.sh"
+  do
+    if [ -f "$path" ]; then
+      chmod 755 "$path" 2>/dev/null || warn "Could not set executable bit on $path"
+    fi
+  done
 }
 
 git_clean_excludes() {
