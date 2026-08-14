@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
-# Shared functions for install-otp-relay-k8s.sh. Source this file; do not execute it directly.
+# Layer: shared installer utility functions.
+#
+# This file is sourced by install-otp-relay-k8s.sh and other installer library files.
+# Do not execute it directly.
+#
+# Responsibilities:
+# - Provide shared logging and error helpers.
+# - Provide common command/path validation helpers.
+# - Keep reusable installer utilities in one place.
+# - Avoid duplicating shell helper logic across installer library files.
+#
+# Non-responsibilities:
+# - It does not create or validate .env.
+# - It does not install K3s, Docker, Helm, MetalLB, or observability components.
+# - It does not build container images.
+# - It does not render or apply Kubernetes manifests.
+# - It does not sync the repository.
+# - It does not install GitHub runners.
 
 log() { printf '[otp-relay-k8s] %s\n' "$*"; }
 
