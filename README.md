@@ -127,14 +127,25 @@ Expected Grafana URL:
 http://grafana-srvotptest26.init-db.lan
 ```
 
-Normal model:
+Normal production model:
 
 ```text
 portal hostname  -> Traefik/MetalLB IP -> OTP Relay ingress
 grafana hostname -> Traefik/MetalLB IP -> Grafana ingress
 ```
 
-Bare IP access may hit the default portal ingress instead of Grafana. Grafana should normally be accessed by its hostname unless a dedicated optional Grafana LoadBalancer mode is deliberately enabled.
+Production DNS for both OTP Relay and Grafana is provided externally and should remain the production access path.
+
+Current DEV exception:
+
+```text
+OTP Relay -> normal hostname/Traefik path
+Grafana   -> http://172.31.11.122 through a DEV-only grafana-direct LoadBalancer Service
+```
+
+The direct Grafana IP exists only because the DEV Windows client cannot use the test Grafana DNS name or a temporary hosts-file entry. It is a local testing workaround, not production architecture. Do not copy `172.31.11.122` or the DEV-only `grafana-direct` Service into production configuration.
+
+Bare Traefik IP access may hit the default portal ingress instead of Grafana because Grafana production routing is hostname-based. See `docs/deployment/deployment-and-storage-guide.md` for the detailed DEV-versus-PROD access model.
 
 ---
 
@@ -381,6 +392,7 @@ bash scripts/cluster-health-check.sh
 - `frontend/app.jsx` is the frontend source; `frontend/app.js` is generated.
 - Grafana dashboard source is JSON; the ConfigMap YAML is generated.
 - Grafana admin credentials should be managed through `.env` and Kubernetes Secret, not committed files.
+- The DEV-only `grafana-direct` LoadBalancer and `172.31.11.122` address must not be treated as production configuration; production Grafana access uses the IT-provided DNS name through Traefik Ingress.
 - Self-signed TLS secrets are not rotated on normal installer reruns.
 - Set `TLS_ROTATE_SELF_SIGNED=1` only when certificate replacement is intentional.
 
