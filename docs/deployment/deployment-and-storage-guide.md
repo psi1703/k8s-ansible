@@ -181,6 +181,7 @@ REDIS_ENABLED=1
 REDIS_REQUIRED=1
 REDIS_URL=redis://otp-redis-haproxy:6379/0
 NFS_ENABLED=1
+NFS_SERVER=172.31.11.131
 NFS_STORAGE_CLASS=otp-relay-nfs
 PVC_STORAGE_CLASS=otp-relay-nfs
 GRAFANA_HOST=grafana-srvotptest26.init-db.lan
@@ -329,6 +330,48 @@ audit.log
 The monitor also reads the shared audit log from this storage path.
 
 OTP values must not be written to NFS-backed files.
+
+### Stable NFS endpoint and live PV consistency
+
+The NFS endpoint used by Kubernetes must be stable. In the current environment the NFS VM uses:
+
+```text
+NFS_SERVER=172.31.11.131
+```
+
+Do not use a changing DHCP address for NFS-backed PVs.
+
+Changing `NFS_SERVER` in `.env` does **not** rewrite an already-created or already-bound Kubernetes PV. Existing PVs retain the `spec.nfs.server` value with which they were created until the PV objects are deliberately changed or recreated through an approved maintenance procedure.
+
+Before changing the NFS endpoint, and whenever Redis or app pods become `Running` but not `Ready` after an NFS VM restart, compare the configured value with the live PVs:
+
+```bash
+cd /opt/k8s-ansible
+
+grep '^NFS_SERVER=' .env
+
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
+```
+
+For the current deployment, the OTP Relay shared-data PV and all three Redis NFS PVs should use the same stable NFS server:
+
+```text
+otp-relay-data-nfs-pv
+otp-redis-0-nfs-pv
+otp-redis-1-nfs-pv
+otp-redis-2-nfs-pv
+```
+
+A mismatch between `.env` and any live `spec.nfs.server` value is configuration drift and must be resolved deliberately. Do not assume that editing `.env` alone updates existing storage objects.
+
+The repository health check performs this consistency check:
+
+```bash
+cd /opt/k8s-ansible
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+bash scripts/cluster-health-check.sh
+```
 
 Validate PVC and mount state:
 
@@ -568,6 +611,8 @@ sudo k3s kubectl -n otp-relay get pods -o wide
 sudo k3s kubectl -n otp-relay get svc
 sudo k3s kubectl -n otp-relay get ingress -o wide
 sudo k3s kubectl -n otp-relay get pvc
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path'
 sudo k3s kubectl -n kube-system get svc traefik -o wide
 curl -k https://srvotptest26.init-db.lan/healthz
 curl -k https://srvotptest26.init-db.lan/readyz
@@ -627,16 +672,29 @@ sudo k3s kubectl -n otp-relay logs deployment/otp-redis-sentinel --tail=100
 sudo k3s kubectl -n otp-relay logs deployment/otp-redis-haproxy --tail=100
 ```
 
-### NFS write fails after deployment
+### NFS-backed workloads fail after deployment or NFS restart
 
-Check PVC and permissions:
+First verify that `.env` and the live NFS PVs point to the same server:
+
+```bash
+cd /opt/k8s-ansible
+
+grep '^NFS_SERVER=' .env
+
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
+```
+
+If Redis pods are `Running` but `0/1 Ready`, relay pods return readiness `503`, or the problem started after the NFS VM restarted or changed address, treat an NFS server mismatch as a primary check.
+
+If the NFS server values are correct, then check PVC state and permissions:
 
 ```bash
 sudo k3s kubectl -n otp-relay describe pvc otp-relay-data
 sudo k3s kubectl -n otp-relay exec deployment/otp-relay -- ls -l /app/data
 ```
 
-On the NFS server, verify ownership and permissions for the UID/GID expected by the container.
+On the NFS server, verify that the export is active and that ownership and permissions match the UID/GID expected by the container.
 
 ### Redis StatefulSet apply fails
 
@@ -704,6 +762,8 @@ Use this as a lightweight checklist. Detailed destructive validation belongs in 
 - [ ] Kubernetes resources apply cleanly.
 - [ ] Redis StatefulSet is not destructively recreated during normal update.
 - [ ] NFS PVC is Bound.
+- [ ] `.env` `NFS_SERVER` matches the live `spec.nfs.server` value of every OTP Relay and Redis NFS PV.
+- [ ] The NFS endpoint is stable and is not dependent on a changing DHCP address.
 - [ ] App can write to `/app/data`.
 - [ ] Monitor can read `/app/data/audit.log`.
 - [ ] `/healthz` returns 200.
