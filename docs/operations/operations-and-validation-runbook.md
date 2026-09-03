@@ -34,6 +34,7 @@ Portal ingress:     srvotptest26.init-db.lan
 Grafana ingress:    grafana-srvotptest26.init-db.lan
 Traefik LB IP:      172.31.11.121
 Storage:            NFS-backed RWX /app/data
+NFS server:         172.31.11.131 (stable static endpoint)
 Redis:              Redis StatefulSet with Sentinel and HAProxy
 App replicas:       multiple app replicas when Redis is required
 Monitor:            isolated pod, no Service, no Ingress
@@ -60,6 +61,8 @@ sudo k3s kubectl get pods -n otp-relay -o wide
 sudo k3s kubectl get svc -n otp-relay -o wide
 sudo k3s kubectl get ingress -n otp-relay -o wide
 sudo k3s kubectl get pvc -n otp-relay
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
 sudo /usr/local/bin/otp-relayk3s-monitor.sh
 ```
 
@@ -131,6 +134,42 @@ Both names should resolve to the Traefik LoadBalancer IP unless a different expo
 
 ## Application storage checks
 
+The current NFS endpoint is expected to be stable at:
+
+```text
+172.31.11.131
+```
+
+First compare the repository configuration with the live NFS-backed PVs:
+
+```bash
+cd /opt/k8s-ansible
+
+grep '^NFS_SERVER=' .env
+
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
+```
+
+For the current OTP Relay deployment, these NFS-backed PVs should all use the same server as `.env`:
+
+```text
+otp-relay-data-nfs-pv
+otp-redis-0-nfs-pv
+otp-redis-1-nfs-pv
+otp-redis-2-nfs-pv
+```
+
+Changing `NFS_SERVER` in `.env` does not rewrite an already-bound PV. A difference between `.env` and any live `spec.nfs.server` value is configuration drift and should be treated as a storage fault until resolved.
+
+The repository health check performs this comparison automatically:
+
+```bash
+cd /opt/k8s-ansible
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+bash scripts/cluster-health-check.sh
+```
+
 Check PV and PVC state:
 
 ```bash
@@ -184,6 +223,39 @@ WRITE_OK
 
 Do not delete the PVC or NFS data during normal updates.
 
+### NFS restart or address-change symptoms
+
+If the NFS VM has restarted or changed address, check storage endpoint consistency before restarting or deleting Kubernetes resources.
+
+A characteristic failure pattern is:
+
+```text
+otp-redis-0   0/1 Running
+otp-redis-1   0/1 Running
+otp-redis-2   0/1 Running
+otp-relay     0/1 Running
+```
+
+with readiness/liveness failures while Sentinel or HAProxy may still appear healthy.
+
+Check:
+
+```bash
+cd /opt/k8s-ansible
+
+grep '^NFS_SERVER=' .env
+
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
+
+sudo k3s kubectl get pods -n otp-relay -o wide
+sudo k3s kubectl get events -n otp-relay --sort-by=.lastTimestamp | tail -40
+```
+
+If the live PVs point to an NFS address that is no longer reachable, restore the intended stable NFS endpoint first. Do not delete PVs or PVCs as the first recovery action.
+
+After NFS reachability is restored, allow Kubernetes to recover normally. If an individual Redis container remains wedged, recreate Redis pods one at a time and wait for each pod to become Ready before moving to the next.
+
 ---
 
 ## Redis, Sentinel, and HAProxy checks
@@ -221,10 +293,13 @@ sudo k3s kubectl -n otp-relay exec "$SENTINEL_POD" -- \
 Check logs when Redis readiness or OTP state looks unhealthy:
 
 ```bash
+sudo k3s kubectl logs -n otp-relay otp-redis-0 --tail=100
 sudo k3s kubectl logs -n otp-relay deployment/otp-redis-sentinel --tail=100
 sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=100
 sudo k3s kubectl logs -n otp-relay deployment/otp-relay --tail=100
 ```
+
+If Redis pods are `Running` but not `Ready`, especially after an NFS VM restart, verify the live NFS PV server values before treating the problem as a Redis topology failure.
 
 The app should use the Redis HAProxy service, not individual Redis pod IPs:
 
@@ -512,7 +587,8 @@ If the repo contains an automated resilience validation script, start with its s
 | Portal not loading | Traefik service, portal Ingress, app service, app pods, `/healthz`, `/readyz` |
 | Grafana not loading | Observability Ingress, Host header, DNS, Grafana pod, Grafana service |
 | Bare IP opens portal instead of Grafana | Expected when Grafana uses host-based Ingress |
-| `/readyz` fails | Redis, HAProxy, Sentinel, app logs |
+| `/readyz` fails | Redis, HAProxy, Sentinel, app logs; if Redis is not Ready, also verify NFS PV server consistency |
+| Redis pods `Running` but `0/1 Ready` after NFS restart | `.env` `NFS_SERVER`, live PV `spec.nfs.server`, NFS reachability, recent events |
 | OTP not appearing | Claim state, iPhone SMS, Shortcut URL/token, Redis, app logs |
 | User login fails | `users.xlsx`, token format, app logs, audit log |
 | Monitor missing alerts | monitor pod, phone IP/interface, Telegram config, monitor logs |
@@ -536,6 +612,8 @@ sudo k3s kubectl logs -n otp-relay deployment/otp-redis-haproxy --tail=200
 sudo k3s kubectl get pods -n observability -o wide
 sudo k3s kubectl get ingress -A -o wide
 sudo k3s kubectl get svc -A -o wide
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
 sudo k3s kubectl get events -n otp-relay --sort-by=.lastTimestamp
 ```
 
@@ -550,6 +628,9 @@ sudo k3s kubectl get nodes -o wide
 sudo k3s kubectl get pods -A -o wide
 sudo k3s kubectl get ingress -A -o wide
 sudo k3s kubectl get svc -A -o wide
+grep '^NFS_SERVER=' /opt/k8s-ansible/.env
+sudo k3s kubectl get pv \
+  -o custom-columns='PV:.metadata.name,STATUS:.status.phase,NFS_SERVER:.spec.nfs.server,NFS_PATH:.spec.nfs.path,CLAIM:.spec.claimRef.name'
 sudo k3s kubectl get events -A --sort-by=.lastTimestamp | tail -80
 ```
 
