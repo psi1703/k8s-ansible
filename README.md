@@ -212,14 +212,15 @@ bash scripts/sync-repo.sh
 
 Repository sync may fetch GitHub and hard reset the local checkout to the configured branch while preserving runtime/generated files. It must not deploy the app, run Helm, apply Kubernetes manifests, install K3s, import images, or call the installer.
 
-### Pre-install or troubleshooting check
+### Post-install or troubleshooting health check
 
 ```bash
 cd /opt/k8s-ansible
-bash setup.sh --doctor
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+bash scripts/cluster-health-check.sh
 ```
 
-`--doctor` is intended to check repository layout, script syntax, `.env` consistency, local K3s state, generated inventory, worker SSH reachability when inventory exists, storage/TLS/Ingress placeholders, and required host commands. It should not create `.env`, provision workers, install K3s, run Ansible, apply manifests, or mutate cluster state.
+The health check validates the live Kubernetes stack, workload readiness, shared PVC/NFS state, Redis/Sentinel/HAProxy behavior, portal readiness, observability components, and repository syntax/rendering checks. It also compares `.env` `NFS_SERVER` with the live NFS-backed PV server values so configuration drift is reported explicitly.
 
 ### Normal install or update
 
@@ -264,7 +265,7 @@ TLS_ROTATE_SELF_SIGNED="0"
 
 PVC_STORAGE_CLASS="otp-relay-nfs"
 NFS_ENABLED="1"
-NFS_SERVER="nfs-vm"
+NFS_SERVER="172.31.11.131"
 NFS_PATH="/export/otp-relay-data"
 NFS_STORAGE_CLASS="otp-relay-nfs"
 
@@ -372,7 +373,9 @@ bash scripts/cluster-health-check.sh
 - Redis is required for the current multi-replica app design.
 - Redis requires three Redis-eligible nodes when three replicas and hard spreading are enabled.
 - Normal updates must not destructively recreate Redis StatefulSet or Redis PVC resources.
-- NFS should use a stable hostname such as `nfs-vm`, not a changing DHCP IP.
+- NFS must use a stable endpoint; the current environment uses static address `172.31.11.131`.
+- Do not point NFS-backed PVs at a changing DHCP address.
+- Changing `NFS_SERVER` in `.env` does not rewrite already-bound Kubernetes PVs; verify live PV `spec.nfs.server` values before changing the NFS endpoint.
 - The monitor must remain internal only: no Service and no Ingress.
 - Telegram is the active monitor alerting path.
 - `frontend/app.jsx` is the frontend source; `frontend/app.js` is generated.
