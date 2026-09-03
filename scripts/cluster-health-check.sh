@@ -315,6 +315,63 @@ check_service_endpoints "$NAMESPACE" "$HAPROXY_SERVICE" "Redis HAProxy"
 
 section "Shared PVC / NFS validation"
 run kubectl -n "$NAMESPACE" get pvc -o wide
+
+# Compare the configured NFS endpoint in .env with every live NFS-backed PV
+# claimed by the OTP Relay namespace. This catches the case where .env was
+# changed after PV creation but the already-bound PVs still point to an older
+# NFS server address.
+ENV_FILE="$REPO/.env"
+CONFIGURED_NFS_SERVER=""
+
+if [ ! -f "$ENV_FILE" ]; then
+  problem "repository environment file missing: $ENV_FILE"
+else
+  CONFIGURED_NFS_SERVER="$(
+    awk '
+      /^[[:space:]]*NFS_SERVER[[:space:]]*=/ {
+        value=$0
+        sub(/^[[:space:]]*NFS_SERVER[[:space:]]*=[[:space:]]*/, "", value)
+        sub(/[[:space:]]*#.*/, "", value)
+        gsub(/^[[:space:]'"'"'"]+/, "", value)
+        gsub(/[[:space:]'"'"'"]+$/, "", value)
+        print value
+        exit
+      }
+    ' "$ENV_FILE"
+  )"
+
+  if [ -z "$CONFIGURED_NFS_SERVER" ]; then
+    problem "NFS_SERVER is missing or empty in $ENV_FILE"
+  else
+    echo "Configured .env NFS_SERVER=$CONFIGURED_NFS_SERVER"
+
+    LIVE_NFS_PV_ROWS="$(
+      kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.claimRef.namespace}{"|"}{.spec.claimRef.name}{"|"}{.spec.nfs.server}{"|"}{.spec.nfs.path}{"\n"}{end}' 2>/dev/null || true
+    )"
+
+    NAMESPACE_NFS_PV_COUNT=0
+    while IFS='|' read -r pv_name claim_ns claim_name live_server live_path; do
+      [ -n "$pv_name" ] || continue
+      [ "$claim_ns" = "$NAMESPACE" ] || continue
+      [ -n "$live_server" ] || continue
+
+      NAMESPACE_NFS_PV_COUNT=$((NAMESPACE_NFS_PV_COUNT + 1))
+      echo "Live NFS PV: pv=$pv_name claim=$claim_name server=$live_server path=$live_path"
+
+      if [ "$live_server" != "$CONFIGURED_NFS_SERVER" ]; then
+        problem "NFS server mismatch: .env NFS_SERVER=$CONFIGURED_NFS_SERVER but PV $pv_name (claim $claim_name) uses $live_server"
+      fi
+    done <<< "$LIVE_NFS_PV_ROWS"
+
+    if [ "$NAMESPACE_NFS_PV_COUNT" -eq 0 ]; then
+      problem "no live NFS-backed PVs found for namespace $NAMESPACE"
+    else
+      echo "Checked $NAMESPACE_NFS_PV_COUNT live NFS-backed PV(s) against .env NFS_SERVER."
+    fi
+  fi
+fi
+
+APP_PVC="$(kubectl -n "$NAMESPACE" get pvc otp-relay-data -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
 APP_PVC="$(kubectl -n "$NAMESPACE" get pvc otp-relay-data -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
 if [ -z "$APP_PVC" ]; then
   problem "app shared PVC missing: otp-relay-data"
