@@ -269,6 +269,55 @@ otp-relay ingress host = srvotptest26.init-db.lan
 grafana ingress host = grafana-srvotptest26.init-db.lan
 ```
 
+### DEV versus PROD Grafana access
+
+The repository's intended production access model is DNS-based for both OTP Relay and Grafana:
+
+```text
+PRODUCTION
+
+OTP Relay DNS
+  -> Traefik / MetalLB
+  -> OTP Relay Ingress
+  -> OTP Relay service
+
+Grafana DNS
+  -> Traefik / MetalLB
+  -> Grafana Ingress
+  -> Grafana service
+```
+
+Production DNS records are managed externally and should resolve the approved OTP Relay and Grafana hostnames to the production Traefik/MetalLB address.
+
+The current DEV environment has one deliberate exception: the Windows client used for testing cannot resolve the DEV Grafana hostname and cannot use a temporary hosts-file entry. For DEV only, Grafana may therefore be exposed through a separate direct `LoadBalancer` Service with its own MetalLB address.
+
+Current DEV access model:
+
+```text
+DEV
+
+OTP Relay
+  srvotptest26.init-db.lan
+  -> Traefik / MetalLB 172.31.11.121
+  -> OTP Relay Ingress
+
+Grafana
+  http://172.31.11.122
+  -> DEV-only grafana-direct LoadBalancer Service
+  -> Grafana pod/service
+```
+
+Important production rule:
+
+```text
+The DEV-only grafana-direct LoadBalancer is a local testing workaround.
+Do not treat it as the production Grafana exposure model.
+Do not copy the DEV Grafana IP into production configuration.
+Production must use the IT-provided Grafana DNS name through Traefik Ingress.
+```
+
+The existing Grafana Ingress should remain in the repository because it is the production path. The DEV direct-IP path is supplementary only and should not replace the hostname-based Ingress design.
+
 ---
 
 ## TLS posture
@@ -770,7 +819,8 @@ Use this as a lightweight checklist. Detailed destructive validation belongs in 
 - [ ] `/readyz` returns 200 with Redis healthy.
 - [ ] Monitor health script reports OK.
 - [ ] Portal hostname resolves to the Traefik/MetalLB IP.
-- [ ] Grafana hostname resolves to the Traefik/MetalLB IP or an approved direct Grafana LoadBalancer IP.
+- [ ] In production, Grafana hostname resolves to the production Traefik/MetalLB IP and Grafana is accessed through Ingress.
+- [ ] Any DEV-only `grafana-direct` LoadBalancer/IP workaround is excluded from production configuration.
 - [ ] Telegram alerting configuration is present when alerts are expected.
 - [ ] OTP business-flow validation is completed before production sign-off.
 - [ ] IT certificate/DNS work is completed or explicitly tracked as pending.
